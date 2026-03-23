@@ -300,7 +300,9 @@ def getDetrFit(
     columns = north + east + up + info
 
     # grab the station name from the station.cfg file
-    sta_name = config.getStationInfo(sta)["station"]["station_name"]
+    # Use station_name if available, otherwise fall back to station_id or station code
+    station_info = config.getStationInfo(sta)["station"]
+    sta_name = station_info.get("station_name", station_info.get("station_id", sta))
 
     # initialize the table as an array with nan values
     data = [[np.nan] * 15 + [sta_name, np.nan, np.nan, np.nan, np.nan]]
