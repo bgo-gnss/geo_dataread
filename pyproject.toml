@@ -12,10 +12,15 @@ requires-python = ">=3.13"
 dependencies = [
     "geofunc@git+https://github.com/bennigo/geofunc.git",
     "gps_parser@git+https://github.com/bennigo/gps_parser.git",
-    # "gtimes@git+https://github.com/bennigo/gtimes.git"
+    "gtimes>=0.5.1",
+    "numpy>=2.1",
+    "pandas>=2.2",
     "pyproj>=3.7.1",
     "scipy>=1.16.0",
 ]
+
+[dependency-groups]
+dev = ["pytest>=8.3", "pytest-cov>=6.0"]
 
 [project.scripts]
 geo-dataread = "geo_dataread:main"
