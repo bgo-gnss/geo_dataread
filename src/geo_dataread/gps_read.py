@@ -17,8 +17,10 @@ from typing import List, Optional, Union
 import geofunc.geofunc as gf
 import numpy as np
 import pandas as pd
+from gps_analysis import baseline as ga_baseline
 from gps_analysis import fitting as ga_fitting
 from gps_analysis import models as ga_models
+from gps_analysis import preprocess as ga_preprocess
 from gps_analysis.models import TrajectoryParams
 from gps_parser import ConfigParser
 
@@ -1463,20 +1465,22 @@ def dPeriod(yearf, data, Ddata, startyear=None, endyear=None):
         data:  Data within the period defined by startyear and endyear
         Ddata: Data within the period defined by startyear and endyear
 
+    Note:
+        Deprecated shim (refactor-B slice 2): the window math lives in
+        :func:`gps_analysis.baseline.slice_window` (same delete
+        conditions, ±0.001 yr tolerance). Legacy semantics preserved
+        exactly: falsy bounds (``None``/0) are open, and with both
+        bounds open the inputs are returned unchanged (same objects).
     """
-    if startyear:
-        index = np.where(yearf <= startyear - 0.001)
-        yearf = np.delete(yearf, index)
-        data = np.delete(data, index, 1)
-        Ddata = np.delete(Ddata, index, 1)
+    if not startyear and not endyear:
+        return yearf, data, Ddata
 
-    if endyear:
-        index = np.where(yearf >= endyear + 0.001)
-        yearf = np.delete(yearf, index)
-        data = np.delete(data, index, 1)
-        Ddata = np.delete(Ddata, index, 1)
-
-    return yearf, data, Ddata
+    mask = ga_baseline.slice_window(
+        yearf,
+        start=startyear if startyear else None,
+        end=endyear if endyear else None,
+    )
+    return yearf[mask], data[:, mask], Ddata[:, mask]
 
 
 def vshift(yearf, data, Ddata, uncert=20.0, refdate=None, Period=5, offset=None):
@@ -1500,26 +1504,47 @@ def vshift(yearf, data, Ddata, uncert=20.0, refdate=None, Period=5, offset=None)
         data:  Data
         Ddata: Data uncertainty
 
+    Note:
+        Deprecated shim (refactor-B slice 2): the math lives in
+        :func:`gps_analysis.preprocess.prep_neu_series` — the
+        **.NEU/gamittoNEU profile** (decision D1; ``gamittoNEU``
+        hardcodes ``uncert=1.1``, pinned by the ``real_neu_*`` golden
+        masters). The legacy ``refdate``/``Period`` pair is converted
+        to a fractional-year reference window here (date handling is
+        caller policy, not leaf math). Degenerate-branch crashes
+        (``TypeError`` on all-screened data with no offset, the
+        ``NameError`` extrapolation branch) are now an explicit
+        ``ValueError`` from the leaf.
     """
+    ref_start, ref_end = _refdate_window(refdate, Period)
+    if refdate:
+        return ga_preprocess.prep_neu_series(
+            yearf,
+            data,
+            Ddata,
+            max_sigma=uncert,
+            offset=offset,
+            ref_start=ref_start,
+            ref_end=ref_end,
+        )
+    return ga_preprocess.prep_neu_series(
+        yearf, data, Ddata, max_sigma=uncert, offset=offset, ref_samples=Period
+    )
 
-    # Filtering a little, removing big outliers
-    with np.errstate(invalid="ignore"):
-        filt = Ddata < uncert
-    filt = np.logical_and(np.logical_and(filt[0, :], filt[1, :]), filt[2, :])
 
-    yearf = yearf[filt]
-    data = np.reshape(data[np.array([filt, filt, filt])], (3, -1))
-    Ddata = np.reshape(Ddata[np.array([filt, filt, filt])], (3, -1))
+def _refdate_window(refdate, Period):
+    """Convert the legacy refdate/Period pair to a fractional-year window.
 
-    if data.any():
-        if not (offset is None):
-            pass
-        else:
-            offset = estimate_offset(yearf, data, Ddata, refdate=refdate, Period=Period)
-
-    data = np.array([data[i, :] - offset[i] for i in range(3)])
-
-    return yearf, data, Ddata, offset
+    Returns ``(None, None)`` when no refdate is given (count mode); a
+    negative ``Period`` counts backwards from ``refdate`` (legacy swap).
+    """
+    if not refdate:
+        return None, None
+    startdate = currYearfDate(0, refdate)
+    enddate = currYearfDate(Period, refdate)
+    if Period < 0:
+        return enddate, startdate
+    return startdate, enddate
 
 
 def estimate_offset(yearf, data, Ddata, refdate=None, Period=5):
@@ -1527,32 +1552,22 @@ def estimate_offset(yearf, data, Ddata, refdate=None, Period=5):
     Estimating offset of a time series at a reference (refdate) point for a given interval (Period)
     defaults at 5 days at the start of the time series
 
+    Note:
+        Deprecated shim (refactor-B slice 2): the math lives in
+        :func:`gps_analysis.baseline.estimate_offset` (1/σ-weighted
+        mean; window mode for ``refdate``, first-``Period``-samples
+        count mode otherwise). The legacy empty-window branch (a
+        ``NameError`` on an undefined variable) is an explicit
+        ``ValueError`` in the leaf.
     """
-
-    # averaging the first period days
+    ref_start, ref_end = _refdate_window(refdate, Period)
     if refdate:
-        startdate = currYearfDate(0, refdate)
-        enddate = currYearfDate(Period, refdate)
-        if Period < 0:
-            tmpyearf, tmpdata, tmpDdata = dPeriod(
-                yearf, data, Ddata, enddate, startdate
-            )
-        else:
-            tmpyearf, tmpdata, tmpDdata = dPeriod(
-                yearf, data, Ddata, startdate, enddate
-            )
-
-        if tmpdata.any():
-            # if there are any data from this period
-            offset = np.average(tmpdata[0:3, :], 1, weights=1 / tmpDdata[0:3, :])
-        else:
-            # We need to extrapolate
-            # þarf að díla við þetta með því að módelera.
-            offset = np.average(data[0:3, 0:j], 1, weights=1 / Ddata[0:3, 0:7])
-    else:
-        offset = np.average(data[0:3, 0:Period], 1, weights=1 / Ddata[0:3, 0:Period])
-
-    return offset
+        return ga_baseline.estimate_offset(
+            yearf, data, Ddata, start=ref_start, end=ref_end
+        )
+    return ga_baseline.estimate_offset(
+        yearf[0:Period], data[0:3, 0:Period], Ddata[0:3, 0:Period]
+    )
 
 
 def iprep(yearf, data, Ddata, uncert=20.0, offset=None):
@@ -1574,12 +1589,23 @@ def iprep(yearf, data, Ddata, uncert=20.0, offset=None):
         data:  Data
         Ddata: Data uncertainty
 
+    Note:
+        Deprecated shim (refactor-B slice 2): the math lives in
+        :func:`gps_analysis.preprocess.prep_plot_series` — the
+        **plot/getData profile** (decision D1; ``getData`` passes
+        ``uncert=15``). The m→mm conversion is unit policy and stays
+        here — INCLUDING its legacy side effect of scaling the caller's
+        ``data``/``Ddata`` arrays IN PLACE. The returned ``offset`` (in
+        mm, weighted mean of the first 5 kept samples unless supplied)
+        is the offset-reuse contract ``getData`` exposes to callers.
     """
 
-    # converting to mm
+    # converting to mm (in place — legacy contract preserved)
     data *= 1000
     Ddata *= 1000
-    return vshift(yearf, data, Ddata, uncert=uncert, offset=offset)
+    return ga_preprocess.prep_plot_series(
+        yearf, data, Ddata, max_sigma=uncert, offset=offset
+    )
 
 
 def filt_outl(yearf, data, Ddata, pb, errfunc, outlier):
