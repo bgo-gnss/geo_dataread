@@ -3,12 +3,9 @@ This module contains functions for reading and returning GPS data. It includes t
 
 """
 
-import datetime as dt
-import glob
 import logging
 import os
 import re
-import shutil
 import sys
 from collections import OrderedDict
 from pathlib import Path
@@ -17,6 +14,11 @@ from typing import List, Optional, Union
 import geofunc.geofunc as gf
 import numpy as np
 import pandas as pd
+from gps_analysis import baseline as ga_baseline
+from gps_analysis import fitting as ga_fitting
+from gps_analysis import models as ga_models
+from gps_analysis import preprocess as ga_preprocess
+from gps_analysis.models import TrajectoryParams
 from gps_parser import ConfigParser
 
 from gtimes.timefunc import (
@@ -26,9 +28,6 @@ from gtimes.timefunc import (
     currYearfDate,
     round_to_hour,
 )
-from scipy import optimize
-
-import geo_dataread.gps_read as gdrgps
 
 #
 # time series filtering
@@ -197,64 +196,6 @@ def secondorder(x, p0, p1, p2):
     return p0 + p1 * x + p2 * x**2
 
 
-def gpsvelo_df():
-    """
-    dataframe for pygmt velo with three extra columns
-    for date, period and boolean for vertical component.
-    this is based on the output of the gpsvelo function, which estimates the gps velocity for a specific period of time.
-
-    examples:
-        >>> gpsvelo_df()
-
-    returns:
-        gpsvelo: dataframe
-
-
-    """
-
-    gpsvelo = pd.dataframe(
-        columns=[
-            "longitude",
-            "latitude",
-            "east_velo",
-            "north_velo",
-            "east_sigma",
-            "north_sigma",
-            "coorelation_en",
-            "station",
-            "date",
-            "period",
-            "vertical",
-        ],
-    )
-
-    return gpsvelo
-
-
-def gpsvelo(sta: str, ll, vel, vertical=False, vfile=None, pheader=False):
-    """
-    return gps velocities gmt velo
-
-    examples:
-        >>> gpsvelo()
-
-    args:
-        sta: station name
-        ll: [longitude, latitude]
-        vertical: boolean to describe
-        vfile: velocity file
-        pheader: header
-
-    returns:
-        gpsvelo: dataframe
-
-    """
-
-    gpsvelo = "{0:5.6f} {1:5.6f}\t{2:7.2f} {5:7.2f}\t{3:7.2f} {6:7.2f}\t{4:7.2f} {7:7.2f}\t\t{8:s}".format(
-        ll[1], ll[0], vel[0], vel[1], vel[2], vel[3], vel[4], vel[5], sta
-    )
-
-
 def getDetrFit(
     sta: str,
     useSTA=None,
@@ -276,6 +217,17 @@ def getDetrFit(
         onlyperiodic: boolean
         detrfile: detrending file name, csv format
     """
+
+    if useFIT == "periodic":
+        # Deliberate dead-branch removal (refactor-B slice 4, decision D4):
+        # the periodic-borrowing branch never worked — downstream
+        # read_gps_data crashed with KeyError('Fit') on the detrend-CSV
+        # column-case mismatch. Replaced with an explicit error.
+        raise ValueError(
+            "unsupported useFIT='periodic': the periodic-borrowing branch was "
+            "dead (it crashed with KeyError('Fit')) and was removed in the "
+            "refactor-B slice-4 cleanup; use 'lineperiodic' or 'line'"
+        )
 
     # create an instance for the configparser
     config = ConfigParser()
@@ -342,11 +294,7 @@ def getDetrFit(
         const.loc[sta, ["useSTA", "fit"]] = useSTA, useFIT
 
         # set the fit constants
-        if useFIT == "periodic":
-            const.loc[sta, north[1:] + east[1:] + up[1:]] = table.loc[
-                useSTA, north[1:] + east[1:] + up[1:]
-            ]
-        elif useFIT == "lineperiodic":
+        if useFIT == "lineperiodic":
             const.loc[sta, north + east + up] = table.loc[useSTA, north + east + up]
         elif useFIT == "line":
             const.loc[sta, north[:1] + east[:1] + up[:1]] = table.loc[
@@ -493,22 +441,37 @@ def fitDataFrame(func, df, p0=[None, None, None]):
 
 
 def fittime(func, x, y, yd=None, p0=None):
-    """ """
-    pb, pcov = optimize.curve_fit(func, x, y, p0=p0, sigma=yd, maxfev=100000)
+    """Deprecated shim: single-component fit.
 
-    return pb, pcov
+    The math lives in :func:`gps_analysis.fitting.fit_components`
+    (refactor-B slice 1); this wrapper keeps the legacy name/signature and
+    the legacy ``maxfev=100000``. Bit-identical to the old direct
+    ``scipy.optimize.curve_fit`` call (same invocation).
+    """
+    fit = ga_fitting.fit_components(func, x, y, sigma=yd, p0=p0, maxfev=100000)[0]
+
+    return fit.params, fit.covariance
 
 
 def fittimes(func, x, y, yd=[None, None, None], p0=[None, None, None]):
-    """ """
+    """Deprecated shim: per-component (N/E/U) fit loop.
+
+    The math lives in :func:`gps_analysis.fitting.fit_components`
+    (refactor-B slice 1); this wrapper keeps the legacy name/signature,
+    the legacy ``maxfev=100000``, the (pb, pcov) list-of-3 return shape,
+    and the legacy per-component ``p0``/``yd`` semantics (each entry may
+    independently be None). Bit-identical to the old loop — the underlying
+    ``scipy.optimize.curve_fit`` invocation is unchanged.
+    """
 
     pb = [[], [], []]
     pcov = [[], [], []]
 
     for i in range(3):
-        pb[i], pcov[i] = optimize.curve_fit(
-            func, x, y[i], p0=p0[i], sigma=yd[i], maxfev=100000
-        )
+        fit = ga_fitting.fit_components(
+            func, x, y[i], sigma=yd[i], p0=p0[i], maxfev=100000
+        )[0]
+        pb[i], pcov[i] = fit.params, fit.covariance
 
     return pb, pcov
 
@@ -635,71 +598,6 @@ def gamittoFile(neudata, outfile, mm=True, ref="plate", dstring=None, outformat=
         f.close()
 
 
-def savedisp(datadict, fname=None, header=""):
-    """
-    this function saves a dictionary of data to a file
-
-    examples:
-        >>> savedisp(datadict, fname=None, header="")
-
-    args:
-        datadict: dictionary of data
-        fname: file name
-        header: header of the file
-
-    returns:
-        output file
-
-    """
-
-    valtype = type(datadict.values()[0])
-
-    datadict = ordereddict(sorted(datadict.items()))
-
-    if (valtype is list) or (valtype is np.ndarray):
-        fmt = "% 3.8f\t% 2.8f\t% 2.8f\t%s"  # format
-
-        ab = np.zeros(
-            len(datadict.keys()),
-            dtype=[
-                ("var1", "float"),
-                ("var2", "float"),
-                ("var3", "float"),
-                ("var4", "a4"),
-            ],
-        )
-
-        ab["var1"] = np.squeeze(datadict.values())[:, 0]
-        ab["var2"] = np.squeeze(datadict.values())[:, 1]
-        ab["var3"] = np.squeeze(datadict.values())[:, 2]
-        ab["var4"] = datadict.keys()
-
-    # formatting tuples into a dictionary of arrays
-    if valtype is tuple:
-        fmt = "% 3.8f\t% 2.8f\t% 2.8f\t%2.8f\t%2.8f\t%s"
-        ab = np.zeros(
-            len(datadict.keys()),
-            dtype=[
-                ("var1", "float"),
-                ("var2", "float"),
-                ("var3", "float"),
-                ("var4", "float"),
-                ("var5", "float"),
-                ("var6", "a4"),
-            ],
-        )
-        ab["var1"] = np.squeeze(zip(*datadict.values()[:])[0])[:, 0]
-        ab["var2"] = np.squeeze(zip(*datadict.values()[:])[0])[:, 1]
-        ab["var3"] = np.squeeze(zip(*datadict.values()[:])[1])[:, 0]
-        ab["var4"] = np.squeeze(zip(*datadict.values()[:])[1])[:, 1]
-        ab["var5"] = np.squeeze(zip(*datadict.values()[:])[1])[:, 2]
-        ab["var6"] = datadict.keys()
-
-    if fname:
-        np.savetxt(fname, ab, fmt=fmt, header=header)
-    return ab
-
-
 def extractfromgamitbakf(cfile, stations):
     """
     function to extract data from a gamit .bak file
@@ -735,9 +633,22 @@ def openGlobkTimes(sta, Dir=None, tType="TOT"):
     dir is the directory containing the time series if left blank the default path will be the path
     defined in the config file postprossesing.cfg, totDir
 
+    Any GLOBK processing scheme whose files follow the
+    ``mb_<STA>_<tType>.dat{1,2,3}`` naming convention can be read: ``TOT``
+    (24 h daily solutions), ``08h`` (8-hourly solutions, ~3 epochs/day,
+    revived in refactor-B slice 6), and extensibly e.g. ``04h``. All schemes
+    share the identical file format — 3 header lines followed by
+    ``yearf value sigma`` rows — so no scheme needs special time handling:
+    sub-daily epochs are already encoded as fractional years.
+
     args:
         sta: station four letter short name in captial letters
         Dir: optional alternative directory of the gamit time series data.
+        tType: GLOBK processing scheme, i.e. the ``<tType>`` part of the
+            ``mb_<STA>_<tType>.dat{1,2,3}`` file names. Default "TOT"
+            (daily); "08h" reads the 8-hourly solutions. A scheme whose
+            files are absent raises FileNotFoundError (only ``tType="TOT"``
+            retains the legacy fallback to lowercase ``mb_<STA>_tot.dat*``).
 
     returns:
 
@@ -769,8 +680,17 @@ def openGlobkTimes(sta, Dir=None, tType="TOT"):
         os.path.join(Dir, filepre + "1")
     ):  # use dat1, dat2, dat3 as file format
         pass
-    else:  # use tot as file format to read in data
+    elif tType == "TOT":  # legacy fallback: lowercase tot as file format
         filepre = "mb_{0:s}_{1:s}.dat".format(sta, "tot")
+
+    if not os.path.isfile(os.path.join(Dir, filepre + "1")):
+        # a scheme whose files genuinely don't exist is rejected up front
+        # with a clear error instead of a bare np.loadtxt failure (and a
+        # non-TOT scheme is never silently substituted with TOT data).
+        raise FileNotFoundError(
+            "no GLOBK time series for station '{0}', scheme '{1}': "
+            "expected {2}{{1,2,3}} in {3}".format(sta, tType, filepre, Dir)
+        )
 
     # construct the file names for each component
     datafile1 = os.path.join(Dir, filepre + "1")
@@ -798,16 +718,6 @@ def openGlobkTimes(sta, Dir=None, tType="TOT"):
     # stack the arrays for the three components in the data array and for their uncertainties in ddata array
     data = np.vstack([d1, d2, d3])
     ddata = np.vstack([D1, D2, D3])
-
-    # option to grab 8hr subdaily solutions from the same path
-    if tType == "08h":
-        shift8h = dt.timedelta(**shiftime("h8"))
-        yearf = np.array(
-            [
-                timetoyearf(*(item + shift8h).timetuple()[:6])
-                for item in todatetime(yearf)
-            ]
-        )
 
     return yearf, data, ddata
 
@@ -886,395 +796,86 @@ def convGlobktopandas(yearf, data, Ddata):
     return data
 
 
-def compGlobkTimes(stalist="any", dirConFilePath=None, freq=None):
+def read_join(sta, schemes=("TOT", "08h"), Dir=None, missing="warn"):
     """
-    This function joins old and new mb_ time series files
+    Read a station's MULTIPLE GLOBK processing schemes into ONE DataFrame.
+
+    "JOIN" = joining different processing schemes (refactor-B slice 6
+    revival, decision D4): the daily TOT solutions and the sub-daily 08h
+    solutions (and extensibly e.g. 04h) are held together in one long-format
+    DataFrame, labeled by scheme, so they can be worked with jointly. This
+    is NOT a merge with overlap resolution — the schemes coexist; every
+    epoch of every scheme is kept, tagged with its scheme name.
+
+    Each scheme is read with openGlobkTimes (all schemes share the identical
+    mb_<STA>_<scheme>.dat{1,2,3} format — 3 header lines, then
+    ``yearf value sigma`` rows, sub-daily epochs already encoded as
+    fractional years), converted with convGlobktopandas, tagged, and
+    concatenated. Adding a new scheme is just listing it, e.g.
+    ``schemes=("TOT", "08h", "04h")``.
+
+    NOTE on getData(tType="JOIN"): that legacy alias is left unchanged — it
+    maps JOIN -> TOT and returns the (yearf, data, Ddata, offset) arrays.
+    read_join is the real JOIN: its natural return is a DataFrame (a
+    different shape), so it is a dedicated reader rather than a getData
+    mode.
 
     Examples:
-        >>> compGlobkTimes(stalist="any", dirConFilePath=None, freq=None)
+        >>> read_join("SENG")
+        >>> read_join("SENG", schemes=("TOT", "08h"), Dir="/mnt_data/gpsdata")
 
     Args:
-        stalist: list of station names in capital letters. If "any", all stations are used. Default is "any"
-        dirConFilePath: optional alternative Directory of the GAMIT time series data.
-        freq: optional frequency of the data. Default is None
+        sta: station four letter short name in capital letters
+        schemes: iterable of GLOBK processing-scheme names, i.e. the
+            ``<scheme>`` part of ``mb_<STA>_<scheme>.dat{1,2,3}``.
+            Default ("TOT", "08h"). A single-scheme list is the degenerate
+            JOIN (one label, same rows as the plain read).
+        Dir: optional alternative directory of the time series; default is
+            totDir from postprocess.cfg (same as openGlobkTimes).
+        missing: how to treat a scheme whose files don't exist —
+            "warn" (default): print a WARNING and skip the scheme;
+            "raise": re-raise the FileNotFoundError. If NO scheme yields
+            data, FileNotFoundError is always raised.
 
     Returns:
-        data:  three arrays containing GPS data in north, east and up
-
+        pandas DataFrame, sorted by time (stable — coincident epochs keep
+        the schemes order), with
+            Index [datetime]  (rounded to 1h, as convGlobktopandas)
+            north, east, up   [m]  raw GLOBK solution values
+            Dnorth, Deast, Dup [m] respective uncertainties
+            yearf             fractional year (e.g. 2014.62328)
+            scheme            processing-scheme label (e.g. "TOT", "08h")
     """
 
-    config = ConfigParser()
-
-    # totpath = config.getPostprocessConfig('totDir')
-
-    if dirConFilePath:  # for custom file
-        Dirs = parsedir(dirConFilePath)
-    else:  # grab paths from the postprocess.cfg file in gpsconfig directory that cparser reads into a dictionary
-        Dirs = {
-            "figDir": config.get_config("Configs", "figDir"),
-            "preDir": config.get_config("Configs", "preDir"),
-            "rapDir": config.get_config("Configs", "rapDir"),
-            "totDir": config.get_config("Configs", "totDir"),
-        }
-
-        print("Directory is \n", Dirs)
-
-    # Reading into a string the paths
-    PreDir = Dirs["preDir"]
-    RapDir = Dirs["rapDir"]
-    TotDir = Dirs["totDir"]
-
-    # Setting the frequency to TOT if freq is None
-    if freq == "TOT" or freq is None:
-        freq = "TOT"
-    else:  # setting the frequency
-        PreDir = PreDir + "_%s" % (freq)
-        RapDir = RapDir + "_%s" % (freq)
-
-    if stalist == "any":
-        FilePreL = os.path.join(PreDir, "mb_*.dat?")
-        FileRapL = os.path.join(RapDir, "mb_*.dat?")
-
-        List = glob.glob(FilePreL) + glob.glob(FileRapL)
-
-        # listing all stations in  the Rap and Pre directories
-        stalist = sorted(set([item[-13:-9] for item in List]))
-
-    # Set up names for files
-    for STA in stalist:
-        FilePre = "mb_%s_?PS.dat" % STA
-        OutFilePre = "mb_%s_GPS.dat" % STA
-        GPS20PS = "mb_%s_0PS.dat" % STA
-
-        for axes in range(1, 4):
-            FilePreR = os.path.join(PrePath, FilePre + "%s" % (axes,))
-            FileRapR = os.path.join(RapPath, FilePre + "%s" % (axes,))
-
-            # graping the list for files for for that station
-            PreFileL = glob.glob(FilePreR)  # listing files in the pre dir
-            RapFileL = glob.glob(FileRapR)  # listing files in th Rap dir
-
-            #  Sorting the file lists
-            PreFileL.sort()
-            if len(PreFileL) > 1:
-                PreFileL.insert(0, PreFileL.pop(-1))
-            RapFileL.sort()
-            if len(RapFileL) > 1:
-                RapFileL.insert(0, RapFileL.pop(-1))
-
-            TotFile = os.path.join(TotPath, "mb_%s_%s.dat%s" % (STA, freq, axes))
-
-            print("Concatenating all the %s data to %s" % (STA, TotFile))
-
-            if os.path.exists(TotFile):
-                os.remove(TotFile)
-
-            outf = open(TotFile, "a")
-
-            for fil in PreFileL:
-                print("Processing file %s " % fil, file=sys.stderr)
-                f = open(fil)
-                f.seek(61)
-                shutil.copyfileobj(f, outf)
-                f.close()
-
-            outf.close()
-
-            preexist = os.stat(TotFile).st_size != 0
-            if preexist:
-                outf = open(TotFile, "r")
-                lastline = outf.readlines()[-1]
-                lastline = lastline.split()
-                outf.close()
-
-            outf = open(TotFile, "a")
-            for file in RapFileL:
-                formatstr = "Processing file {0:s} ".format(file)
-                print(formatstr, file=sys.stderr)
-                rapfile = open(file, "r")
-                rapfile.seek(61)
-                lines = rapfile.readlines()
-                if preexist:
-                    lines = "".join(
-                        [line for line in lines if line.split()[0] > lastline[0]]
-                    )
-                else:
-                    lines = "".join([line for line in lines])
-
-            outf.close()
-
-
-def TieTimes(sta1, sta2, dirConFilePath=None, freq=None, tie=[None, None, None]):
-    """
-    This function joins old and new mb_ time series files
-
-    Examples:
-        >>> TieTimes(sta1, sta2, dirConFilePath=None, freq=None, tie=[None, None, None])
-
-    Args:
-        sta1: first station name in capital letters
-        sta2: second station name in capital letters
-        dirConFilePath: optional alternative Directory of the GAMIT time series data.
-        freq: optional frequency of the data. Default is None
-        tie: optional tie file. Default is [None, None, None]
-
-
-    """
-
-    config = ConfigParser()
-    # totpath = config.getPostprocessConfig('totpath')
-
-    if dirConFilePath:  # for custom file
-        Dirs = parsedir(dirConFilePath)
-    else:
-        # As the standard configparser works with dictionaries, use it to create the Dirs dictionaries
-        Dirs = {
-            "figDir": config.get_config("Configs", "figDir"),
-            "preDir": config.get_config("Configs", "preDir"),
-            "rapDir": config.get_config("Configs", "rapDir"),
-            "totDir": config.get_config("Configs", "totDir"),
-        }
-
-    # parse the paths from the Dirs dictionary
-    PreDir = Dirs["predDir"]
-    RapDir = Dirs["rapdDir"]
-    TotDir = Dirs["totdDir"]
-
-    # Setting the frequency to TOT if freq is None
-    if freq == "TOT" or freq is None:
-        freq = "TOT"
-    else:
-        PreDir = PreDir + "_%s" % (freq)
-        RapDir = RapDir + "_%s" % (freq)
-
-    # for all the stations, create the path for PreL and RapL files
-    if stalist == "any":
-        FilePreL = os.path.join(PreDir, "mb_*.dat?")
-        FileRapL = os.path.join(RapDir, "mb_*.dat?")
-
-        List = glob.glob(FilePreL) + glob.glob(FileRapL)
-
-        # listing all stations in  the Rap and Pre dir
-        stalist = sorted(set([item[-13:-9] for item in List]))
-
-    for STA in stalist:
-        FilePre = "mb_%s_?PS.dat" % STA
-        OutFilePre = "mb_%s_GPS.dat" % STA
-        GPS20PS = "mb_%s_0PS.dat" % STA
-
-        for axes in range(1, 4):
-            FilePreR = os.path.join(PrePath, FilePre + "%s" % (axes,))
-            FileRapR = os.path.join(RapPath, FilePre + "%s" % (axes,))
-
-            # graping the list for files for for that station
-            PreFileL = glob.glob(FilePreR)  # listing files in the pre dir
-            RapFileL = glob.glob(FileRapR)  # listing files in th Rap dir
-
-            #  Sorting the file lists
-            PreFileL.sort()
-            if len(PreFileL) > 1:
-                PreFileL.insert(0, PreFileL.pop(-1))
-            RapFileL.sort()
-            if len(RapFileL) > 1:
-                RapFileL.insert(0, RapFileL.pop(-1))
-
-            TotFile = os.path.join(TotPath, "mb_%s_%s.dat%s" % (STA, freq, axes))
-            print("Concating all the %s data to %s" % (STA, TotFile))
-            if os.path.exists(TotFile):
-                os.remove(TotFile)
-            outf = open(TotFile, "a")
-            for fil in PreFileL:
-                print("Processing file %s " % fil, file=sys.stderr)
-                f = open(fil)
-                f.seek(61)
-                shutil.copyfileobj(f, outf)
-                f.close()
-            outf.close()
-
-            preexist = os.stat(TotFile).st_size != 0
-            if preexist:
-                outf = open(TotFile, "r")
-                lastline = outf.readlines()[-1]
-                lastline = lastline.split()
-                outf.close()
-
-            outf = open(TotFile, "a")
-            for file in RapFileL:
-                formatstr = "Processing file {0:s} ".format(file)
-                print(formatstr, file=sys.stderr)
-                rapfile = open(file, "r")
-                rapfile.seek(61)
-                lines = rapfile.readlines()
-                if preexist:
-                    lines = "".join(
-                        [line for line in lines if line.split()[0] > lastline[0]]
-                    )
-                else:
-                    lines = "".join([line for line in lines])
-
-                outf.write(lines)
-                rapfile.close()
-
-            outf.close()
-
-
-# def TieTimes(sta1, sta2, dirConFilePath=None, freq=None, tie=[None, None, None]):
-#     """
-#     This function joins old and new mb_ time series files
-#
-#     Examples:
-#         >>> TieTimes(sta1, sta2, dirConFilePath=None, freq=None, tie=[None, None, None])
-#
-#     Args:
-#         sta1: first station name in capital letters
-#         sta2: second station name in capital letters
-#         dirConFilePath: optional alternative Directory of the GAMIT time series data.
-#         freq: optional frequency of the data. Default is None
-#         tie: optional tie file. Default is [None, None, None]
-#
-#     Returns:
-#         None
-#
-#
-#     """
-#
-#     if dirConFilePath:  # for custom file
-#         Dirs = parsedir(dirConFilePath)
-#     else:
-#         Dirs = cp.Parser().getPostprocessConfig()
-#
-#     # PrePath = Dirs['prePath'] - These paths are not used for now, but can be added later
-#     # RapPath = Dirs['rapPath'] - Same case as above
-#     TieFile = Dirs["tiefile"]
-#     TotPath = Dirs["totDir"]
-#
-#     if freq == "TOT" or freq is None:
-#         freq = "TOT"
-#     else:
-#         PrePath = PrePath + "_%s" % (freq)
-#         RapPath = RapPath + "_%s" % (freq)
-#
-#     print(TieFile)
-#
-#     dtype = [
-#         ("North", "<f8"),
-#         ("East", "<f8"),
-#         ("Up", "<f8"),
-#         ("sta1", "|S5"),
-#         ("sta2", "|S5"),
-#     ]
-#
-#     const = np.genfromtxt(TieFile, dtype=dtype)
-#     const = [i for i in const if i[3] == sta1 and i[4] == sta2]
-#     print(const)
-#
-#     for axes in range(1, 4):
-#         TotFile1 = os.path.join(TotDir, "mb_%s_%s.dat%s" % (sta1, freq, axes))
-#         TotFile2 = os.path.join(TotDir, "mb_%s_%s.dat%s" % (sta2, freq, axes))
-#         print("Concating all the %s data to %s" % (sta1, TotFile2))
-#         # outf = open(TotFile, 'r')
-#         data1 = read_table(
-#             TotFile1, sep=r"\s+", header=None, index_col=0, names=["disp", "uncert"]
-#         )
-#         data2 = pd.read_csv(
-#             TotFile2, sep=r"\s+", header=None, index_col=0, names=["disp", "uncert"]
-#         )
-#         print(const[0][axes - 1])
-#         data2["disp"] -= const[0][axes - 1] / 1000
-#         data = pd.concat([data1, data2])
-#
-#         outfile = os.path.join(TotDir, "mb_%s_%s.dat%s" % (sta2, "JON", axes))
-#         data.to_csv(outfile, sep="\t", index=True, header=False)
-
-
-def fitfuncl(p, x):
-    return p[0] * x + p[1]
-
-
-def errfuncl(p, x, y):
-    return fitfuncl(p, x) - y  # distance to the target function
-
-
-def fitfunc(p, x):
-    return (
-        p[0] * x
-        + p[1] * np.cos(2 * np.pi * x)
-        + p[2] * np.sin(2 * np.pi * x)
-        + p[3] * np.cos(4 * np.pi * x)
-        + p[4] * np.sin(4 * np.pi * x)
-        + p[5]
-    )
-
-
-def errfunc(p, x, y):
-    return fitfunc(p, x) - y  # Distance to the target function
-
-
-def fitline(yearf, data, STA):
-    """
-    This function fits a function through data points of a station STA
-
-    Examples:
-        >>> fitline(yearf, data, STA)
-
-    Args:
-        yearf: list of years
-        data: list of data
-        STA: station name
-
-    Returns:
-        parameters of the linear fitting
-
-
-    """
-
-    dtype = [
-        ("Nrate", "<f8"),
-        ("Erate", "<f8"),
-        ("Urate", "<f8"),
-        ("Nacos", "<f8"),
-        ("Nasin", "<f8"),
-        ("Eacos", "<f8"),
-        ("Easin", "<f8"),
-        ("Uacos", "<f8"),
-        ("Uasin", "<f8"),
-        ("Nscos", "<f8"),
-        ("Nssin", "<f8"),
-        ("Escos", "<f8"),
-        ("Essin", "<f8"),
-        ("Uscos", "<f8"),
-        ("Ussin", "<f8"),
-        ("shortname", "|S5"),
-        ("name", "|S20"),
-    ]
-
-    const = np.genfromtxt("itrf08det", dtype=dtype)
-    const = [i for i in const if i[15] == STA]
-
-    pN = [const[0][0]]
-    pE = [const[0][1]]
-    pU = [const[0][2]]
-    pN = [-1 * i for i in pN]
-    pE = [-1 * i for i in pE]
-    pU = [-1 * i for i in pU]
-    # pN.append(0)
-    # pE.append(0)
-    # pU.append(0)
-
-    # print "pN: %s" % p
-    # print "pE: %s" % pE
-    # print "pU: %s" % pU
-
-    pb = [[0, 0], [0, 0], [0, 0]]
-
-    # pb[0], success = optimize.leastsq(errfunc, pN[:], args=(yearf-yearf[0], data[0]))
-    # pb[1], success = optimize.leastsq(errfunc, pE[:], args=(yearf-yearf[0], data[1]))
-    # pb[2], success = optimize.leastsq(errfunc, pU[:], args=(yearf-yearf[0], data[2]))
-    pb[0], success = optimize.leastsq(errfuncl, pb[0], args=(yearf, data[0]))
-    pb[1], success = optimize.leastsq(errfuncl, pb[1], args=(yearf, data[1]))
-    pb[2], success = optimize.leastsq(errfuncl, pb[2], args=(yearf, data[2]))
-
-    return pN, pE, pU, pb
+    if missing not in ("warn", "raise"):
+        raise ValueError(
+            'missing must be "warn" or "raise", got {0!r}'.format(missing)
+        )
+
+    frames = []
+    for scheme in schemes:
+        try:
+            yearf, data, Ddata = openGlobkTimes(sta, Dir=Dir, tType=scheme)
+        except FileNotFoundError as e:
+            if missing == "raise":
+                raise
+            print("WARNING: skipping scheme {0!r} for station {1}: {2}".format(scheme, sta, e))
+            continue
+
+        frame = convGlobktopandas(yearf, data, Ddata)
+        frame["scheme"] = scheme
+        frames.append(frame)
+
+    if not frames:
+        raise FileNotFoundError(
+            "no GLOBK time series found for station '{0}' in any of the "
+            "schemes {1}".format(sta, tuple(schemes))
+        )
+
+    joined = pd.concat(frames)
+    joined.sort_index(inplace=True, kind="stable")
+
+    return joined
 
 
 def pvel(pl, pcov):
@@ -1370,6 +971,14 @@ def detrend(
 
 
 
+    Note:
+        Deprecated shim (refactor-B slice 1): the math lives in
+        :mod:`gps_analysis.fitting` — the fit is
+        ``fit_components`` (via the :func:`fittimes` shim) and the
+        subtraction is ``remove_trend``. Legacy semantics preserved
+        exactly: ``y`` is still mutated IN PLACE and returned, and the
+        seeding via :func:`getDetrFit`/:func:`convconst` (file I/O) stays
+        here in geo_dataread.
     """
 
     if Dy is None:
@@ -1387,8 +996,14 @@ def detrend(
 
         p, _ = fittimes(fitfunc, x, y, Dy, p0=p0)
 
-    for i in range(3):
-        y[i] = y[i] - fitfunc(x, *p[i])
+    fits = [
+        TrajectoryParams(
+            params=np.asarray(p[i], dtype=np.float64),
+            covariance=np.zeros((len(p[i]), len(p[i]))),
+        )
+        for i in range(3)
+    ]
+    y[:] = ga_fitting.remove_trend(fitfunc, x, y, fits)
 
     if zref:
         _, y, _, _ = vshift(x, y, Dy, uncert=20.0, refdate=None, Period=5)
@@ -1417,20 +1032,22 @@ def dPeriod(yearf, data, Ddata, startyear=None, endyear=None):
         data:  Data within the period defined by startyear and endyear
         Ddata: Data within the period defined by startyear and endyear
 
+    Note:
+        Deprecated shim (refactor-B slice 2): the window math lives in
+        :func:`gps_analysis.baseline.slice_window` (same delete
+        conditions, ±0.001 yr tolerance). Legacy semantics preserved
+        exactly: falsy bounds (``None``/0) are open, and with both
+        bounds open the inputs are returned unchanged (same objects).
     """
-    if startyear:
-        index = np.where(yearf <= startyear - 0.001)
-        yearf = np.delete(yearf, index)
-        data = np.delete(data, index, 1)
-        Ddata = np.delete(Ddata, index, 1)
+    if not startyear and not endyear:
+        return yearf, data, Ddata
 
-    if endyear:
-        index = np.where(yearf >= endyear + 0.001)
-        yearf = np.delete(yearf, index)
-        data = np.delete(data, index, 1)
-        Ddata = np.delete(Ddata, index, 1)
-
-    return yearf, data, Ddata
+    mask = ga_baseline.slice_window(
+        yearf,
+        start=startyear if startyear else None,
+        end=endyear if endyear else None,
+    )
+    return yearf[mask], data[:, mask], Ddata[:, mask]
 
 
 def vshift(yearf, data, Ddata, uncert=20.0, refdate=None, Period=5, offset=None):
@@ -1454,26 +1071,47 @@ def vshift(yearf, data, Ddata, uncert=20.0, refdate=None, Period=5, offset=None)
         data:  Data
         Ddata: Data uncertainty
 
+    Note:
+        Deprecated shim (refactor-B slice 2): the math lives in
+        :func:`gps_analysis.preprocess.prep_neu_series` — the
+        **.NEU/gamittoNEU profile** (decision D1; ``gamittoNEU``
+        hardcodes ``uncert=1.1``, pinned by the ``real_neu_*`` golden
+        masters). The legacy ``refdate``/``Period`` pair is converted
+        to a fractional-year reference window here (date handling is
+        caller policy, not leaf math). Degenerate-branch crashes
+        (``TypeError`` on all-screened data with no offset, the
+        ``NameError`` extrapolation branch) are now an explicit
+        ``ValueError`` from the leaf.
     """
+    ref_start, ref_end = _refdate_window(refdate, Period)
+    if refdate:
+        return ga_preprocess.prep_neu_series(
+            yearf,
+            data,
+            Ddata,
+            max_sigma=uncert,
+            offset=offset,
+            ref_start=ref_start,
+            ref_end=ref_end,
+        )
+    return ga_preprocess.prep_neu_series(
+        yearf, data, Ddata, max_sigma=uncert, offset=offset, ref_samples=Period
+    )
 
-    # Filtering a little, removing big outliers
-    with np.errstate(invalid="ignore"):
-        filt = Ddata < uncert
-    filt = np.logical_and(np.logical_and(filt[0, :], filt[1, :]), filt[2, :])
 
-    yearf = yearf[filt]
-    data = np.reshape(data[np.array([filt, filt, filt])], (3, -1))
-    Ddata = np.reshape(Ddata[np.array([filt, filt, filt])], (3, -1))
+def _refdate_window(refdate, Period):
+    """Convert the legacy refdate/Period pair to a fractional-year window.
 
-    if data.any():
-        if not (offset is None):
-            pass
-        else:
-            offset = estimate_offset(yearf, data, Ddata, refdate=refdate, Period=Period)
-
-    data = np.array([data[i, :] - offset[i] for i in range(3)])
-
-    return yearf, data, Ddata, offset
+    Returns ``(None, None)`` when no refdate is given (count mode); a
+    negative ``Period`` counts backwards from ``refdate`` (legacy swap).
+    """
+    if not refdate:
+        return None, None
+    startdate = currYearfDate(0, refdate)
+    enddate = currYearfDate(Period, refdate)
+    if Period < 0:
+        return enddate, startdate
+    return startdate, enddate
 
 
 def estimate_offset(yearf, data, Ddata, refdate=None, Period=5):
@@ -1481,32 +1119,22 @@ def estimate_offset(yearf, data, Ddata, refdate=None, Period=5):
     Estimating offset of a time series at a reference (refdate) point for a given interval (Period)
     defaults at 5 days at the start of the time series
 
+    Note:
+        Deprecated shim (refactor-B slice 2): the math lives in
+        :func:`gps_analysis.baseline.estimate_offset` (1/σ-weighted
+        mean; window mode for ``refdate``, first-``Period``-samples
+        count mode otherwise). The legacy empty-window branch (a
+        ``NameError`` on an undefined variable) is an explicit
+        ``ValueError`` in the leaf.
     """
-
-    # averaging the first period days
+    ref_start, ref_end = _refdate_window(refdate, Period)
     if refdate:
-        startdate = currYearfDate(0, refdate)
-        enddate = currYearfDate(Period, refdate)
-        if Period < 0:
-            tmpyearf, tmpdata, tmpDdata = dPeriod(
-                yearf, data, Ddata, enddate, startdate
-            )
-        else:
-            tmpyearf, tmpdata, tmpDdata = dPeriod(
-                yearf, data, Ddata, startdate, enddate
-            )
-
-        if tmpdata.any():
-            # if there are any data from this period
-            offset = np.average(tmpdata[0:3, :], 1, weights=1 / tmpDdata[0:3, :])
-        else:
-            # We need to extrapolate
-            # þarf að díla við þetta með því að módelera.
-            offset = np.average(data[0:3, 0:j], 1, weights=1 / Ddata[0:3, 0:7])
-    else:
-        offset = np.average(data[0:3, 0:Period], 1, weights=1 / Ddata[0:3, 0:Period])
-
-    return offset
+        return ga_baseline.estimate_offset(
+            yearf, data, Ddata, start=ref_start, end=ref_end
+        )
+    return ga_baseline.estimate_offset(
+        yearf[0:Period], data[0:3, 0:Period], Ddata[0:3, 0:Period]
+    )
 
 
 def iprep(yearf, data, Ddata, uncert=20.0, offset=None):
@@ -1528,43 +1156,62 @@ def iprep(yearf, data, Ddata, uncert=20.0, offset=None):
         data:  Data
         Ddata: Data uncertainty
 
+    Note:
+        Deprecated shim (refactor-B slice 2): the math lives in
+        :func:`gps_analysis.preprocess.prep_plot_series` — the
+        **plot/getData profile** (decision D1; ``getData`` passes
+        ``uncert=15``). The m→mm conversion is unit policy and stays
+        here — INCLUDING its legacy side effect of scaling the caller's
+        ``data``/``Ddata`` arrays IN PLACE. The returned ``offset`` (in
+        mm, weighted mean of the first 5 kept samples unless supplied)
+        is the offset-reuse contract ``getData`` exposes to callers.
     """
 
-    # converting to mm
+    # converting to mm (in place — legacy contract preserved)
     data *= 1000
     Ddata *= 1000
-    return vshift(yearf, data, Ddata, uncert=uncert, offset=offset)
+    return ga_preprocess.prep_plot_series(
+        yearf, data, Ddata, max_sigma=uncert, offset=offset
+    )
 
 
-def filt_outl(yearf, data, Ddata, pb, errfunc, outlier):
-    """
-    This function removes outliers from a time series.
+def _remove_plate_velocity(sta, yearf, data, plate=None, reference="ITRF2008", scale=1):
+    """Subtract secular plate motion from the horizontal components in place.
 
-    Examples:
-        >>> filt_outl(yearf, data, Ddata, pb, errfunc, outlier)
+    Single shared implementation of the plate-velocity removal that was
+    duplicated verbatim between the two production paths (refactor-B
+    slice 5): ``getData`` (plot path — data already in mm after ``iprep``,
+    so ``scale=1000`` converts ``gf.plateVelo``'s m/yr) and ``gamittoNEU``
+    (.NEU path — data still in m, ``scale=1``; the m→mm conversion happens
+    afterwards as caller unit policy). Bit-identical behavior is pinned by
+    the ``getdata_*`` / ``real_getdata_*`` plate cases and the
+    ``neu_*`` / ``neufile_*`` / ``real_neu_*`` / ``real_neufile_*`` golden
+    masters.
+
+    Note the long-standing axis swap relative to ``gf.plateVelo``'s
+    documented (N, E, U) column order: data row 0 gets velocity column 1
+    and data row 1 gets velocity column 0 — preserved verbatim from both
+    legacy call sites (which agreed with each other).
 
     Args:
-        yearf: time array with numeric time values
-        data: data array
-        Ddata: same form as data but containing the uncertainties
-        pb: parameters of the error function. Default=[None, None, None]
-        errfunc: error function. Default=abs
-        outlier: Maximum uncertainty of the data.
+        sta: station four-letter name (plate velocity is looked up per station)
+        yearf: fractional-year time array; motion accumulates from ``yearf[0]``
+        data: 3xN component array; rows 0 and 1 are modified IN PLACE
+        plate: explicit tectonic plate forwarded to ``gf.plateVelo``
+            (default None = per-station plate lookup)
+        reference: reference frame forwarded to ``gf.plateVelo``.
+            Default="ITRF2008"
+        scale: unit factor applied to the velocity — 1 for the m-unit .NEU
+            path, 1000 for the mm-unit plot path
 
     Returns:
-        yearf: Time array
-        data:  Data
-        Ddata: Data uncertainty
+        data: the same (mutated) array, for assignment-style call sites
 
     """
-    # Removing big outliers
-    for i in range(3):
-        index = np.where(abs(errfunc(pb[i], yearf - yearf[0], data[i])) > outlier[i])
-        yearf = np.delete(yearf, index)
-        data = np.delete(data, index, 1)
-        Ddata = np.delete(Ddata, index, 1)
-
-    return yearf, data, Ddata
+    plateVel = gf.plateVelo([sta], plate, reference=reference)
+    data[0, :] = data[0, :] - plateVel[0, 1] * scale * (yearf - yearf[0])
+    data[1, :] = data[1, :] - plateVel[0, 0] * scale * (yearf - yearf[0])
+    return data
 
 
 def gamittoNEU(
@@ -1601,11 +1248,9 @@ def gamittoNEU(
         yearf, data, Ddata, uncert=1.1, refdate=None, Period=5, offset=None
     )
 
-    # remove plate velocity
+    # remove plate velocity (shared helper — data still in m, so scale=1)
     if ref == "plate":
-        plateVel = gf.plateVelo([sta], reference=reference)
-        data[0, :] = data[0, :] - plateVel[0, 1] * (yearf - yearf[0])
-        data[1, :] = data[1, :] - plateVel[0, 0] * (yearf - yearf[0])
+        data = _remove_plate_velocity(sta, yearf, data, reference=reference)
 
     # convert to mm
     if mm:
@@ -1731,15 +1376,6 @@ def read_gps_data(
     if not np.all([p0[i][1:].dtype if p0[i] is not None else False for i in range(3)]):
         module_logger.warning("Setting fit to lineperiodic")
         fit = "lineperiodic"
-
-    if useFIT == "periodic":
-        module_logger.warning(
-            '"{}" parameters from {} used in {}'.format(
-                const["Fit"].values[0], const["useSTA"].values[0], sta
-            )
-        )
-        module_logger.info('Setting the fit to a "line" for estimating the rate')
-        fit = "line"
 
     syearf, sdata, sDdata = dPeriod(
         yearf,
@@ -1939,6 +1575,9 @@ def getData(
     """
 
     if tType == "JOIN":
+        # legacy alias kept for back-compat: getData's array return can't
+        # carry multiple schemes. The real multi-scheme JOIN (DataFrame,
+        # revived in refactor-B slice 6) is read_join().
         tType = "TOT"
 
     yearf, data, Ddata = openGlobkTimes(sta, Dir=Dir, tType=tType)
@@ -1952,24 +1591,24 @@ def getData(
         print("WARNING: offset determination failure for station {}".format(sta))
 
     if ref == "plate":
-        plateVel = gf.plateVelo([sta])
-        data[0, :] = data[0, :] - plateVel[0, 1] * 1000 * (yearf - yearf[0])
-        data[1, :] = data[1, :] - plateVel[0, 0] * 1000 * (yearf - yearf[0])
+        # shared helper — data already in mm after iprep, so scale=1000
+        data = _remove_plate_velocity(sta, yearf, data, scale=1000)
 
     elif ref == "detrend":
-        pN, pE, pU, pb = detrend(yearf, data, sta)
-        pb_org = [pN, pE, pU]
-
-        for i in range(3):
-            data[i] = -errfunc(pb_org[i], yearf - yearf[0], data[i])
+        # Deliberate dead-branch removal (refactor-B slice 4): this branch
+        # called detrend() with the wrong signature and the deleted legacy
+        # leastsq errfunc — it always crashed. Replaced with an explicit error.
+        raise ValueError(
+            "unsupported ref='detrend': the branch was dead (wrong detrend() "
+            "call signature) and was removed in the refactor-B slice-4 cleanup"
+        )
 
     elif ref == "itrf2008":
         pass
 
     else:
-        plateVel = gf.plateVelo([sta], ref)
-        data[0, :] = data[0, :] - plateVel[0, 1] * 1000 * (yearf - yearf[0])
-        data[1, :] = data[1, :] - plateVel[0, 0] * 1000 * (yearf - yearf[0])
+        # explicit plate name — same shared helper, mm path
+        data = _remove_plate_velocity(sta, yearf, data, plate=ref, scale=1000)
 
     return yearf, data, Ddata, offset
 

@@ -22,8 +22,11 @@ run-to-run difference (nondeterminism guard).
   Argument profiles mirror the 2026-07-08 production call-site survey.
 - `fixtures/TOT/` — frozen GAMIT `mb_*.dat{1,2,3}` series (SENG, ELDC, SKSH,
   OLAC, DYNG, ENTC; snapshot ending 2024.98, spans the Reykjanes unrest).
-  `mb_SENG_08h.*` are TOT copies that exist only to reach the broken 08h
-  branch. ENTC is there because it is the only station with sigmas in
+  `mb_SENG_08h.*` are TOT copies that predate the slice-4 cleanup; since the
+  slice-6 JOIN revival they are REACHED again — `ogt_SENG_08h` pins that
+  `tType="08h"` reads (plain read, byte-identical to the TOT read on these
+  copies), and the unit suite (`test_read_join.py`) uses the TOT==08h
+  equality for strong assertions. ENTC is there because it is the only station with sigmas in
   (1.1 m, 20 m) — it pins `gamittoNEU`'s hardcoded `vshift(uncert=1.1)`.
 - `fixtures/gpsconfig/` — hermetic config (stations.cfg subset, postprocess
   template, detrend CSV, station-plate, station_coord.llh). Tests set
@@ -68,13 +71,36 @@ See `DATA_TO_PLOT_FINDINGS.md` at the repo root.
 - `getData`'s 15/20 mm thresholds are discriminated by SENG epochs with
   sigmas in (15, 20) mm.
 
-## Behavior pinned as CRASHES (known-broken, do not "fix" silently)
+## Dead options pinned as CLEAN ERRORS (slice 4, D4; updated by slice 6)
 
-- `read_gps_data(..., useSTA=..., useFIT="periodic")` → `KeyError('Fit')`
-  (getDetrFit writes lowercase `fit`/`useSTA` columns; read_gps_data reads
-  `Fit`/`useSTA` — the pygmt-era borrowing branch is dead).
-- `openGlobkTimes(..., tType="08h")` → `NameError` (undefined `shiftime`/
-  `timetoyearf`/`todatetime`), so gps_plot's `tType="JOIN"` path is dead.
+Both used to be pinned as ACCIDENTAL crashes; slice 4 removed the dead
+branches and replaced them with explicit `ValueError`s (pins updated
+`KeyError`/`NameError` → `ValueError`):
+
+- `read_gps_data(..., useSTA=..., useFIT="periodic")` → `ValueError`
+  (was `KeyError('Fit')`: getDetrFit wrote lowercase `fit`/`useSTA` columns
+  while read_gps_data read `Fit` — the pygmt-era borrowing branch was dead).
+- `openGlobkTimes(..., tType="08h")` → slice 4's temporary `ValueError` pin
+  (`ogt_08h_raises`) was REPLACED in the slice-6 JOIN revival — the only
+  golden moved by slice 6. `08h` now reads (pinned positively by
+  `ogt_SENG_08h` + the realdata join cases); what remains pinned as a clean
+  error is `ogt_missing_scheme_raises`: a scheme whose
+  `mb_STA_<scheme>.dat{1,2,3}` files don't exist → `FileNotFoundError`
+  up front (a non-TOT scheme is never silently substituted with
+  lowercase-tot data).
+
+## JOIN revival (refactor-B slice 6, D4)
+
+`read_join(sta, schemes=("TOT","08h"), Dir=None, missing="warn")` holds a
+station's multiple GLOBK processing schemes together in ONE long-format,
+scheme-labeled, time-sorted DataFrame (convGlobktopandas columns + `scheme`).
+Pinned by `real_ogt_SENG_08h` (raw genuine 8-hourly read: the COMPLETE real
+SENG 08h solution, 270 epochs, 2021.74018-2021.98675, frozen into
+`fixtures/realdata/TOT/`) and `real_join_SENG_TOT_08h` (the joined frame:
+770 rows = 500 TOT + 270 08h, spanning 2021-09-28 → 2026-07-10);
+`test_read_join.py` adds behavior unit tests (extensibility, missing-scheme
+handling, degenerate single-scheme, getData JOIN-alias back-compat).
+`getData(tType="JOIN")` keeps its legacy alias-for-TOT meaning.
 
 ## Other quirks deliberately preserved in the goldens
 

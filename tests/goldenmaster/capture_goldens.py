@@ -2,7 +2,11 @@
 
 Run from the geo_dataread root:
 
-    uv run python tests/goldenmaster/capture_goldens.py
+    uv run python tests/goldenmaster/capture_goldens.py [case_id ...]
+
+With no arguments every case is recaptured; case_id arguments restrict the
+capture to just those cases (for ADDING new pins without rewriting the
+frozen ones).
 
 ONLY rerun this when a behavior change is intentional and reviewed — the
 whole point of the goldens is that they do NOT move during the refactor.
@@ -35,7 +39,13 @@ def _dicts_equal(a, b):
     return True
 
 
-def main() -> int:
+def main(only=()) -> int:
+    unknown = sorted(set(only) - set(CASES) - set(NEU_FILE_CASES))
+    if unknown:
+        raise SystemExit(f"unknown case id(s): {unknown}")
+    cases = {c: CASES[c] for c in (only or CASES) if c in CASES}
+    neu_cases = [c for c in (only or NEU_FILE_CASES) if c in NEU_FILE_CASES]
+
     with tempfile.TemporaryDirectory() as tmp:
         tmp = Path(tmp)
         env = {
@@ -46,7 +56,7 @@ def main() -> int:
         os.environ["GPS_CONFIG_PATH"] = str(env["config_dir"])
         EXPECTED.mkdir(exist_ok=True)
 
-        for case_id, runner in CASES.items():
+        for case_id, runner in cases.items():
             first = runner(env)
             second = runner(env)
             if not _dicts_equal(first, second):
@@ -57,7 +67,7 @@ def main() -> int:
 
         for d in ("neu1", "neu2"):
             (tmp / d).mkdir(exist_ok=True)
-        for case_id in NEU_FILE_CASES:
+        for case_id in neu_cases:
             out1 = run_neu_file_case(case_id, tmp / "neu1")
             out2 = run_neu_file_case(case_id, tmp / "neu2")
             if out1.read_bytes() != out2.read_bytes():
@@ -66,9 +76,9 @@ def main() -> int:
             (EXPECTED / f"{case_id}.NEU").write_bytes(out1.read_bytes())
             print(f"captured {case_id}")
 
-    print(f"\nAll goldens written to {EXPECTED}")
+    print(f"\n{len(cases) + len(neu_cases)} golden(s) written to {EXPECTED}")
     return 0
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(main(sys.argv[1:]))
