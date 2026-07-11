@@ -22,8 +22,9 @@ run-to-run difference (nondeterminism guard).
   Argument profiles mirror the 2026-07-08 production call-site survey.
 - `fixtures/TOT/` — frozen GAMIT `mb_*.dat{1,2,3}` series (SENG, ELDC, SKSH,
   OLAC, DYNG, ENTC; snapshot ending 2024.98, spans the Reykjanes unrest).
-  `mb_SENG_08h.*` are TOT copies that exist only to reach the broken 08h
-  branch. ENTC is there because it is the only station with sigmas in
+  `mb_SENG_08h.*` are TOT copies that existed to reach the (since-removed)
+  broken 08h branch; kept frozen, no longer reached — openGlobkTimes now
+  rejects `tType="08h"` before file I/O. ENTC is there because it is the only station with sigmas in
   (1.1 m, 20 m) — it pins `gamittoNEU`'s hardcoded `vshift(uncert=1.1)`.
 - `fixtures/gpsconfig/` — hermetic config (stations.cfg subset, postprocess
   template, detrend CSV, station-plate, station_coord.llh). Tests set
@@ -68,13 +69,18 @@ See `DATA_TO_PLOT_FINDINGS.md` at the repo root.
 - `getData`'s 15/20 mm thresholds are discriminated by SENG epochs with
   sigmas in (15, 20) mm.
 
-## Behavior pinned as CRASHES (known-broken, do not "fix" silently)
+## Dead options pinned as CLEAN ERRORS (updated in refactor-B slice 4, D4)
 
-- `read_gps_data(..., useSTA=..., useFIT="periodic")` → `KeyError('Fit')`
-  (getDetrFit writes lowercase `fit`/`useSTA` columns; read_gps_data reads
-  `Fit`/`useSTA` — the pygmt-era borrowing branch is dead).
-- `openGlobkTimes(..., tType="08h")` → `NameError` (undefined `shiftime`/
-  `timetoyearf`/`todatetime`), so gps_plot's `tType="JOIN"` path is dead.
+Both used to be pinned as ACCIDENTAL crashes; slice 4 removed the dead
+branches and replaced them with explicit `ValueError`s — the only deliberate
+golden change of that slice (pins updated `KeyError`/`NameError` → `ValueError`):
+
+- `read_gps_data(..., useSTA=..., useFIT="periodic")` → `ValueError`
+  (was `KeyError('Fit')`: getDetrFit wrote lowercase `fit`/`useSTA` columns
+  while read_gps_data read `Fit` — the pygmt-era borrowing branch was dead).
+- `openGlobkTimes(..., tType="08h")` → `ValueError` (was `NameError` on
+  undefined `shiftime`/`timetoyearf`/`todatetime`). gps_plot's `tType="JOIN"`
+  sub-daily path stays dead until the slice-6 JOIN revival.
 
 ## Other quirks deliberately preserved in the goldens
 

@@ -188,24 +188,30 @@ CASES = {
     "rgd_SKSH_fit_lineperiodic": _read_gps_data("SKSH", fit="lineperiodic"),
 }
 
-# Behavior pinned as a CRASH: getDetrFit builds lowercase 'fit'/'useSTA'
-# columns while read_gps_data reads const["Fit"]/const["useSTA"] — so the
-# useFIT="periodic" borrowing branch raises KeyError('Fit') today. The pygmt
-# scripts that exercised it are broken against current geo_dataread. If the
-# refactor fixes this, delete this pin deliberately and note it in the log.
+# Dead options pinned as CLEAN ERRORS — DELIBERATE golden change in
+# refactor-B slice 4 (decision D4). Both branches used to crash by ACCIDENT:
+#
+# - useFIT="periodic": getDetrFit built lowercase 'fit'/'useSTA' columns while
+#   read_gps_data read const["Fit"] — KeyError('Fit'). The pygmt scripts that
+#   exercised it were already broken against current geo_dataread.
+# - tType="08h": openGlobkTimes' sub-daily block referenced undefined names
+#   (todatetime, shiftime, timetoyearf — wrong case) — NameError.
+#
+# Slice 4 removed both dead branches and replaced them with an explicit
+# ValueError raised up front (getDetrFit validates useFIT; openGlobkTimes
+# validates tType). These two pins were updated KeyError/NameError →
+# ValueError on purpose — the only goldens moved by slice 4. The fixture
+# mb_SENG_08h.dat* files (TOT copies) predate the cleanup and are kept
+# frozen; they are no longer reached (validation fires before file I/O).
+# JOIN revival (gps_plot's sub-daily path) is slice 6.
 CRASH_CASES = {
     "rgd_useSTA_periodic_raises": (
         _read_gps_data("OLAC", useSTA="DYNG", useFIT="periodic"),
-        KeyError,
+        ValueError,
     ),
-    # openGlobkTimes' 08h branch references undefined names (todatetime,
-    # shiftime, timetoyearf — wrong case) — so gps_plot's tType="JOIN"
-    # sub-daily branch is dead in current code. NameError pinned; the
-    # fixture mb_SENG_08h.dat* files (TOT copies) exist only so execution
-    # reaches the broken block instead of dying on a missing file.
     "ogt_08h_raises": (
         lambda env: gpsr.openGlobkTimes("SENG", Dir=TOT, tType="08h"),
-        NameError,
+        ValueError,
     ),
 }
 

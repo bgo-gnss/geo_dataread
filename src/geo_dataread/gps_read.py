@@ -3,12 +3,9 @@ This module contains functions for reading and returning GPS data. It includes t
 
 """
 
-import datetime as dt
-import glob
 import logging
 import os
 import re
-import shutil
 import sys
 from collections import OrderedDict
 from pathlib import Path
@@ -31,9 +28,6 @@ from gtimes.timefunc import (
     currYearfDate,
     round_to_hour,
 )
-from scipy import optimize
-
-import geo_dataread.gps_read as gdrgps
 
 #
 # time series filtering
@@ -202,64 +196,6 @@ def secondorder(x, p0, p1, p2):
     return p0 + p1 * x + p2 * x**2
 
 
-def gpsvelo_df():
-    """
-    dataframe for pygmt velo with three extra columns
-    for date, period and boolean for vertical component.
-    this is based on the output of the gpsvelo function, which estimates the gps velocity for a specific period of time.
-
-    examples:
-        >>> gpsvelo_df()
-
-    returns:
-        gpsvelo: dataframe
-
-
-    """
-
-    gpsvelo = pd.dataframe(
-        columns=[
-            "longitude",
-            "latitude",
-            "east_velo",
-            "north_velo",
-            "east_sigma",
-            "north_sigma",
-            "coorelation_en",
-            "station",
-            "date",
-            "period",
-            "vertical",
-        ],
-    )
-
-    return gpsvelo
-
-
-def gpsvelo(sta: str, ll, vel, vertical=False, vfile=None, pheader=False):
-    """
-    return gps velocities gmt velo
-
-    examples:
-        >>> gpsvelo()
-
-    args:
-        sta: station name
-        ll: [longitude, latitude]
-        vertical: boolean to describe
-        vfile: velocity file
-        pheader: header
-
-    returns:
-        gpsvelo: dataframe
-
-    """
-
-    gpsvelo = "{0:5.6f} {1:5.6f}\t{2:7.2f} {5:7.2f}\t{3:7.2f} {6:7.2f}\t{4:7.2f} {7:7.2f}\t\t{8:s}".format(
-        ll[1], ll[0], vel[0], vel[1], vel[2], vel[3], vel[4], vel[5], sta
-    )
-
-
 def getDetrFit(
     sta: str,
     useSTA=None,
@@ -281,6 +217,17 @@ def getDetrFit(
         onlyperiodic: boolean
         detrfile: detrending file name, csv format
     """
+
+    if useFIT == "periodic":
+        # Deliberate dead-branch removal (refactor-B slice 4, decision D4):
+        # the periodic-borrowing branch never worked — downstream
+        # read_gps_data crashed with KeyError('Fit') on the detrend-CSV
+        # column-case mismatch. Replaced with an explicit error.
+        raise ValueError(
+            "unsupported useFIT='periodic': the periodic-borrowing branch was "
+            "dead (it crashed with KeyError('Fit')) and was removed in the "
+            "refactor-B slice-4 cleanup; use 'lineperiodic' or 'line'"
+        )
 
     # create an instance for the configparser
     config = ConfigParser()
@@ -347,11 +294,7 @@ def getDetrFit(
         const.loc[sta, ["useSTA", "fit"]] = useSTA, useFIT
 
         # set the fit constants
-        if useFIT == "periodic":
-            const.loc[sta, north[1:] + east[1:] + up[1:]] = table.loc[
-                useSTA, north[1:] + east[1:] + up[1:]
-            ]
-        elif useFIT == "lineperiodic":
+        if useFIT == "lineperiodic":
             const.loc[sta, north + east + up] = table.loc[useSTA, north + east + up]
         elif useFIT == "line":
             const.loc[sta, north[:1] + east[:1] + up[:1]] = table.loc[
@@ -655,71 +598,6 @@ def gamittoFile(neudata, outfile, mm=True, ref="plate", dstring=None, outformat=
         f.close()
 
 
-def savedisp(datadict, fname=None, header=""):
-    """
-    this function saves a dictionary of data to a file
-
-    examples:
-        >>> savedisp(datadict, fname=None, header="")
-
-    args:
-        datadict: dictionary of data
-        fname: file name
-        header: header of the file
-
-    returns:
-        output file
-
-    """
-
-    valtype = type(datadict.values()[0])
-
-    datadict = ordereddict(sorted(datadict.items()))
-
-    if (valtype is list) or (valtype is np.ndarray):
-        fmt = "% 3.8f\t% 2.8f\t% 2.8f\t%s"  # format
-
-        ab = np.zeros(
-            len(datadict.keys()),
-            dtype=[
-                ("var1", "float"),
-                ("var2", "float"),
-                ("var3", "float"),
-                ("var4", "a4"),
-            ],
-        )
-
-        ab["var1"] = np.squeeze(datadict.values())[:, 0]
-        ab["var2"] = np.squeeze(datadict.values())[:, 1]
-        ab["var3"] = np.squeeze(datadict.values())[:, 2]
-        ab["var4"] = datadict.keys()
-
-    # formatting tuples into a dictionary of arrays
-    if valtype is tuple:
-        fmt = "% 3.8f\t% 2.8f\t% 2.8f\t%2.8f\t%2.8f\t%s"
-        ab = np.zeros(
-            len(datadict.keys()),
-            dtype=[
-                ("var1", "float"),
-                ("var2", "float"),
-                ("var3", "float"),
-                ("var4", "float"),
-                ("var5", "float"),
-                ("var6", "a4"),
-            ],
-        )
-        ab["var1"] = np.squeeze(zip(*datadict.values()[:])[0])[:, 0]
-        ab["var2"] = np.squeeze(zip(*datadict.values()[:])[0])[:, 1]
-        ab["var3"] = np.squeeze(zip(*datadict.values()[:])[1])[:, 0]
-        ab["var4"] = np.squeeze(zip(*datadict.values()[:])[1])[:, 1]
-        ab["var5"] = np.squeeze(zip(*datadict.values()[:])[1])[:, 2]
-        ab["var6"] = datadict.keys()
-
-    if fname:
-        np.savetxt(fname, ab, fmt=fmt, header=header)
-    return ab
-
-
 def extractfromgamitbakf(cfile, stations):
     """
     function to extract data from a gamit .bak file
@@ -766,6 +644,17 @@ def openGlobkTimes(sta, Dir=None, tType="TOT"):
         ddata: respective uncertainty values
 
     """
+
+    if tType == "08h":
+        # Deliberate dead-branch removal (refactor-B slice 4, decision D4):
+        # the 8-hour sub-daily branch never worked — it crashed with a
+        # NameError on undefined names (todatetime/shiftime/timetoyearf).
+        # Replaced with an explicit error; JOIN revival is slice 6.
+        raise ValueError(
+            "unsupported tType='08h': the sub-daily branch was dead (it "
+            "crashed on undefined names) and was removed in the refactor-B "
+            "slice-4 cleanup"
+        )
 
     config = ConfigParser()
 
@@ -818,16 +707,6 @@ def openGlobkTimes(sta, Dir=None, tType="TOT"):
     # stack the arrays for the three components in the data array and for their uncertainties in ddata array
     data = np.vstack([d1, d2, d3])
     ddata = np.vstack([D1, D2, D3])
-
-    # option to grab 8hr subdaily solutions from the same path
-    if tType == "08h":
-        shift8h = dt.timedelta(**shiftime("h8"))
-        yearf = np.array(
-            [
-                timetoyearf(*(item + shift8h).timetuple()[:6])
-                for item in todatetime(yearf)
-            ]
-        )
 
     return yearf, data, ddata
 
@@ -904,411 +783,6 @@ def convGlobktopandas(yearf, data, Ddata):
     data.index = data.index.round("1h")
 
     return data
-
-
-def compGlobkTimes(stalist="any", dirConFilePath=None, freq=None):
-    """
-    This function joins old and new mb_ time series files
-
-    Examples:
-        >>> compGlobkTimes(stalist="any", dirConFilePath=None, freq=None)
-
-    Args:
-        stalist: list of station names in capital letters. If "any", all stations are used. Default is "any"
-        dirConFilePath: optional alternative Directory of the GAMIT time series data.
-        freq: optional frequency of the data. Default is None
-
-    Returns:
-        data:  three arrays containing GPS data in north, east and up
-
-    """
-
-    config = ConfigParser()
-
-    # totpath = config.getPostprocessConfig('totDir')
-
-    if dirConFilePath:  # for custom file
-        Dirs = parsedir(dirConFilePath)
-    else:  # grab paths from the postprocess.cfg file in gpsconfig directory that cparser reads into a dictionary
-        Dirs = {
-            "figDir": config.get_config("Configs", "figDir"),
-            "preDir": config.get_config("Configs", "preDir"),
-            "rapDir": config.get_config("Configs", "rapDir"),
-            "totDir": config.get_config("Configs", "totDir"),
-        }
-
-        print("Directory is \n", Dirs)
-
-    # Reading into a string the paths
-    PreDir = Dirs["preDir"]
-    RapDir = Dirs["rapDir"]
-    TotDir = Dirs["totDir"]
-
-    # Setting the frequency to TOT if freq is None
-    if freq == "TOT" or freq is None:
-        freq = "TOT"
-    else:  # setting the frequency
-        PreDir = PreDir + "_%s" % (freq)
-        RapDir = RapDir + "_%s" % (freq)
-
-    if stalist == "any":
-        FilePreL = os.path.join(PreDir, "mb_*.dat?")
-        FileRapL = os.path.join(RapDir, "mb_*.dat?")
-
-        List = glob.glob(FilePreL) + glob.glob(FileRapL)
-
-        # listing all stations in  the Rap and Pre directories
-        stalist = sorted(set([item[-13:-9] for item in List]))
-
-    # Set up names for files
-    for STA in stalist:
-        FilePre = "mb_%s_?PS.dat" % STA
-        OutFilePre = "mb_%s_GPS.dat" % STA
-        GPS20PS = "mb_%s_0PS.dat" % STA
-
-        for axes in range(1, 4):
-            FilePreR = os.path.join(PrePath, FilePre + "%s" % (axes,))
-            FileRapR = os.path.join(RapPath, FilePre + "%s" % (axes,))
-
-            # graping the list for files for for that station
-            PreFileL = glob.glob(FilePreR)  # listing files in the pre dir
-            RapFileL = glob.glob(FileRapR)  # listing files in th Rap dir
-
-            #  Sorting the file lists
-            PreFileL.sort()
-            if len(PreFileL) > 1:
-                PreFileL.insert(0, PreFileL.pop(-1))
-            RapFileL.sort()
-            if len(RapFileL) > 1:
-                RapFileL.insert(0, RapFileL.pop(-1))
-
-            TotFile = os.path.join(TotPath, "mb_%s_%s.dat%s" % (STA, freq, axes))
-
-            print("Concatenating all the %s data to %s" % (STA, TotFile))
-
-            if os.path.exists(TotFile):
-                os.remove(TotFile)
-
-            outf = open(TotFile, "a")
-
-            for fil in PreFileL:
-                print("Processing file %s " % fil, file=sys.stderr)
-                f = open(fil)
-                f.seek(61)
-                shutil.copyfileobj(f, outf)
-                f.close()
-
-            outf.close()
-
-            preexist = os.stat(TotFile).st_size != 0
-            if preexist:
-                outf = open(TotFile, "r")
-                lastline = outf.readlines()[-1]
-                lastline = lastline.split()
-                outf.close()
-
-            outf = open(TotFile, "a")
-            for file in RapFileL:
-                formatstr = "Processing file {0:s} ".format(file)
-                print(formatstr, file=sys.stderr)
-                rapfile = open(file, "r")
-                rapfile.seek(61)
-                lines = rapfile.readlines()
-                if preexist:
-                    lines = "".join(
-                        [line for line in lines if line.split()[0] > lastline[0]]
-                    )
-                else:
-                    lines = "".join([line for line in lines])
-
-            outf.close()
-
-
-def TieTimes(sta1, sta2, dirConFilePath=None, freq=None, tie=[None, None, None]):
-    """
-    This function joins old and new mb_ time series files
-
-    Examples:
-        >>> TieTimes(sta1, sta2, dirConFilePath=None, freq=None, tie=[None, None, None])
-
-    Args:
-        sta1: first station name in capital letters
-        sta2: second station name in capital letters
-        dirConFilePath: optional alternative Directory of the GAMIT time series data.
-        freq: optional frequency of the data. Default is None
-        tie: optional tie file. Default is [None, None, None]
-
-
-    """
-
-    config = ConfigParser()
-    # totpath = config.getPostprocessConfig('totpath')
-
-    if dirConFilePath:  # for custom file
-        Dirs = parsedir(dirConFilePath)
-    else:
-        # As the standard configparser works with dictionaries, use it to create the Dirs dictionaries
-        Dirs = {
-            "figDir": config.get_config("Configs", "figDir"),
-            "preDir": config.get_config("Configs", "preDir"),
-            "rapDir": config.get_config("Configs", "rapDir"),
-            "totDir": config.get_config("Configs", "totDir"),
-        }
-
-    # parse the paths from the Dirs dictionary
-    PreDir = Dirs["predDir"]
-    RapDir = Dirs["rapdDir"]
-    TotDir = Dirs["totdDir"]
-
-    # Setting the frequency to TOT if freq is None
-    if freq == "TOT" or freq is None:
-        freq = "TOT"
-    else:
-        PreDir = PreDir + "_%s" % (freq)
-        RapDir = RapDir + "_%s" % (freq)
-
-    # for all the stations, create the path for PreL and RapL files
-    if stalist == "any":
-        FilePreL = os.path.join(PreDir, "mb_*.dat?")
-        FileRapL = os.path.join(RapDir, "mb_*.dat?")
-
-        List = glob.glob(FilePreL) + glob.glob(FileRapL)
-
-        # listing all stations in  the Rap and Pre dir
-        stalist = sorted(set([item[-13:-9] for item in List]))
-
-    for STA in stalist:
-        FilePre = "mb_%s_?PS.dat" % STA
-        OutFilePre = "mb_%s_GPS.dat" % STA
-        GPS20PS = "mb_%s_0PS.dat" % STA
-
-        for axes in range(1, 4):
-            FilePreR = os.path.join(PrePath, FilePre + "%s" % (axes,))
-            FileRapR = os.path.join(RapPath, FilePre + "%s" % (axes,))
-
-            # graping the list for files for for that station
-            PreFileL = glob.glob(FilePreR)  # listing files in the pre dir
-            RapFileL = glob.glob(FileRapR)  # listing files in th Rap dir
-
-            #  Sorting the file lists
-            PreFileL.sort()
-            if len(PreFileL) > 1:
-                PreFileL.insert(0, PreFileL.pop(-1))
-            RapFileL.sort()
-            if len(RapFileL) > 1:
-                RapFileL.insert(0, RapFileL.pop(-1))
-
-            TotFile = os.path.join(TotPath, "mb_%s_%s.dat%s" % (STA, freq, axes))
-            print("Concating all the %s data to %s" % (STA, TotFile))
-            if os.path.exists(TotFile):
-                os.remove(TotFile)
-            outf = open(TotFile, "a")
-            for fil in PreFileL:
-                print("Processing file %s " % fil, file=sys.stderr)
-                f = open(fil)
-                f.seek(61)
-                shutil.copyfileobj(f, outf)
-                f.close()
-            outf.close()
-
-            preexist = os.stat(TotFile).st_size != 0
-            if preexist:
-                outf = open(TotFile, "r")
-                lastline = outf.readlines()[-1]
-                lastline = lastline.split()
-                outf.close()
-
-            outf = open(TotFile, "a")
-            for file in RapFileL:
-                formatstr = "Processing file {0:s} ".format(file)
-                print(formatstr, file=sys.stderr)
-                rapfile = open(file, "r")
-                rapfile.seek(61)
-                lines = rapfile.readlines()
-                if preexist:
-                    lines = "".join(
-                        [line for line in lines if line.split()[0] > lastline[0]]
-                    )
-                else:
-                    lines = "".join([line for line in lines])
-
-                outf.write(lines)
-                rapfile.close()
-
-            outf.close()
-
-
-# def TieTimes(sta1, sta2, dirConFilePath=None, freq=None, tie=[None, None, None]):
-#     """
-#     This function joins old and new mb_ time series files
-#
-#     Examples:
-#         >>> TieTimes(sta1, sta2, dirConFilePath=None, freq=None, tie=[None, None, None])
-#
-#     Args:
-#         sta1: first station name in capital letters
-#         sta2: second station name in capital letters
-#         dirConFilePath: optional alternative Directory of the GAMIT time series data.
-#         freq: optional frequency of the data. Default is None
-#         tie: optional tie file. Default is [None, None, None]
-#
-#     Returns:
-#         None
-#
-#
-#     """
-#
-#     if dirConFilePath:  # for custom file
-#         Dirs = parsedir(dirConFilePath)
-#     else:
-#         Dirs = cp.Parser().getPostprocessConfig()
-#
-#     # PrePath = Dirs['prePath'] - These paths are not used for now, but can be added later
-#     # RapPath = Dirs['rapPath'] - Same case as above
-#     TieFile = Dirs["tiefile"]
-#     TotPath = Dirs["totDir"]
-#
-#     if freq == "TOT" or freq is None:
-#         freq = "TOT"
-#     else:
-#         PrePath = PrePath + "_%s" % (freq)
-#         RapPath = RapPath + "_%s" % (freq)
-#
-#     print(TieFile)
-#
-#     dtype = [
-#         ("North", "<f8"),
-#         ("East", "<f8"),
-#         ("Up", "<f8"),
-#         ("sta1", "|S5"),
-#         ("sta2", "|S5"),
-#     ]
-#
-#     const = np.genfromtxt(TieFile, dtype=dtype)
-#     const = [i for i in const if i[3] == sta1 and i[4] == sta2]
-#     print(const)
-#
-#     for axes in range(1, 4):
-#         TotFile1 = os.path.join(TotDir, "mb_%s_%s.dat%s" % (sta1, freq, axes))
-#         TotFile2 = os.path.join(TotDir, "mb_%s_%s.dat%s" % (sta2, freq, axes))
-#         print("Concating all the %s data to %s" % (sta1, TotFile2))
-#         # outf = open(TotFile, 'r')
-#         data1 = read_table(
-#             TotFile1, sep=r"\s+", header=None, index_col=0, names=["disp", "uncert"]
-#         )
-#         data2 = pd.read_csv(
-#             TotFile2, sep=r"\s+", header=None, index_col=0, names=["disp", "uncert"]
-#         )
-#         print(const[0][axes - 1])
-#         data2["disp"] -= const[0][axes - 1] / 1000
-#         data = pd.concat([data1, data2])
-#
-#         outfile = os.path.join(TotDir, "mb_%s_%s.dat%s" % (sta2, "JON", axes))
-#         data.to_csv(outfile, sep="\t", index=True, header=False)
-
-
-# Legacy scipy.optimize.leastsq residual machinery (rate-first parameter
-# packing, p = [rate, ...amplitudes..., intercept]) — only consumers are the
-# dead `fitline` (reads ./itrf08det) path, the broken getData(ref="detrend")
-# branch, and `filt_outl` (no internal callers). Slated for deletion in
-# refactor-B slice 4 ("dead leastsq block").
-
-
-def fitfuncl(p, x):
-    # Deprecated shim (refactor-B slice 1): p = [rate, intercept] →
-    # gps_analysis.models.linear(x, intercept, rate). Bit-identical
-    # (IEEE addition/multiplication are commutative).
-    return ga_models.linear(x, p[1], p[0])
-
-
-def errfuncl(p, x, y):
-    return fitfuncl(p, x) - y  # distance to the target function
-
-
-def fitfunc(p, x):
-    # NOT delegated to gps_analysis.models.lineperiodic: same model, but the
-    # leaf evaluates linear(t) + periodic(t) whereas this legacy single
-    # expression associates left-to-right — measured ≤ 2.3e-13 (~1 ulp)
-    # difference. Kept verbatim (behavior frozen) until slice 4 deletes it.
-    return (
-        p[0] * x
-        + p[1] * np.cos(2 * np.pi * x)
-        + p[2] * np.sin(2 * np.pi * x)
-        + p[3] * np.cos(4 * np.pi * x)
-        + p[4] * np.sin(4 * np.pi * x)
-        + p[5]
-    )
-
-
-def errfunc(p, x, y):
-    return fitfunc(p, x) - y  # Distance to the target function
-
-
-def fitline(yearf, data, STA):
-    """
-    This function fits a function through data points of a station STA
-
-    Examples:
-        >>> fitline(yearf, data, STA)
-
-    Args:
-        yearf: list of years
-        data: list of data
-        STA: station name
-
-    Returns:
-        parameters of the linear fitting
-
-
-    """
-
-    dtype = [
-        ("Nrate", "<f8"),
-        ("Erate", "<f8"),
-        ("Urate", "<f8"),
-        ("Nacos", "<f8"),
-        ("Nasin", "<f8"),
-        ("Eacos", "<f8"),
-        ("Easin", "<f8"),
-        ("Uacos", "<f8"),
-        ("Uasin", "<f8"),
-        ("Nscos", "<f8"),
-        ("Nssin", "<f8"),
-        ("Escos", "<f8"),
-        ("Essin", "<f8"),
-        ("Uscos", "<f8"),
-        ("Ussin", "<f8"),
-        ("shortname", "|S5"),
-        ("name", "|S20"),
-    ]
-
-    const = np.genfromtxt("itrf08det", dtype=dtype)
-    const = [i for i in const if i[15] == STA]
-
-    pN = [const[0][0]]
-    pE = [const[0][1]]
-    pU = [const[0][2]]
-    pN = [-1 * i for i in pN]
-    pE = [-1 * i for i in pE]
-    pU = [-1 * i for i in pU]
-    # pN.append(0)
-    # pE.append(0)
-    # pU.append(0)
-
-    # print "pN: %s" % p
-    # print "pE: %s" % pE
-    # print "pU: %s" % pU
-
-    pb = [[0, 0], [0, 0], [0, 0]]
-
-    # pb[0], success = optimize.leastsq(errfunc, pN[:], args=(yearf-yearf[0], data[0]))
-    # pb[1], success = optimize.leastsq(errfunc, pE[:], args=(yearf-yearf[0], data[1]))
-    # pb[2], success = optimize.leastsq(errfunc, pU[:], args=(yearf-yearf[0], data[2]))
-    pb[0], success = optimize.leastsq(errfuncl, pb[0], args=(yearf, data[0]))
-    pb[1], success = optimize.leastsq(errfuncl, pb[1], args=(yearf, data[1]))
-    pb[2], success = optimize.leastsq(errfuncl, pb[2], args=(yearf, data[2]))
-
-    return pN, pE, pU, pb
 
 
 def pvel(pl, pcov):
@@ -1608,37 +1082,6 @@ def iprep(yearf, data, Ddata, uncert=20.0, offset=None):
     )
 
 
-def filt_outl(yearf, data, Ddata, pb, errfunc, outlier):
-    """
-    This function removes outliers from a time series.
-
-    Examples:
-        >>> filt_outl(yearf, data, Ddata, pb, errfunc, outlier)
-
-    Args:
-        yearf: time array with numeric time values
-        data: data array
-        Ddata: same form as data but containing the uncertainties
-        pb: parameters of the error function. Default=[None, None, None]
-        errfunc: error function. Default=abs
-        outlier: Maximum uncertainty of the data.
-
-    Returns:
-        yearf: Time array
-        data:  Data
-        Ddata: Data uncertainty
-
-    """
-    # Removing big outliers
-    for i in range(3):
-        index = np.where(abs(errfunc(pb[i], yearf - yearf[0], data[i])) > outlier[i])
-        yearf = np.delete(yearf, index)
-        data = np.delete(data, index, 1)
-        Ddata = np.delete(Ddata, index, 1)
-
-    return yearf, data, Ddata
-
-
 def gamittoNEU(
     sta,
     mm=False,
@@ -1803,15 +1246,6 @@ def read_gps_data(
     if not np.all([p0[i][1:].dtype if p0[i] is not None else False for i in range(3)]):
         module_logger.warning("Setting fit to lineperiodic")
         fit = "lineperiodic"
-
-    if useFIT == "periodic":
-        module_logger.warning(
-            '"{}" parameters from {} used in {}'.format(
-                const["Fit"].values[0], const["useSTA"].values[0], sta
-            )
-        )
-        module_logger.info('Setting the fit to a "line" for estimating the rate')
-        fit = "line"
 
     syearf, sdata, sDdata = dPeriod(
         yearf,
@@ -2029,11 +1463,13 @@ def getData(
         data[1, :] = data[1, :] - plateVel[0, 0] * 1000 * (yearf - yearf[0])
 
     elif ref == "detrend":
-        pN, pE, pU, pb = detrend(yearf, data, sta)
-        pb_org = [pN, pE, pU]
-
-        for i in range(3):
-            data[i] = -errfunc(pb_org[i], yearf - yearf[0], data[i])
+        # Deliberate dead-branch removal (refactor-B slice 4): this branch
+        # called detrend() with the wrong signature and the deleted legacy
+        # leastsq errfunc — it always crashed. Replaced with an explicit error.
+        raise ValueError(
+            "unsupported ref='detrend': the branch was dead (wrong detrend() "
+            "call signature) and was removed in the refactor-B slice-4 cleanup"
+        )
 
     elif ref == "itrf2008":
         pass

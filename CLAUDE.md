@@ -19,7 +19,8 @@ Stable, ~3948 LOC. Used by research workflows and `gps_plot`.
 > files that `gps-savetimes` (→ `gamittooneuf`) publishes to cdn.vedur.is.
 > Live callers: `gps-savetimes`, `gps-displacemnts` (`simpleDisp`), and
 > `gps_plot.timesmatplt` (`getData`). `read_gps_data` is research-only.
-> Known-dead branches (pinned as crashes): `useFIT="periodic"`, `tType="08h"`.
+> Dead options `useFIT="periodic"` / `tType="08h"` (were accidental-crash
+> pins): removed in refactor-B slice 4 — both now raise a clean `ValueError`.
 
 ## Layout
 
@@ -27,7 +28,7 @@ Stable, ~3948 LOC. Used by research workflows and `gps_plot`.
 geo_dataread/
 ├── src/geo_dataread/
 │   ├── __init__.py
-│   ├── gps_read.py       # 1997 LOC — main GPS time-series reader
+│   ├── gps_read.py       # ~1500 LOC — main GPS time-series reader (post slice-4 dead-code purge)
 │   ├── gps_displ.py      # displacements / station-relative motion
 │   ├── gps_savetimes.py  # serialise time series to disk
 │   ├── gas_read.py       # GAS (strainmeter) data
