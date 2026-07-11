@@ -1082,6 +1082,45 @@ def iprep(yearf, data, Ddata, uncert=20.0, offset=None):
     )
 
 
+def _remove_plate_velocity(sta, yearf, data, plate=None, reference="ITRF2008", scale=1):
+    """Subtract secular plate motion from the horizontal components in place.
+
+    Single shared implementation of the plate-velocity removal that was
+    duplicated verbatim between the two production paths (refactor-B
+    slice 5): ``getData`` (plot path — data already in mm after ``iprep``,
+    so ``scale=1000`` converts ``gf.plateVelo``'s m/yr) and ``gamittoNEU``
+    (.NEU path — data still in m, ``scale=1``; the m→mm conversion happens
+    afterwards as caller unit policy). Bit-identical behavior is pinned by
+    the ``getdata_*`` / ``real_getdata_*`` plate cases and the
+    ``neu_*`` / ``neufile_*`` / ``real_neu_*`` / ``real_neufile_*`` golden
+    masters.
+
+    Note the long-standing axis swap relative to ``gf.plateVelo``'s
+    documented (N, E, U) column order: data row 0 gets velocity column 1
+    and data row 1 gets velocity column 0 — preserved verbatim from both
+    legacy call sites (which agreed with each other).
+
+    Args:
+        sta: station four-letter name (plate velocity is looked up per station)
+        yearf: fractional-year time array; motion accumulates from ``yearf[0]``
+        data: 3xN component array; rows 0 and 1 are modified IN PLACE
+        plate: explicit tectonic plate forwarded to ``gf.plateVelo``
+            (default None = per-station plate lookup)
+        reference: reference frame forwarded to ``gf.plateVelo``.
+            Default="ITRF2008"
+        scale: unit factor applied to the velocity — 1 for the m-unit .NEU
+            path, 1000 for the mm-unit plot path
+
+    Returns:
+        data: the same (mutated) array, for assignment-style call sites
+
+    """
+    plateVel = gf.plateVelo([sta], plate, reference=reference)
+    data[0, :] = data[0, :] - plateVel[0, 1] * scale * (yearf - yearf[0])
+    data[1, :] = data[1, :] - plateVel[0, 0] * scale * (yearf - yearf[0])
+    return data
+
+
 def gamittoNEU(
     sta,
     mm=False,
@@ -1116,11 +1155,9 @@ def gamittoNEU(
         yearf, data, Ddata, uncert=1.1, refdate=None, Period=5, offset=None
     )
 
-    # remove plate velocity
+    # remove plate velocity (shared helper — data still in m, so scale=1)
     if ref == "plate":
-        plateVel = gf.plateVelo([sta], reference=reference)
-        data[0, :] = data[0, :] - plateVel[0, 1] * (yearf - yearf[0])
-        data[1, :] = data[1, :] - plateVel[0, 0] * (yearf - yearf[0])
+        data = _remove_plate_velocity(sta, yearf, data, reference=reference)
 
     # convert to mm
     if mm:
@@ -1458,9 +1495,8 @@ def getData(
         print("WARNING: offset determination failure for station {}".format(sta))
 
     if ref == "plate":
-        plateVel = gf.plateVelo([sta])
-        data[0, :] = data[0, :] - plateVel[0, 1] * 1000 * (yearf - yearf[0])
-        data[1, :] = data[1, :] - plateVel[0, 0] * 1000 * (yearf - yearf[0])
+        # shared helper — data already in mm after iprep, so scale=1000
+        data = _remove_plate_velocity(sta, yearf, data, scale=1000)
 
     elif ref == "detrend":
         # Deliberate dead-branch removal (refactor-B slice 4): this branch
@@ -1475,9 +1511,8 @@ def getData(
         pass
 
     else:
-        plateVel = gf.plateVelo([sta], ref)
-        data[0, :] = data[0, :] - plateVel[0, 1] * 1000 * (yearf - yearf[0])
-        data[1, :] = data[1, :] - plateVel[0, 0] * 1000 * (yearf - yearf[0])
+        # explicit plate name — same shared helper, mm path
+        data = _remove_plate_velocity(sta, yearf, data, plate=ref, scale=1000)
 
     return yearf, data, Ddata, offset
 
