@@ -58,5 +58,20 @@ itrf2008 = 26 mm). On real headers `skiprows=3` lands exactly on row 1 of data �
 - WebAgg wart fix (#4) — BGÓ's call (gps_plot scope).
 - Source config fix (#2) + any plate/unit reconciliation → **B + sign-off** (touches `.NEU`).
 
+## `/mnt_data/gpsdata` data-hygiene (2026-07-11, from B slice-6 `read_join` checks)
+`read_join(sta, schemes=…)` is **string-driven / semantics-agnostic** — each scheme is just
+the `mb_{STA}_{scheme}.dat{1,2,3}` filename token; it globs + concatenates whatever matches.
+Verified against real overlapping data (**DYNG 2019**: 454 `TOT` + 269 `08h` correctly
+interleaved by time). Data-hygiene notes on the dir itself (not code):
+- **Scheme inventory:** 427 `TOT`, **475 `08h`**, **2 `8hr`** (only `DYNG`, `MOHA` — a legacy
+  spelling of the standard `08h`), 4 `GPS`. The `08h`/`8hr` split is a naming inconsistency;
+  `read_join` handles either (pass the right token), but worth normalizing someday.
+- **8-hour coverage is 2016–2021 only** (earliest epoch anywhere `2016.00136`, latest
+  `2021.98767`). **No 2014 8-hour data is present** in this dir — e.g. DYNG's remembered
+  Aug–Dec 2014 8h solution isn't here (its `08h`=2019, `8hr`=2021 files are later
+  reprocessings). If needed, the 2014 8h lives in an archive elsewhere.
+- Minor: `TOT` can carry two globk epochs that `convGlobktopandas`'s 1 h index-rounding
+  collapses to one timestamp (visible as a doubled row) — legacy behavior, golden-pinned.
+
 ---
-*Created 2026-07-11 from the real-data verification.*
+*Created 2026-07-11 from the real-data verification; §"data-hygiene" added from the B/read_join checks.*
