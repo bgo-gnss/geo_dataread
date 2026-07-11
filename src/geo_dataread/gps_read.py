@@ -633,9 +633,22 @@ def openGlobkTimes(sta, Dir=None, tType="TOT"):
     dir is the directory containing the time series if left blank the default path will be the path
     defined in the config file postprossesing.cfg, totDir
 
+    Any GLOBK processing scheme whose files follow the
+    ``mb_<STA>_<tType>.dat{1,2,3}`` naming convention can be read: ``TOT``
+    (24 h daily solutions), ``08h`` (8-hourly solutions, ~3 epochs/day,
+    revived in refactor-B slice 6), and extensibly e.g. ``04h``. All schemes
+    share the identical file format — 3 header lines followed by
+    ``yearf value sigma`` rows — so no scheme needs special time handling:
+    sub-daily epochs are already encoded as fractional years.
+
     args:
         sta: station four letter short name in captial letters
         Dir: optional alternative directory of the gamit time series data.
+        tType: GLOBK processing scheme, i.e. the ``<tType>`` part of the
+            ``mb_<STA>_<tType>.dat{1,2,3}`` file names. Default "TOT"
+            (daily); "08h" reads the 8-hourly solutions. A scheme whose
+            files are absent raises FileNotFoundError (only ``tType="TOT"``
+            retains the legacy fallback to lowercase ``mb_<STA>_tot.dat*``).
 
     returns:
 
@@ -644,17 +657,6 @@ def openGlobkTimes(sta, Dir=None, tType="TOT"):
         ddata: respective uncertainty values
 
     """
-
-    if tType == "08h":
-        # Deliberate dead-branch removal (refactor-B slice 4, decision D4):
-        # the 8-hour sub-daily branch never worked — it crashed with a
-        # NameError on undefined names (todatetime/shiftime/timetoyearf).
-        # Replaced with an explicit error; JOIN revival is slice 6.
-        raise ValueError(
-            "unsupported tType='08h': the sub-daily branch was dead (it "
-            "crashed on undefined names) and was removed in the refactor-B "
-            "slice-4 cleanup"
-        )
 
     config = ConfigParser()
 
@@ -678,8 +680,17 @@ def openGlobkTimes(sta, Dir=None, tType="TOT"):
         os.path.join(Dir, filepre + "1")
     ):  # use dat1, dat2, dat3 as file format
         pass
-    else:  # use tot as file format to read in data
+    elif tType == "TOT":  # legacy fallback: lowercase tot as file format
         filepre = "mb_{0:s}_{1:s}.dat".format(sta, "tot")
+
+    if not os.path.isfile(os.path.join(Dir, filepre + "1")):
+        # a scheme whose files genuinely don't exist is rejected up front
+        # with a clear error instead of a bare np.loadtxt failure (and a
+        # non-TOT scheme is never silently substituted with TOT data).
+        raise FileNotFoundError(
+            "no GLOBK time series for station '{0}', scheme '{1}': "
+            "expected {2}{{1,2,3}} in {3}".format(sta, tType, filepre, Dir)
+        )
 
     # construct the file names for each component
     datafile1 = os.path.join(Dir, filepre + "1")
@@ -783,6 +794,88 @@ def convGlobktopandas(yearf, data, Ddata):
     data.index = data.index.round("1h")
 
     return data
+
+
+def read_join(sta, schemes=("TOT", "08h"), Dir=None, missing="warn"):
+    """
+    Read a station's MULTIPLE GLOBK processing schemes into ONE DataFrame.
+
+    "JOIN" = joining different processing schemes (refactor-B slice 6
+    revival, decision D4): the daily TOT solutions and the sub-daily 08h
+    solutions (and extensibly e.g. 04h) are held together in one long-format
+    DataFrame, labeled by scheme, so they can be worked with jointly. This
+    is NOT a merge with overlap resolution — the schemes coexist; every
+    epoch of every scheme is kept, tagged with its scheme name.
+
+    Each scheme is read with openGlobkTimes (all schemes share the identical
+    mb_<STA>_<scheme>.dat{1,2,3} format — 3 header lines, then
+    ``yearf value sigma`` rows, sub-daily epochs already encoded as
+    fractional years), converted with convGlobktopandas, tagged, and
+    concatenated. Adding a new scheme is just listing it, e.g.
+    ``schemes=("TOT", "08h", "04h")``.
+
+    NOTE on getData(tType="JOIN"): that legacy alias is left unchanged — it
+    maps JOIN -> TOT and returns the (yearf, data, Ddata, offset) arrays.
+    read_join is the real JOIN: its natural return is a DataFrame (a
+    different shape), so it is a dedicated reader rather than a getData
+    mode.
+
+    Examples:
+        >>> read_join("SENG")
+        >>> read_join("SENG", schemes=("TOT", "08h"), Dir="/mnt_data/gpsdata")
+
+    Args:
+        sta: station four letter short name in capital letters
+        schemes: iterable of GLOBK processing-scheme names, i.e. the
+            ``<scheme>`` part of ``mb_<STA>_<scheme>.dat{1,2,3}``.
+            Default ("TOT", "08h"). A single-scheme list is the degenerate
+            JOIN (one label, same rows as the plain read).
+        Dir: optional alternative directory of the time series; default is
+            totDir from postprocess.cfg (same as openGlobkTimes).
+        missing: how to treat a scheme whose files don't exist —
+            "warn" (default): print a WARNING and skip the scheme;
+            "raise": re-raise the FileNotFoundError. If NO scheme yields
+            data, FileNotFoundError is always raised.
+
+    Returns:
+        pandas DataFrame, sorted by time (stable — coincident epochs keep
+        the schemes order), with
+            Index [datetime]  (rounded to 1h, as convGlobktopandas)
+            north, east, up   [m]  raw GLOBK solution values
+            Dnorth, Deast, Dup [m] respective uncertainties
+            yearf             fractional year (e.g. 2014.62328)
+            scheme            processing-scheme label (e.g. "TOT", "08h")
+    """
+
+    if missing not in ("warn", "raise"):
+        raise ValueError(
+            'missing must be "warn" or "raise", got {0!r}'.format(missing)
+        )
+
+    frames = []
+    for scheme in schemes:
+        try:
+            yearf, data, Ddata = openGlobkTimes(sta, Dir=Dir, tType=scheme)
+        except FileNotFoundError as e:
+            if missing == "raise":
+                raise
+            print("WARNING: skipping scheme {0!r} for station {1}: {2}".format(scheme, sta, e))
+            continue
+
+        frame = convGlobktopandas(yearf, data, Ddata)
+        frame["scheme"] = scheme
+        frames.append(frame)
+
+    if not frames:
+        raise FileNotFoundError(
+            "no GLOBK time series found for station '{0}' in any of the "
+            "schemes {1}".format(sta, tuple(schemes))
+        )
+
+    joined = pd.concat(frames)
+    joined.sort_index(inplace=True, kind="stable")
+
+    return joined
 
 
 def pvel(pl, pcov):
@@ -1482,6 +1575,9 @@ def getData(
     """
 
     if tType == "JOIN":
+        # legacy alias kept for back-compat: getData's array return can't
+        # carry multiple schemes. The real multi-scheme JOIN (DataFrame,
+        # revived in refactor-B slice 6) is read_join().
         tType = "TOT"
 
     yearf, data, Ddata = openGlobkTimes(sta, Dir=Dir, tType=tType)

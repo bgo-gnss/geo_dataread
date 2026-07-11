@@ -141,6 +141,14 @@ def _read_gps_data(sta, csv_present=True, **kwargs):
 CASES = {
     # -- openGlobkTimes: raw reader incl. the skiprows=3 quirk
     "ogt_SENG": _ogt_seng,
+    # 08h scheme reads again since refactor-B slice 6 (JOIN revival, D4) —
+    # identical plain read, no special sub-daily handling. The fixture
+    # mb_SENG_08h.dat* files are TOT copies, so this pins the mechanism
+    # (scheme -> file resolution), not distinct sub-daily values; the
+    # realdata suite pins genuine 8-hourly solutions.
+    "ogt_SENG_08h": lambda env: _tuple_to_dict(
+        *gpsr.openGlobkTimes("SENG", Dir=TOT, tType="08h")
+    ),
     # -- getData: legacy-dominant and gps_plot profiles
     "getdata_SENG_plate": _getdata("SENG", ref="plate"),
     "getdata_SENG_plate_uncert20": _getdata(
@@ -188,30 +196,34 @@ CASES = {
     "rgd_SKSH_fit_lineperiodic": _read_gps_data("SKSH", fit="lineperiodic"),
 }
 
-# Dead options pinned as CLEAN ERRORS — DELIBERATE golden change in
-# refactor-B slice 4 (decision D4). Both branches used to crash by ACCIDENT:
+# Dead options pinned as CLEAN ERRORS — DELIBERATE golden changes:
+#
+# refactor-B slice 4 (decision D4) — both branches used to crash by ACCIDENT:
 #
 # - useFIT="periodic": getDetrFit built lowercase 'fit'/'useSTA' columns while
 #   read_gps_data read const["Fit"] — KeyError('Fit'). The pygmt scripts that
-#   exercised it were already broken against current geo_dataread.
-# - tType="08h": openGlobkTimes' sub-daily block referenced undefined names
-#   (todatetime, shiftime, timetoyearf — wrong case) — NameError.
+#   exercised it were already broken against current geo_dataread. Slice 4
+#   removed the dead branch; getDetrFit validates useFIT with an explicit
+#   ValueError (pin updated KeyError -> ValueError on purpose).
 #
-# Slice 4 removed both dead branches and replaced them with an explicit
-# ValueError raised up front (getDetrFit validates useFIT; openGlobkTimes
-# validates tType). These two pins were updated KeyError/NameError →
-# ValueError on purpose — the only goldens moved by slice 4. The fixture
-# mb_SENG_08h.dat* files (TOT copies) predate the cleanup and are kept
-# frozen; they are no longer reached (validation fires before file I/O).
-# JOIN revival (gps_plot's sub-daily path) is slice 6.
+# refactor-B slice 6 (JOIN revival, D4) — the ONLY golden moved by slice 6:
+#
+# - tType="08h": slice 4 had replaced the broken sub-daily branch (NameError
+#   on undefined todatetime/shiftime/timetoyearf) with a temporary up-front
+#   ValueError, pinned here as "ogt_08h_raises" until the revival. Slice 6
+#   removed that guard — the plain read works for any scheme with
+#   mb_STA_<scheme>.dat{1,2,3} files, so 08h now READS (see "ogt_SENG_08h"
+#   in CASES). What remains pinned as a clean error: a scheme whose files
+#   genuinely don't exist raises FileNotFoundError up front (and a non-TOT
+#   scheme is never silently substituted with lowercase-tot data).
 CRASH_CASES = {
     "rgd_useSTA_periodic_raises": (
         _read_gps_data("OLAC", useSTA="DYNG", useFIT="periodic"),
         ValueError,
     ),
-    "ogt_08h_raises": (
-        lambda env: gpsr.openGlobkTimes("SENG", Dir=TOT, tType="08h"),
-        ValueError,
+    "ogt_missing_scheme_raises": (
+        lambda env: gpsr.openGlobkTimes("SENG", Dir=TOT, tType="04h"),
+        FileNotFoundError,
     ),
 }
 

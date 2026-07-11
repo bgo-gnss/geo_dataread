@@ -19,8 +19,14 @@ Stable, ~3948 LOC. Used by research workflows and `gps_plot`.
 > files that `gps-savetimes` (→ `gamittooneuf`) publishes to cdn.vedur.is.
 > Live callers: `gps-savetimes`, `gps-displacemnts` (`simpleDisp`), and
 > `gps_plot.timesmatplt` (`getData`). `read_gps_data` is research-only.
-> Dead options `useFIT="periodic"` / `tType="08h"` (were accidental-crash
-> pins): removed in refactor-B slice 4 — both now raise a clean `ValueError`.
+> Dead option `useFIT="periodic"` (was an accidental-crash pin): removed in
+> refactor-B slice 4 — now raises a clean `ValueError`. `tType="08h"` got the
+> same treatment in slice 4 but was REVIVED in slice 6 (JOIN, D4):
+> `openGlobkTimes` reads any scheme with `mb_STA_<scheme>.dat{1,2,3}` files
+> (missing scheme → clear `FileNotFoundError`), and the new `read_join(sta,
+> schemes=("TOT","08h"))` holds multiple processing schemes together in one
+> scheme-labeled, time-sorted DataFrame. `getData(tType="JOIN")` stays a
+> legacy alias for TOT (array return, back-compat).
 
 ## Layout
 
@@ -28,7 +34,7 @@ Stable, ~3948 LOC. Used by research workflows and `gps_plot`.
 geo_dataread/
 ├── src/geo_dataread/
 │   ├── __init__.py
-│   ├── gps_read.py       # ~1500 LOC — main GPS time-series reader (post slice-4 dead-code purge)
+│   ├── gps_read.py       # ~1640 LOC — main GPS time-series reader (slice-4 purge + slice-6 read_join)
 │   ├── gps_displ.py      # displacements / station-relative motion
 │   ├── gps_savetimes.py  # serialise time series to disk
 │   ├── gas_read.py       # GAS (strainmeter) data
@@ -67,4 +73,4 @@ gps-displacemnts ...  # entry: geo_dataread.gps_displ:main   (sic — typo prese
 
 ---
 
-*Last reviewed: 2026-07-08*
+*Last reviewed: 2026-07-11*

@@ -2,7 +2,11 @@
 
 Run from the geo_dataread root:
 
-    uv run python tests/goldenmaster/capture_realdata_goldens.py
+    uv run python tests/goldenmaster/capture_realdata_goldens.py [case_id ...]
+
+With no arguments every case is recaptured; case_id arguments restrict the
+capture to just those cases (for ADDING new pins without rewriting the
+frozen ones — e.g. the slice-6 JOIN cases were captured selectively).
 
 Same rules as capture_goldens.py: ONLY rerun when a behavior change is
 intentional and reviewed. Every case runs twice; nothing is written if the
@@ -40,13 +44,19 @@ def _dicts_equal(a, b):
     return True
 
 
-def main() -> int:
+def main(only=()) -> int:
+    unknown = sorted(set(only) - set(REAL_CASES) - set(REAL_NEU_FILE_CASES))
+    if unknown:
+        raise SystemExit(f"unknown case id(s): {unknown}")
+    cases = {c: REAL_CASES[c] for c in (only or REAL_CASES) if c in REAL_CASES}
+    neu_cases = [c for c in (only or REAL_NEU_FILE_CASES) if c in REAL_NEU_FILE_CASES]
+
     with tempfile.TemporaryDirectory() as tmp:
         tmp = Path(tmp)
         env = {"config_dir": build_real_config_dir(tmp / "gpsconfig")}
         REAL_EXPECTED.mkdir(parents=True, exist_ok=True)
 
-        for case_id, runner in REAL_CASES.items():
+        for case_id, runner in cases.items():
             first = runner(env)
             second = runner(env)
             if not _dicts_equal(first, second):
@@ -57,7 +67,7 @@ def main() -> int:
 
         for d in ("neu1", "neu2"):
             (tmp / d).mkdir(exist_ok=True)
-        for case_id in REAL_NEU_FILE_CASES:
+        for case_id in neu_cases:
             out1 = run_real_neu_file_case(case_id, env, tmp / "neu1")
             out2 = run_real_neu_file_case(case_id, env, tmp / "neu2")
             if out1.read_bytes() != out2.read_bytes():
@@ -66,9 +76,9 @@ def main() -> int:
             (REAL_EXPECTED / f"{case_id}.NEU").write_bytes(out1.read_bytes())
             print(f"captured {case_id}")
 
-    print(f"\nAll real-data goldens written to {REAL_EXPECTED}")
+    print(f"\n{len(cases) + len(neu_cases)} real-data golden(s) written to {REAL_EXPECTED}")
     return 0
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(main(sys.argv[1:]))
