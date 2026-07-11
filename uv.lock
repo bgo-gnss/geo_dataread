@@ -88,6 +88,7 @@ version = "0.2.0"
 source = { editable = "." }
 dependencies = [
     { name = "geofunc" },
+    { name = "gps-analysis" },
     { name = "gps-parser" },
     { name = "gtimes" },
     { name = "numpy" },
@@ -106,6 +107,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "geofunc", git = "https://github.com/bennigo/geofunc.git" },
+    { name = "gps-analysis", editable = "../gps_analysis" },
     { name = "gps-parser", git = "https://github.com/bennigo/gps_parser.git" },
     { name = "gtimes", specifier = ">=0.5.1" },
     { name = "numpy", specifier = ">=2.1" },
@@ -124,6 +126,32 @@ dev = [
 name = "geofunc"
 version = "0.2.0"
 source = { git = "https://github.com/bennigo/geofunc.git#97bec8146a6bc38d2e5c1b74c8db0c671f7a456f" }
+
+[[package]]
+name = "gps-analysis"
+version = "0.1.0"
+source = { editable = "../gps_analysis" }
+dependencies = [
+    { name = "gtimes" },
+    { name = "numpy" },
+    { name = "scipy" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "gtimes", specifier = ">=0.5.1" },
+    { name = "numpy", specifier = ">=2.1" },
+    { name = "scipy", specifier = ">=1.14.1" },
+]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "black", specifier = ">=24.10" },
+    { name = "mypy", specifier = ">=1.13" },
+    { name = "pytest", specifier = ">=8.3" },
+    { name = "pytest-cov", specifier = ">=6.0" },
+    { name = "ruff", specifier = ">=0.8" },
+]
 
 [[package]]
 name = "gps-parser"

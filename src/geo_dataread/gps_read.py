@@ -17,6 +17,9 @@ from typing import List, Optional, Union
 import geofunc.geofunc as gf
 import numpy as np
 import pandas as pd
+from gps_analysis import fitting as ga_fitting
+from gps_analysis import models as ga_models
+from gps_analysis.models import TrajectoryParams
 from gps_parser import ConfigParser
 
 from gtimes.timefunc import (
@@ -493,22 +496,37 @@ def fitDataFrame(func, df, p0=[None, None, None]):
 
 
 def fittime(func, x, y, yd=None, p0=None):
-    """ """
-    pb, pcov = optimize.curve_fit(func, x, y, p0=p0, sigma=yd, maxfev=100000)
+    """Deprecated shim: single-component fit.
 
-    return pb, pcov
+    The math lives in :func:`gps_analysis.fitting.fit_components`
+    (refactor-B slice 1); this wrapper keeps the legacy name/signature and
+    the legacy ``maxfev=100000``. Bit-identical to the old direct
+    ``scipy.optimize.curve_fit`` call (same invocation).
+    """
+    fit = ga_fitting.fit_components(func, x, y, sigma=yd, p0=p0, maxfev=100000)[0]
+
+    return fit.params, fit.covariance
 
 
 def fittimes(func, x, y, yd=[None, None, None], p0=[None, None, None]):
-    """ """
+    """Deprecated shim: per-component (N/E/U) fit loop.
+
+    The math lives in :func:`gps_analysis.fitting.fit_components`
+    (refactor-B slice 1); this wrapper keeps the legacy name/signature,
+    the legacy ``maxfev=100000``, the (pb, pcov) list-of-3 return shape,
+    and the legacy per-component ``p0``/``yd`` semantics (each entry may
+    independently be None). Bit-identical to the old loop — the underlying
+    ``scipy.optimize.curve_fit`` invocation is unchanged.
+    """
 
     pb = [[], [], []]
     pcov = [[], [], []]
 
     for i in range(3):
-        pb[i], pcov[i] = optimize.curve_fit(
-            func, x, y[i], p0=p0[i], sigma=yd[i], maxfev=100000
-        )
+        fit = ga_fitting.fit_components(
+            func, x, y[i], sigma=yd[i], p0=p0[i], maxfev=100000
+        )[0]
+        pb[i], pcov[i] = fit.params, fit.covariance
 
     return pb, pcov
 
@@ -1187,8 +1205,18 @@ def TieTimes(sta1, sta2, dirConFilePath=None, freq=None, tie=[None, None, None])
 #         data.to_csv(outfile, sep="\t", index=True, header=False)
 
 
+# Legacy scipy.optimize.leastsq residual machinery (rate-first parameter
+# packing, p = [rate, ...amplitudes..., intercept]) — only consumers are the
+# dead `fitline` (reads ./itrf08det) path, the broken getData(ref="detrend")
+# branch, and `filt_outl` (no internal callers). Slated for deletion in
+# refactor-B slice 4 ("dead leastsq block").
+
+
 def fitfuncl(p, x):
-    return p[0] * x + p[1]
+    # Deprecated shim (refactor-B slice 1): p = [rate, intercept] →
+    # gps_analysis.models.linear(x, intercept, rate). Bit-identical
+    # (IEEE addition/multiplication are commutative).
+    return ga_models.linear(x, p[1], p[0])
 
 
 def errfuncl(p, x, y):
@@ -1196,6 +1224,10 @@ def errfuncl(p, x, y):
 
 
 def fitfunc(p, x):
+    # NOT delegated to gps_analysis.models.lineperiodic: same model, but the
+    # leaf evaluates linear(t) + periodic(t) whereas this legacy single
+    # expression associates left-to-right — measured ≤ 2.3e-13 (~1 ulp)
+    # difference. Kept verbatim (behavior frozen) until slice 4 deletes it.
     return (
         p[0] * x
         + p[1] * np.cos(2 * np.pi * x)
@@ -1370,6 +1402,14 @@ def detrend(
 
 
 
+    Note:
+        Deprecated shim (refactor-B slice 1): the math lives in
+        :mod:`gps_analysis.fitting` — the fit is
+        ``fit_components`` (via the :func:`fittimes` shim) and the
+        subtraction is ``remove_trend``. Legacy semantics preserved
+        exactly: ``y`` is still mutated IN PLACE and returned, and the
+        seeding via :func:`getDetrFit`/:func:`convconst` (file I/O) stays
+        here in geo_dataread.
     """
 
     if Dy is None:
@@ -1387,8 +1427,14 @@ def detrend(
 
         p, _ = fittimes(fitfunc, x, y, Dy, p0=p0)
 
-    for i in range(3):
-        y[i] = y[i] - fitfunc(x, *p[i])
+    fits = [
+        TrajectoryParams(
+            params=np.asarray(p[i], dtype=np.float64),
+            covariance=np.zeros((len(p[i]), len(p[i]))),
+        )
+        for i in range(3)
+    ]
+    y[:] = ga_fitting.remove_trend(fitfunc, x, y, fits)
 
     if zref:
         _, y, _, _ = vshift(x, y, Dy, uncert=20.0, refdate=None, Period=5)

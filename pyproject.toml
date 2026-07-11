@@ -11,6 +11,7 @@ maintainers = [{ name = "Benedikt Gunnar Ófeigsson", email = "bgo@vedur.is" }]
 requires-python = ">=3.13"
 dependencies = [
     "geofunc@git+https://github.com/bennigo/geofunc.git",
+    "gps_analysis",
     "gps_parser@git+https://github.com/bennigo/gps_parser.git",
     "gtimes>=0.5.1",
     "numpy>=2.1",
@@ -29,6 +30,12 @@ gps-displacemnts = "geo_dataread.gps_displ:main"
 
 [tool.hatch.metadata]
 allow-direct-references = true
+
+# Local editable path dep (gps_plot precedent — gpslibrary/CLAUDE.md "Editing
+# Across Packages"). gps_analysis has no git remote yet; production packaging
+# (git+https pin) is a later item on the refactor-B plan.
+[tool.uv.sources]
+gps_analysis = { path = "../gps_analysis", editable = true }
 
 [build-system]
 requires = ["hatchling"]
