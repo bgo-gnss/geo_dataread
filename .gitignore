@@ -8,3 +8,6 @@ wheels/
 
 # Virtual environments
 .venv
+
+# Regenerable real-data verification renders
+verify_data_to_plot/

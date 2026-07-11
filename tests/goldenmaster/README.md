@@ -30,6 +30,37 @@ run-to-run difference (nondeterminism guard).
   `GPS_CONFIG_PATH` to a rendered copy; nothing reads `~/.config/gpsconfig`.
 - `expected/` — the goldens: `.npz` per case + literal `.NEU` product files.
 
+## Real-data cases (added 2026-07-11, data→plot baseline scope A)
+
+`realdata_cases.py` / `test_realdata.py` / `capture_realdata_goldens.py`
+extend the suite with fixtures frozen from **real GLOBK solutions** —
+the safety net the §10.1 refactor runs against production-shaped data.
+See `DATA_TO_PLOT_FINDINGS.md` at the repo root.
+
+- `fixtures/realdata/TOT/` — SENG, HOFN, REYK: the 3 real header lines +
+  the **last 500 epochs** of `/mnt_data/gpsdata/mb_*_TOT.dat{1,2,3}`
+  (snapshot 2026-07-11, all slices end 2026.52192; SENG spans the
+  Sundhnúkur unrest). Self-contained — tests never read the mount.
+  Unlike the synthetic fixtures these have real headers, so `skiprows=3`
+  lands exactly on the first data row (no epoch loss).
+- `fixtures/realdata/gpsconfig/` — SENG/HOFN/REYK subset of the deployed
+  `station_coord.xyz` (**ECEF XYZ** — the format `geofunc.plateVelo`
+  actually consumes; the synthetic suite's `.llh` file is pinned as-is,
+  separately) + `station-plate` (HOFN EURA, REYK/SENG NOAM). Rendered to a
+  temp config dir; runners swap `GPS_CONFIG_PATH` per call and restore it,
+  so the real cases coexist with the synthetic session env in any order.
+- `expected/realdata/` — the real goldens: `.npz` per case + `.NEU` files.
+  Recapture (only when intentional + reviewed):
+  `uv run python tests/goldenmaster/capture_realdata_goldens.py`
+- Pinned per station: `openGlobkTimes` raw read; `getData` with
+  `ref="itrf2008"` and `ref="plate"` (gps_plot profile — the real SENG
+  slice exercises the 15 mm `iprep` threshold: 4 epochs filtered);
+  `gamittoNEU` + `gamittooneuf` savetimes profile (`mm=True, ref="plate",
+  dstring=None, rhour=True` — the `.NEU → cdn.vedur.is` path).
+- Sensitivity (checked 2026-07-11): swapping SENG's plate NOAM→EURA moves
+  `real_getdata_SENG_plate` by up to 22 mm; plate vs itrf2008 goldens
+  differ by up to 26 mm — the plate path is genuinely pinned.
+
 ## Verified sensitivity (mutation-tested 2026-07-08)
 
 - Swapping plate-subtraction/mm-conversion order in `gamittoNEU` → 5 tests fail.
