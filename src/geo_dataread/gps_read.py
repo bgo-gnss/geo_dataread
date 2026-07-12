@@ -9,7 +9,7 @@ import re
 import sys
 from collections import OrderedDict
 from pathlib import Path
-from typing import List, Optional, Union
+from typing import Optional
 
 import geofunc.geofunc as gf
 import numpy as np
@@ -34,26 +34,25 @@ from gtimes.timefunc import (
 #
 
 
-def line(
-    x: Union[int, float], p0: Union[int, float], p1: Union[int, float]
-) -> Union[int, float]:
+def line(x, p0, p1):
+    """Deprecated shim: linear (secular) model.
+
+    The math lives in :func:`gps_analysis.models.linear` (refactor-B
+    slice 7); this wrapper keeps the legacy name/signature. Bit-identical
+    to the old ``p0 + p1*x`` expression (same float64 arithmetic, verified
+    bitwise over a wide parameter sweep); the only change is the return
+    type for scalar ``x`` (0-d ndarray instead of a Python scalar — all
+    callers pass arrays).
+
+    Args:
+        x: input value in yearf or ordinal (or any numeric time)
+        p0: intercept
+        p1: slope
+
+    Returns:
+        output value, float64 (same shape as ``x``)
     """
-    linear function for detrending timeseries without considering their oscillatory nature.
-
-    examples:
-        >>> line(1, 0, 1)
-        1
-
-    args:
-        x (union[int, float]): input value in yearf or ordinal (or any numeric time)
-        p0 (union[int, float]): intercept
-        p1 (union[int, float]): slope
-
-    returns:
-        union[int, float]: output value
-
-    """
-    return p0 + p1 * x
+    return ga_models.linear(x, p0, p1)
 
 
 def lineperiodic(
@@ -78,6 +77,18 @@ def lineperiodic(
     returns:
         output value
 
+    Note:
+        NOT delegated to :func:`gps_analysis.models.lineperiodic`
+        (refactor-B slice 7 decision): the leaf evaluates
+        ``linear(t, …) + periodic(t, …)``, whose float64 association
+        differs from this legacy single expression by up to 1 ulp —
+        measured 300/300 mismatching trials on representative
+        yearf/parameter sweeps. This function feeds
+        ``scipy.optimize.curve_fit`` on golden-pinned paths
+        (``read_gps_data`` detrend/fit cases), so the evaluation order is
+        pinned verbatim here for bit-parity. Consolidating it into the
+        leaf is a follow-up for whenever the goldens are deliberately
+        re-baselined (or the leaf grows a legacy-association evaluator).
     """
 
     return (
@@ -90,110 +101,139 @@ def lineperiodic(
     )
 
 
-def periodic(
-    x: float, p0: float, p1: float, p2: float, p3: float, p4: float, p5: float
-) -> float:
-    """
-    periodic function without the linear part
+def periodic(x, p0, p1, p2, p3, p4, p5):
+    """Deprecated shim: seasonal (annual + semiannual) model.
 
+    The math lives in :func:`gps_analysis.models.periodic` (refactor-B
+    slice 7); this wrapper keeps the legacy 7-argument signature, in which
+    ``p0``/``p1`` are accepted — and ignored — so that full
+    :func:`lineperiodic` parameter vectors can be reused (the
+    ``read_gps_data`` fit paths rely on this). Bit-identical to the old
+    expression: the leaf's ``2.0 * two_pi_t`` semiannual argument equals
+    the legacy ``4*np.pi*x`` exactly (power-of-two scaling) and the terms
+    sum in the same order (verified bitwise over a wide parameter sweep).
 
-    examples:
-        >>> periodic(1, 0, 1, 1, 1, 1, 1)
-
-
-    args:
+    Args:
         x: input value in yearf or ordinal (or any numeric time)
-        p0: coefficient
-        p1: coefficient
-        p2: coefficient
-        p3: coefficient
-        p4: coefficient
-        p5: coefficient
+        p0: intercept — IGNORED (legacy signature compatibility)
+        p1: slope — IGNORED (legacy signature compatibility)
+        p2: annual cosine amplitude
+        p3: annual sine amplitude
+        p4: semiannual cosine amplitude
+        p5: semiannual sine amplitude
 
-    returns:
-        output value
-
+    Returns:
+        output value, float64 (same shape as ``x``)
     """
-
-    return (
-        p2 * np.cos(2 * np.pi * x)
-        + p3 * np.sin(2 * np.pi * x)
-        + p4 * np.cos(4 * np.pi * x)
-        + p5 * np.sin(4 * np.pi * x)
-    )
+    return ga_models.periodic(x, p2, p3, p4, p5)
 
 
-def xf(x: float, p0: float, p1: float, p2: float, tau=4.8) -> float:
-    """
-    linear + exponential function with constant tau coefficient
+def xf(x, p0, p1, p2, tau=4.8):
+    """Deprecated shim: linear + exponential transient, fixed decay.
 
-    examples:
-        >>> xf(1, 0, 1, 1, 1)
+    The math lives in :func:`gps_analysis.models.exp_linear` (refactor-B
+    slice 7); this wrapper keeps the legacy name/signature including the
+    ``tau=4.8`` default decay constant. Bit-identical to the old
+    ``p0 + p1*x + p2*np.exp(-tau*x)`` expression (identical arithmetic
+    and association, verified bitwise over a wide parameter sweep).
 
-    args:
+    Args:
         x: input value in yearf or ordinal (or any numeric time)
         p0: intercept
         p1: slope
         p2: exponential term coefficient
-        tau: exponential coefficient
+        tau: exponential decay constant [1/yr]. Default 4.8
 
-    returns:
-        y: output value
-
-
+    Returns:
+        output value, float64 (same shape as ``x``)
     """
+    return ga_models.exp_linear(x, p0, p1, p2, tau)
 
-    return p0 + p1 * x + p2 * np.exp(-tau * x)
 
+def expxf(x, p0, p1, p2, p3):
+    """Deprecated shim: linear + exponential transient, fitted decay.
 
-def expxf(x: float, p0: float, p1: float, p2: float, p3: float) -> float:
-    """
+    The math lives in :func:`gps_analysis.models.exp_linear` (refactor-B
+    slice 7) — identical signature semantics, so this is a direct
+    pass-through. Bit-identical to the old
+    ``p0 + p1*x + p2*np.exp(-p3*x)`` expression (identical arithmetic and
+    association, verified bitwise over a wide parameter sweep).
 
-    linear + exponential function with variable coefficient
-
-    examples:
-        >>> expxf(1, 0, 1, 1, 1)
-
-    args:
+    Args:
         x: input value in yearf or ordinal (or any numeric time)
         p0: intercept
         p1: slope
-        p2: exponential term coefficient
-        p3: exponential coefficient
+        p2: exponential term coefficient (amplitude)
+        p3: exponential decay constant
 
-    returns:
-        y: output value
-
+    Returns:
+        output value, float64 (same shape as ``x``)
     """
-
-    return p0 + p1 * x + p2 * np.exp(-p3 * x)
-
-    """"""
+    return ga_models.exp_linear(x, p0, p1, p2, p3)
 
 
 def expf(x, p0, p1, p2):
-    """
-    exponential function
+    """Deprecated shim: pure exponential relaxation (no secular term).
 
-    """
+    The math lives in :func:`gps_analysis.models.exp_linear` (refactor-B
+    slice 7), called with ``rate=0.0``. Bit-identical to the old
+    ``p0 + p1*np.exp(-p2*x)`` expression for finite ``x`` (the leaf's
+    extra ``0.0*x`` term is exact, verified bitwise over a wide parameter
+    sweep). This is the legacy compatibility alias the leaf deliberately
+    did not adopt (CONSOLIDATION_MAP decision 3 — new names only there,
+    shims here).
 
-    return p0 + p1 * np.exp(-p2 * x)
+    Args:
+        x: input value in yearf or ordinal (or any numeric time)
+        p0: offset
+        p1: exponential amplitude
+        p2: exponential decay constant
+
+    Returns:
+        output value, float64 (same shape as ``x``)
+    """
+    return ga_models.exp_linear(x, p0, 0.0, p1, p2)
 
 
 def dexpf(x, p1, p2):
-    """
-    derivative of p0 + p1*exp(-p2*x)
-    """
+    """Deprecated shim: derivative of ``p0 + p1*exp(-p2*x)``.
 
-    return -p1 * p2 * np.exp(-p2 * x)
+    The math lives in :func:`gps_analysis.models.exp_linear_rate`
+    (refactor-B slice 7), called with ``rate=0.0``. Bit-identical to the
+    old ``-p1*p2*np.exp(-p2*x)`` expression (IEEE-exact sign/zero
+    manipulation, verified bitwise over a wide parameter sweep).
+
+    Args:
+        x: input value in yearf or ordinal (or any numeric time)
+        p1: exponential amplitude
+        p2: exponential decay constant
+
+    Returns:
+        instantaneous rate, float64 (same shape as ``x``)
+    """
+    return ga_models.exp_linear_rate(x, 0.0, p1, p2)
 
 
 def secondorder(x, p0, p1, p2):
-    """
-    Second decree polynomial function
-    """
+    """Deprecated shim: degree-2 polynomial.
 
-    return p0 + p1 * x + p2 * x**2
+    The math lives in :func:`gps_analysis.models.poly2` (refactor-B
+    slice 7); this wrapper keeps the legacy name. Bit-identical to the
+    old ``p0 + p1*x + p2*x**2`` expression (identical arithmetic and
+    association, verified bitwise over a wide parameter sweep). This is
+    the legacy compatibility alias the leaf deliberately did not adopt
+    (CONSOLIDATION_MAP decision 3 — new names only there, shims here).
+
+    Args:
+        x: input value in yearf or ordinal (or any numeric time)
+        p0: offset
+        p1: initial rate
+        p2: quadratic coefficient (curvature)
+
+    Returns:
+        output value, float64 (same shape as ``x``)
+    """
+    return ga_models.poly2(x, p0, p1, p2)
 
 
 def getDetrFit(
