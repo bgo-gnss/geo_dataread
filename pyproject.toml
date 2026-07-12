@@ -10,9 +10,9 @@ authors = [
 maintainers = [{ name = "Benedikt Gunnar Ófeigsson", email = "bgo@vedur.is" }]
 requires-python = ">=3.13"
 dependencies = [
-    "geofunc@git+https://github.com/bennigo/geofunc.git",
+    "geofunc@git+https://github.com/bgo-gnss/geofunc.git",
     "gps_analysis",
-    "gps_parser@git+https://github.com/bennigo/gps_parser.git",
+    "gps_parser@git+https://github.com/bgo-gnss/gps_parser.git",
     "gtimes>=0.5.1",
     "numpy>=2.1",
     "pandas>=2.2",

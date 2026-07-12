@@ -106,9 +106,9 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "geofunc", git = "https://github.com/bennigo/geofunc.git" },
+    { name = "geofunc", git = "https://github.com/bgo-gnss/geofunc.git" },
     { name = "gps-analysis", editable = "../gps_analysis" },
-    { name = "gps-parser", git = "https://github.com/bennigo/gps_parser.git" },
+    { name = "gps-parser", git = "https://github.com/bgo-gnss/gps_parser.git" },
     { name = "gtimes", specifier = ">=0.5.1" },
     { name = "numpy", specifier = ">=2.1" },
     { name = "pandas", specifier = ">=2.2" },
@@ -125,7 +125,7 @@ dev = [
 [[package]]
 name = "geofunc"
 version = "0.2.0"
-source = { git = "https://github.com/bennigo/geofunc.git#97bec8146a6bc38d2e5c1b74c8db0c671f7a456f" }
+source = { git = "https://github.com/bgo-gnss/geofunc.git#97bec8146a6bc38d2e5c1b74c8db0c671f7a456f" }
 
 [[package]]
 name = "gps-analysis"
@@ -156,7 +156,7 @@ dev = [
 [[package]]
 name = "gps-parser"
 version = "0.3.0"
-source = { git = "https://github.com/bennigo/gps_parser.git#6257deb9bf7498a862e53c680246749659f3a112" }
+source = { git = "https://github.com/bgo-gnss/gps_parser.git#6257deb9bf7498a862e53c680246749659f3a112" }
 
 [[package]]
 name = "gtimes"
