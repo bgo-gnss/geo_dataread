@@ -58,6 +58,32 @@ was built to make safe.
 4. **Delete dead code** (D4's 08h + `compGlobkTimes`/`TieTimes`/`savedisp`/`gpsvelo`/`leastsq`).
 5. **Thin `gamittoNEU`/`gamittooneuf`** (`.NEU` path). *(⚠️ sign-off gate)*
 6. **Revive JOIN** (D4) as a clean, tested mode.
+7. **Model evaluators → leaf shims** *(landed on `refactor-B-pure-io`)*:
+   `line`/`periodic`/`xf`/`expxf`/`expf`/`dexpf`/`secondorder` delegate to
+   `gps_analysis.models` (`linear`/`periodic`/`exp_linear`/`exp_linear_rate`/`poly2`) —
+   bitwise-identical delegation, pinned by `tests/test_model_shims.py`.
+   **`lineperiodic` deliberately stays local**: the leaf's `linear + periodic`
+   association differs from the legacy single expression by ≤1 ulp (measured
+   300/300 trials), and it feeds `curve_fit` on golden-pinned paths — consolidate
+   only at a deliberate golden re-baseline (or if the leaf grows a
+   legacy-association evaluator).
+
+## Remaining (next slices)
+- `read_gps_data` derived columns (`hlength`/`hangle`/`Dhlength`): leaf has
+  `velocity.horizontal_magnitude/azimuth`, but the azimuth CONVENTION differs
+  (leaf = geodetic CW-from-north; legacy `hangle` = math CCW-from-east) — not a
+  drop-in; research-only path, frozen per "freeze + shim, don't invest".
+- `pvel`/`printvelocity`: trivial rate/σ extraction + GMT-style printing —
+  presentation, no leaf target; leave.
+- D3 `DetrendStore` (replace `getDetrFit`/`convconst`/`save_detrend_const`) —
+  deferred by decision until the detrend path is productized.
+- Hygiene: `logging.basicConfig` inside `getDetrFit`/`read_gps_data`; dead
+  `fromord` (`Timeto` undefined) + bare `except` in `__converter` (pre-existing
+  ruff findings) — safe, behavior-invisible cleanup slice.
+- `gps_displ.py`: `xyzDict`/`llh` still import the long-gone `cparser` module
+  (broken since the gps_parser rename — `gps-displacemnts` CLI cannot run in a
+  clean env); `fitDisp` is unused polyfit research code. Needs its own
+  characterize-then-fix slice.
 
 ## Feeds from A
 Golden masters (synthetic + real SENG/HOFN/REYK) = the safety net; R2 de-risked (plate/unit

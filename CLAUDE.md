@@ -27,6 +27,12 @@ Stable, ~3948 LOC. Used by research workflows and `gps_plot`.
 > schemes=("TOT","08h"))` holds multiple processing schemes together in one
 > scheme-labeled, time-sorted DataFrame. `getData(tType="JOIN")` stays a
 > legacy alias for TOT (array return, back-compat).
+> Slice 7 (`refactor-B-pure-io`): the model evaluators (`line`, `periodic`,
+> `xf`, `expxf`, `expf`, `dexpf`, `secondorder`) are bitwise-identical shims
+> over `gps_analysis.models`, pinned by `tests/test_model_shims.py`;
+> `lineperiodic` deliberately keeps its local single-expression evaluation
+> (leaf association differs by ≤1 ulp; it feeds curve_fit on golden-pinned
+> paths). Remaining-work ledger: `PLAN-geo_dataread-refactor-B.md`.
 
 ## Layout
 
@@ -73,4 +79,4 @@ gps-displacemnts ...  # entry: geo_dataread.gps_displ:main   (sic — typo prese
 
 ---
 
-*Last reviewed: 2026-07-11*
+*Last reviewed: 2026-07-12*
