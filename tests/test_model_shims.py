@@ -86,9 +86,9 @@ def _assert_bitwise(got, want, label):
     want = np.asarray(want)
     assert got.shape == want.shape, f"{label}: shape {got.shape} != {want.shape}"
     assert got.dtype == np.float64, f"{label}: dtype {got.dtype}"
-    assert np.array_equal(
-        got, want, equal_nan=True
-    ), f"{label}: shim output is not bit-identical to the legacy expression"
+    assert np.array_equal(got, want, equal_nan=True), (
+        f"{label}: shim output is not bit-identical to the legacy expression"
+    )
 
 
 @pytest.mark.parametrize("x", X_CASES, ids=["yearf", "event", "unit", "scalar-ish"])
