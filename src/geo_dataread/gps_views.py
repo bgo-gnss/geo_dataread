@@ -37,7 +37,7 @@ import csv
 import json
 import logging
 import warnings
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any
@@ -70,6 +70,9 @@ STEPS_FILENAME = "steps.csv"
 
 STEP_COMPONENTS = ("N", "E", "U", "ALL")
 """Component tags a ``steps.csv`` row may carry (``ALL`` = every component)."""
+
+PROTECT_WINDOWS_FILENAME = "protect_windows.csv"
+"""Deployed per-station protect-window catalog filename (gpsconfig-owned)."""
 
 _COMPONENTS = ("north", "east", "up")
 
@@ -381,6 +384,187 @@ def station_step_epochs(
 
 
 # ---------------------------------------------------------------------------
+# Declared protect-window catalog (active-unrest cleaning lever)
+# ---------------------------------------------------------------------------
+
+
+def default_protect_windows_path() -> Path | None:
+    """Resolve the deployed ``protect_windows.csv`` path via gps_parser.
+
+    Resolution order (mirrors :func:`default_steps_path`):
+
+    1. ``postprocess.cfg`` ``[FILES] protect_windows`` (resolved by
+       :meth:`gps_parser.ConfigParser.getPostProcessConfig`);
+    2. ``<gpsconfig dir>/protect_windows.csv`` (the deploy-target default).
+
+    Returns:
+        The resolved path (which may not exist yet — the protect-window
+        catalog is an optional enhancement), or None when no gpsconfig is
+        reachable.
+    """
+    try:
+        config = ConfigParser()
+    except Exception:  # pragma: no cover - no gpsconfig deployed at all
+        logger.warning(
+            "no gpsconfig available; cannot resolve %s", PROTECT_WINDOWS_FILENAME
+        )
+        return None
+    try:
+        return Path(str(config.getPostProcessConfig("protect_windows")))
+    except Exception:
+        # additive key not deployed yet - fall back to the gpsconfig dir
+        config_path = getattr(config, "config_path", None)
+        if config_path:
+            return Path(str(config_path)) / PROTECT_WINDOWS_FILENAME
+        return None
+
+
+def read_protect_windows(
+    path: str | Path | None = None,
+) -> dict[str, tuple[tuple[float, float], ...]]:
+    """Read the deployed per-station protect-window catalog.
+
+    Operator-declared protect windows are the active-unrest cleaning lever
+    (``docs/DESIGN_outlier_detection.md`` §3.4.3): intervals the operator
+    marks as "this is real signal, not outliers" so
+    :func:`gps_analysis.detect_outliers` excludes them from the robust fit,
+    the identifier stages AND the excess-flag abort — an unrest station
+    CLEANS instead of degrading.
+
+    This is geo_dataread's OWN reader (Tier 1 must not import ``gps_api``).
+    Format: ``sta,start_yearf,end_yearf,comment`` with ``#`` comment lines.
+
+    Args:
+        path: Explicit catalog path; None resolves via
+            :func:`default_protect_windows_path`.
+
+    Returns:
+        ``{station: ((start, end), ...)}`` — per-station tuple of closed
+        fractional-year intervals, sorted by start (only stations with rows
+        appear).
+
+    Raises:
+        FileNotFoundError: When the catalog (or a gpsconfig to resolve it
+            from) does not exist.
+        ValueError: On a malformed row (missing marker, non-numeric bound,
+            or ``end < start``) — a corrupt catalog is rejected, never
+            silently dropped. The graceful-degrade wrapping lives in
+            :func:`station_protect_windows`.
+    """
+    resolved = Path(path) if path is not None else default_protect_windows_path()
+    if resolved is None:
+        raise FileNotFoundError(
+            f"no gpsconfig available to resolve {PROTECT_WINDOWS_FILENAME}"
+        )
+    if not resolved.is_file():
+        raise FileNotFoundError(f"protect-window catalog not found: {resolved}")
+    lines = [
+        line
+        for line in resolved.read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+    catalog: dict[str, list[tuple[float, float]]] = {}
+    for row in csv.DictReader(lines):
+        marker = str(row.get("sta") or "").strip()
+        if not marker:
+            raise ValueError(
+                f"{resolved}: protect_windows.csv row without a 'sta' marker: {row}"
+            )
+        try:
+            start = float(str(row.get("start_yearf")))
+            end = float(str(row.get("end_yearf")))
+        except (TypeError, ValueError):
+            raise ValueError(
+                f"{resolved}: station {marker}: start_yearf/end_yearf "
+                f"{row.get('start_yearf')!r}/{row.get('end_yearf')!r} "
+                "are not fractional years"
+            ) from None
+        if end < start:
+            raise ValueError(
+                f"{resolved}: station {marker}: protect window end {end} < "
+                f"start {start} — an interval must be (start, end) with "
+                "end >= start"
+            )
+        catalog.setdefault(marker, []).append((start, end))
+    return {marker: tuple(sorted(windows)) for marker, windows in catalog.items()}
+
+
+def station_protect_windows(
+    sta: str, *, catalog: str | Path | None = None
+) -> tuple[tuple[tuple[float, float], ...], str | None]:
+    """Declared protect windows for one station, with graceful degrade.
+
+    The graceful convenience the cleaning paths call: resolves and reads
+    the catalog, returns the station's protect intervals and the resolved
+    source path. Protect windows are an ENHANCEMENT — a missing or
+    unreadable catalog (or a corrupt row) must NEVER hard-fail cleaning, so
+    ANY problem warns (``UserWarning`` + log) and returns no windows.
+
+    Args:
+        sta: Station four-letter name.
+        catalog: Explicit catalog path; None resolves the deployed default.
+
+    Returns:
+        ``(windows, source)`` — a tuple of ``(start, end)`` intervals
+        (possibly empty) and the resolved catalog path (or None when
+        unavailable / degraded).
+    """
+    resolved = default_protect_windows_path() if catalog is None else Path(catalog)
+    try:
+        windows_by_sta = read_protect_windows(resolved)
+    except FileNotFoundError as exc:
+        # common case: no catalog deployed. Generic message (no station
+        # name) so the warning filter dedups it to once per run.
+        warnings.warn(
+            f"no protect-window catalog ({exc}); cleaning WITHOUT protect "
+            "windows — active-unrest stations may over-flag real signal",
+            UserWarning,
+            stacklevel=2,
+        )
+        logger.warning("no protect-window catalog: %s", exc)
+        return (), None
+    except (ValueError, OSError) as exc:
+        warnings.warn(
+            f"{sta}: protect-window catalog unreadable ({exc}); cleaning "
+            "WITHOUT protect windows",
+            UserWarning,
+            stacklevel=2,
+        )
+        logger.warning("%s: protect-window catalog unreadable: %s", sta, exc)
+        return (), None
+    return windows_by_sta.get(sta, ()), str(resolved)
+
+
+def resolve_protect_windows(
+    sta: str,
+    protect_windows: str | Path | Sequence[tuple[float, float]] | None = None,
+) -> tuple[tuple[tuple[float, float], ...], str | None]:
+    """Normalize the ``protect_windows`` cleaning kwarg to intervals + source.
+
+    The shared resolver both cleaning paths use so their ``protect_windows``
+    kwarg behaves identically:
+
+    - ``None`` — resolve the station's windows from the deployed catalog
+      (graceful degrade on a missing/unreadable catalog);
+    - ``str`` / :class:`~pathlib.Path` — resolve from the catalog at that
+      path (same graceful degrade);
+    - an explicit sequence of ``(start, end)`` intervals — used directly
+      (source ``"explicit"``), the REPL / operator override.
+
+    Returns:
+        ``(windows, source)`` — a tuple of ``(start, end)`` intervals
+        (possibly empty) and the source (catalog path, ``"explicit"``, or
+        None when unavailable / degraded).
+    """
+    if protect_windows is None:
+        return station_protect_windows(sta)
+    if isinstance(protect_windows, (str, Path)):
+        return station_protect_windows(sta, catalog=protect_windows)
+    windows = tuple((float(a), float(b)) for a, b in protect_windows)
+    return windows, "explicit"
+
+
+# ---------------------------------------------------------------------------
 # Outlier flags (cleaned view)
 # ---------------------------------------------------------------------------
 
@@ -631,6 +815,7 @@ def read_gps_view(
     use_sta: str | None = None,
     outlier_params: OutlierParams | None = None,
     steps: str | Path | None = None,
+    protect_windows: str | Path | Sequence[tuple[float, float]] | None = None,
     frame: str | None = None,
     Dir: str | None = None,
     tType: str = "TOT",
@@ -685,6 +870,13 @@ def read_gps_view(
             detection so the trajectory model absorbs known offsets instead
             of over-flagging them; None = deployed default. A missing /
             unreadable catalog degrades gracefully (warn + no steps).
+        protect_windows: Active-unrest cleaning lever — operator-declared
+            intervals excluded from the fit, the identifiers AND the
+            excess-flag abort, so an unrest station CLEANS instead of
+            degrading. A catalog path (``protect_windows.csv``), an explicit
+            sequence of ``(start, end)`` fractional-year intervals, or None
+            (deployed default). A missing / unreadable catalog degrades
+            gracefully (warn + no windows).
         frame: Series frame tag for the record integrity check.
         Dir: Series directory override (as :func:`gps_read.getData`).
         tType: GLOBK scheme (as :func:`gps_read.getData`).
@@ -749,6 +941,8 @@ def read_gps_view(
         "n_flagged": 0,
         "step_epochs_applied": 0,
         "steps_source": None,
+        "protect_windows_applied": 0,
+        "protect_windows_source": None,
     }
 
     do_clean = attrs["clean"]
@@ -756,12 +950,16 @@ def read_gps_view(
         step_epochs, steps_source = station_step_epochs(sta, steps=steps)
         attrs["step_epochs_applied"] = int(step_epochs.size)
         attrs["steps_source"] = steps_source
+        pwindows, pw_source = resolve_protect_windows(sta, protect_windows)
+        attrs["protect_windows_applied"] = len(pwindows)
+        attrs["protect_windows_source"] = pw_source
         flags, oprov = detect_view_outliers(
             yearf,
             data,
             Ddata,
             outlier_params=outlier_params,
             step_epochs=step_epochs if step_epochs.size else None,
+            protect_windows=pwindows,
         )
         flags2d = np.atleast_2d(flags)
         for c, name in enumerate(_COMPONENTS):

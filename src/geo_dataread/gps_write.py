@@ -42,6 +42,7 @@ import logging
 import warnings
 from datetime import datetime, timezone
 from importlib import metadata
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -49,7 +50,11 @@ import numpy as np
 import numpy.typing as npt
 from gps_analysis import OutlierParams
 
-from geo_dataread.gps_views import detect_view_outliers, station_step_epochs
+from geo_dataread.gps_views import (
+    detect_view_outliers,
+    resolve_protect_windows,
+    station_step_epochs,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -147,6 +152,7 @@ def write_cleaned_neu(
     rhour: bool = False,
     outlier_params: OutlierParams | None = None,
     steps: str | Path | None = None,
+    protect_windows: str | Path | Sequence[tuple[float, float]] | None = None,
 ) -> dict[str, Any]:
     """Write an outlier-cleaned ``.NEU`` file plus its provenance sidecar.
 
@@ -163,6 +169,14 @@ def write_cleaned_neu(
     SENG lesson. A missing / unreadable catalog degrades gracefully (warn +
     detect without steps); the sidecar records how many step epochs were
     applied and their source.
+
+    Declared protect windows (``protect_windows.csv``) are the active-unrest
+    lever that composes with steps: operator-marked intervals are excluded
+    from the fit, the identifier stages AND the excess-flag abort, so a
+    station in continuous unrest (which a bare stepless model over-flags into
+    the abort — SENG on defaults) CLEANS to a plain ``_cleaned.NEU`` instead
+    of degrading. A missing / unreadable catalog degrades gracefully; the
+    sidecar records how many windows were applied and their source.
 
     Graceful degrade (design §0.4): a failed or aborted detection writes
     the FULL raw series and names the file ``..._cleaned.DEGRADED.NEU``
@@ -196,6 +210,14 @@ def write_cleaned_neu(
         steps: Declared step catalog path (``steps.csv``); None = deployed
             default. A missing / unreadable catalog degrades gracefully
             (warn + detect without steps).
+        protect_windows: Active-unrest cleaning lever — operator-declared
+            intervals excluded from the fit, the identifiers AND the
+            excess-flag abort, so an unrest station CLEANS (plain
+            ``_cleaned.NEU``) instead of degrading. A catalog path
+            (``protect_windows.csv``), an explicit sequence of
+            ``(start, end)`` fractional-year intervals, or None (deployed
+            default). A missing / unreadable catalog degrades gracefully
+            (warn + detect without protect windows).
 
     Returns:
         The provenance record (the sidecar content) plus ``"outfile"`` and
@@ -239,6 +261,11 @@ def write_cleaned_neu(
     # over-flagging them (SENG lesson); missing catalog degrades gracefully
     step_epochs, steps_source = station_step_epochs(sta, steps=steps)
 
+    # operator-declared protect windows are the active-unrest lever: excluded
+    # from the fit, the identifiers AND the excess-flag abort, so an unrest
+    # station CLEANS instead of degrading. Composes with step_epochs.
+    pwindows, pw_source = resolve_protect_windows(sta, protect_windows)
+
     # detection always in mm so OutlierParams thresholds are unit-stable
     unit_scale = 1.0 if mm else 1000.0
     flags, oprov = detect_view_outliers(
@@ -247,6 +274,7 @@ def write_cleaned_neu(
         sigma * unit_scale,
         outlier_params=params,
         step_epochs=step_epochs if step_epochs.size else None,
+        protect_windows=pwindows,
     )
 
     degraded = bool(oprov["degraded"])
@@ -294,6 +322,8 @@ def write_cleaned_neu(
             "params_hash": outlier_params_hash(params),
             "step_epochs_applied": int(step_epochs.size),
             "steps_source": steps_source,
+            "protect_windows_applied": len(pwindows),
+            "protect_windows_source": pw_source,
         },
         "n_total": int(len(neudata)),
         "n_removed": int(np.count_nonzero(union)),
