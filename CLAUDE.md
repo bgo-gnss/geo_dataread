@@ -42,7 +42,7 @@ geo_dataread/
 │   ├── __init__.py
 │   ├── gps_read.py       # ~1660 LOC — main GPS time-series reader (slice-4 purge + slice-6 read_join)
 │   ├── gps_views.py      # apply-on-read views: raw|cleaned|detrended toggle (typed, mypy-strict)
-│   ├── gps_write.py      # cleaned .NEU writer: gamittoNEU→gamittoFile, union-drop + .prov.json sidecar; steps.csv → step_epochs; degrade → _cleaned.DEGRADED.NEU (typed, mypy-strict)
+│   ├── gps_write.py      # cleaned .NEU writer: gamittoNEU→gamittoFile, union-drop + .prov.json sidecar; steps.csv→step_epochs + protect_windows.csv (unrest lever); degrade → _cleaned.DEGRADED.NEU (typed, mypy-strict)
 │   ├── gps_displ.py      # displacements / station-relative motion
 │   ├── gps_savetimes.py  # serialise time series to disk (gps-savetimes; --clean also-writes cleaned .NEU)
 │   ├── gas_read.py       # GAS (strainmeter) data
@@ -50,7 +50,7 @@ geo_dataread/
 │   └── hytro_read.py     # hydrology data
 ├── tests/test-gps_read.py      # legacy smoke script (not pytest-collected)
 ├── tests/test_gps_views.py     # view-toggle suite (raw parity, degrade, borrowing, provenance)
-├── tests/test_cleaned_neu.py   # cleaned .NEU writer: byte-format identity, union drop, sidecar, steps.csv→step_epochs, .DEGRADED naming, --clean CLI
+├── tests/test_cleaned_neu.py   # cleaned .NEU writer: byte-format identity, union drop, sidecar, steps.csv→step_epochs, protect_windows.csv (abort→clean), .DEGRADED naming, --clean CLI
 ├── tests/goldenmaster/         # behavior pins for the Phase 1 refactor 📄 README
 └── pyproject.toml
 ```

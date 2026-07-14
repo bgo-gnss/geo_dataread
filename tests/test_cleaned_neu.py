@@ -14,6 +14,10 @@ Pinned here:
 - declared steps (steps.csv) are read (per-station flat union of epochs)
   and fed to detect_outliers so a stepped series that aborts BARE no
   longer aborts; a missing/unreadable catalog degrades gracefully,
+- declared protect windows (protect_windows.csv) are read (per-station
+  sorted intervals) and fed to detect_outliers as the active-unrest lever,
+  so an unrest station that aborts→DEGRADED bare CLEANS→plain _cleaned.NEU
+  with the window declared; missing/unreadable catalog degrades gracefully,
 - the gps-savetimes CLI: --clean ALSO writes the cleaned .NEU (+ sidecar)
   and leaves the raw output byte-identical; --clean without --file refused.
 
@@ -522,3 +526,229 @@ def test_degraded_name_on_abort(write_env, raw_neu, tmp_path, monkeypatch):
     # degraded file is the FULL raw series
     assert degraded.read_text() == raw_neu.read_text()
     assert result["degraded"] is True and result["n_removed"] == 0
+
+
+# ---------------------------------------------------------------------------
+# declared protect windows (protect_windows.csv) — active-unrest lever
+# ---------------------------------------------------------------------------
+
+
+def _write_protect_windows_csv(path, rows):
+    header = "sta,start_yearf,end_yearf,comment\n"
+    body = "".join(f"{sta},{start},{end},{cmt}\n" for sta, start, end, cmt in rows)
+    path.write_text(header + body)
+
+
+def _unrest_series(seed=5):
+    """Synthetic series with continuous rapid unrest in the last ~10%.
+
+    A lineperiodic model cannot fit the unrest segment, so a BARE detection
+    over-flags it (fraction > max_flag_fraction -> excess-candidate abort).
+    A protect window over the segment excludes it from the fit, the
+    identifiers AND the abort, so detection cleans instead of degrading.
+    """
+    rng = np.random.default_rng(seed)
+    t = 2015.0 + np.arange(1461) / 365.25
+    onset = float(t[int(0.90 * t.size)])
+    unrest = np.where(t >= onset, 60.0 * (t - onset) + 400.0 * (t - onset) ** 2, 0.0)
+    base = (
+        20.0 * (t - 2015.0) + 3.0 * np.cos(2 * np.pi * t) + 1.5 * np.sin(2 * np.pi * t)
+    )
+    y = np.vstack([base + unrest + rng.normal(0.0, 1.0, t.size) for _ in range(3)])
+    sigma = np.full(y.shape, 1.0)
+    return t, y, sigma, onset
+
+
+def test_protect_window_prevents_abort():
+    """Headline: an unrest series aborts BARE, cleans with a protect window."""
+    t, y, sigma, onset = _unrest_series()
+    with pytest.warns(UserWarning, match="aborted"):
+        _bare_flags, bare = gps_views.detect_view_outliers(t, y, sigma)
+    assert bare["outlier_abort"] is True and bare["degraded"] is True
+
+    _flags, protected = gps_views.detect_view_outliers(
+        t, y, sigma, protect_windows=((onset, float(t[-1])),)
+    )
+    assert protected["outlier_abort"] is False and protected["degraded"] is False
+
+
+def test_read_protect_windows_parses_intervals(tmp_path):
+    p = tmp_path / "protect_windows.csv"
+    _write_protect_windows_csv(
+        p,
+        [
+            ("SENG", 2023.9, 2025.0, "svartsengi unrest"),
+            ("SENG", 2020.1, 2020.8, "reykjanes onset"),  # out of order on purpose
+            ("ELDC", 2021.0, 2021.5, "swarm"),
+        ],
+    )
+    catalog = gps_views.read_protect_windows(p)
+    # per-station intervals, sorted by start
+    assert catalog["SENG"] == ((2020.1, 2020.8), (2023.9, 2025.0))
+    assert catalog["ELDC"] == ((2021.0, 2021.5),)
+
+
+def test_read_protect_windows_rejects_bad_rows(tmp_path):
+    end_lt_start = tmp_path / "endlt.csv"
+    _write_protect_windows_csv(end_lt_start, [("SENG", 2025.0, 2023.0, "reversed")])
+    with pytest.raises(ValueError, match="end.*<.*start|end .* start"):
+        gps_views.read_protect_windows(end_lt_start)
+
+    bad_num = tmp_path / "badnum.csv"
+    bad_num.write_text("sta,start_yearf,end_yearf,comment\nSENG,notayear,2025.0,c\n")
+    with pytest.raises(ValueError, match="fractional year"):
+        gps_views.read_protect_windows(bad_num)
+
+    with pytest.raises(FileNotFoundError):
+        gps_views.read_protect_windows(tmp_path / "missing.csv")
+
+
+def test_station_protect_windows_graceful_missing(tmp_path):
+    with pytest.warns(UserWarning, match="no protect-window catalog"):
+        windows, source = gps_views.station_protect_windows(
+            STA, catalog=tmp_path / "nope.csv"
+        )
+    assert windows == () and source is None
+
+
+def test_station_protect_windows_graceful_corrupt(tmp_path):
+    p = tmp_path / "protect_windows.csv"
+    _write_protect_windows_csv(p, [("SENG", 2025.0, 2023.0, "reversed")])
+    with pytest.warns(UserWarning, match="unreadable"):
+        windows, source = gps_views.station_protect_windows(STA, catalog=p)
+    assert windows == () and source is None
+
+
+def test_writer_feeds_protect_windows_and_records_source(
+    write_env, tmp_path, monkeypatch
+):
+    pw_csv = tmp_path / "protect_windows.csv"
+    _write_protect_windows_csv(
+        pw_csv,
+        [
+            ("SENG", 2020.1, 2020.8, "onset"),
+            ("SENG", 2023.9, 2025.0, "unrest"),
+        ],
+    )
+    captured = {}
+
+    def capture(model, t, y, sigma=None, **kwargs):
+        captured["protect_windows"] = kwargs.get("protect_windows")
+        flags = np.zeros(np.atleast_2d(y).shape, dtype=np.bool_)
+        return SimpleNamespace(flags=flags, excess_flag_abort=False)
+
+    monkeypatch.setattr(gps_views, "detect_outliers", capture)
+    out = tmp_path / f"{STA}-{REF}_cleaned.NEU"
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")  # no steps.csv deployed
+        result = gps_write.write_cleaned_neu(
+            STA, out, Dir=TOT, protect_windows=pw_csv, **SAVETIMES_KW
+        )
+
+    assert tuple(captured["protect_windows"]) == ((2020.1, 2020.8), (2023.9, 2025.0))
+    det = result["detector"]
+    assert det["protect_windows_applied"] == 2
+    assert det["protect_windows_source"] == str(pw_csv)
+    prov = json.loads(Path(result["sidecar"]).read_text())
+    assert prov["detector"]["protect_windows_applied"] == 2
+    assert prov["detector"]["protect_windows_source"] == str(pw_csv)
+
+
+def test_writer_protect_windows_compose_with_steps(write_env, tmp_path, monkeypatch):
+    steps_csv = tmp_path / "steps.csv"
+    _write_steps_csv(steps_csv, [("SENG", 2020.5, "ALL", "equip", "tos", "antenna")])
+    pw_csv = tmp_path / "protect_windows.csv"
+    _write_protect_windows_csv(pw_csv, [("SENG", 2023.9, 2025.0, "unrest")])
+    captured = {}
+
+    def capture(model, t, y, sigma=None, **kwargs):
+        captured["step_epochs"] = kwargs.get("step_epochs")
+        captured["protect_windows"] = kwargs.get("protect_windows")
+        flags = np.zeros(np.atleast_2d(y).shape, dtype=np.bool_)
+        return SimpleNamespace(flags=flags, excess_flag_abort=False)
+
+    monkeypatch.setattr(gps_views, "detect_outliers", capture)
+    out = tmp_path / f"{STA}-{REF}_cleaned.NEU"
+    result = gps_write.write_cleaned_neu(
+        STA, out, Dir=TOT, steps=steps_csv, protect_windows=pw_csv, **SAVETIMES_KW
+    )
+    # BOTH levers compose in the same detection call
+    np.testing.assert_array_equal(
+        np.asarray(captured["step_epochs"], dtype=float), np.array([2020.5])
+    )
+    assert tuple(captured["protect_windows"]) == ((2023.9, 2025.0),)
+    det = result["detector"]
+    assert det["step_epochs_applied"] == 1
+    assert det["protect_windows_applied"] == 1
+
+
+def test_writer_missing_protect_windows_records_zero(write_env, tmp_path, monkeypatch):
+    _fake_detection(monkeypatch)
+    out = tmp_path / f"{STA}-{REF}_cleaned.NEU"
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        result = gps_write.write_cleaned_neu(
+            STA,
+            out,
+            Dir=TOT,
+            protect_windows=tmp_path / "nope.csv",
+            **SAVETIMES_KW,
+        )
+    assert result["detector"]["protect_windows_applied"] == 0
+    assert result["detector"]["protect_windows_source"] is None
+
+
+def test_real_abort_to_clean_composition(write_env, raw_neu, tmp_path):
+    """File-level headline: real SENG aborts→DEGRADED bare, cleans→plain with a
+    protect window over the unrest (which the bare stepless model over-flags)."""
+    # bare: no window -> abort -> structurally-marked .DEGRADED name
+    bare_out = tmp_path / f"{STA}-{REF}_cleaned.NEU"
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        bare = gps_write.write_cleaned_neu(STA, bare_out, Dir=TOT, **SAVETIMES_KW)
+    assert bare["degraded"] is True and bare["excess_flag_abort"] is True
+    assert Path(bare["outfile"]).name == f"{STA}-{REF}_cleaned.DEGRADED.NEU"
+    assert not bare_out.exists()
+
+    # protected: a window over the unrest span clears the abort -> plain name
+    prot_out = tmp_path / f"P_{STA}-{REF}_cleaned.NEU"
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        prot = gps_write.write_cleaned_neu(
+            STA, prot_out, Dir=TOT, protect_windows=((2016.5, 2025.2),), **SAVETIMES_KW
+        )
+    assert prot["degraded"] is False and prot["excess_flag_abort"] is False
+    assert Path(prot["outfile"]).name == f"P_{STA}-{REF}_cleaned.NEU"
+    assert prot_out.is_file()
+    assert prot["detector"]["protect_windows_applied"] == 1
+    assert prot["detector"]["protect_windows_source"] == "explicit"
+    # a real clean drops the outlier rows -> fewer than raw, header unchanged
+    raw_header, raw_data = _lines(raw_neu)
+    prot_header, prot_data = _lines(prot_out)
+    assert prot_header == raw_header
+    assert len(prot_data) == prot["n_kept"] <= prot["n_total"]
+
+
+def test_resolve_protect_windows_override_modes():
+    """The shared resolver: explicit sequence used directly (source explicit)."""
+    windows, source = gps_views.resolve_protect_windows(STA, ((2023.9, 2025.0),))
+    assert windows == ((2023.9, 2025.0),) and source == "explicit"
+    empty, empty_src = gps_views.resolve_protect_windows(STA, ())
+    assert empty == () and empty_src == "explicit"
+
+
+def test_cleaned_view_records_protect_windows(write_env):
+    """read_gps_view(view="cleaned") records protect-window provenance."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")  # full SENG spans unrest; abort allowed
+        df = gps_views.read_gps_view(
+            STA,
+            view="cleaned",
+            protect_windows=((2016.5, 2025.2),),
+            Dir=TOT,
+        )
+    attrs = df.attrs["gps_view"]
+    assert attrs["protect_windows_applied"] == 1
+    assert attrs["protect_windows_source"] == "explicit"
+    # the wide window clears the abort -> not degraded, real flags present
+    assert attrs["degraded"] is False and attrs["outlier_abort"] is False
