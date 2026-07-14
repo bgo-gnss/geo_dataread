@@ -34,13 +34,14 @@ callers are migrated (design §8 step 5).
 """
 
 import csv
+import dataclasses
 import json
 import logging
 import warnings
 from collections.abc import Mapping, Sequence
 from datetime import date, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 import numpy.typing as npt
@@ -73,6 +74,32 @@ STEP_COMPONENTS = ("N", "E", "U", "ALL")
 
 PROTECT_WINDOWS_FILENAME = "protect_windows.csv"
 """Deployed per-station protect-window catalog filename (gpsconfig-owned)."""
+
+OUTLIER_OVERRIDES_FILENAME = "outlier_overrides.csv"
+"""Deployed per-station outlier-override catalog filename (gpsconfig-owned)."""
+
+_OVERRIDE_WINDOW_ORDERS = (0, 1, 2)
+"""Valid ``window_order`` values (0 = constant, 1 = local linear, 2 = quad)."""
+
+_OVERRIDE_EPOCH_POLICIES = ("per_component", "union")
+"""Valid ``epoch_policy`` values."""
+
+_OUTLIER_OVERRIDE_COLUMNS = (
+    "sta",
+    "despike",
+    "window_order",
+    "window_robust_iterations",
+    "epoch_policy",
+    "despike_n_sigma",
+    "min_outlier_n",
+    "min_outlier_e",
+    "min_outlier_u",
+    "comment",
+)
+"""Recognised ``outlier_overrides.csv`` columns (any other column is rejected)."""
+
+_TRUE_TOKENS = ("1", "true", "yes", "y", "t")
+_FALSE_TOKENS = ("0", "false", "no", "n", "f")
 
 _COMPONENTS = ("north", "east", "up")
 
@@ -565,6 +592,296 @@ def resolve_protect_windows(
 
 
 # ---------------------------------------------------------------------------
+# Declared per-station outlier-parameter overrides (stronger detection levers)
+# ---------------------------------------------------------------------------
+
+
+def default_outlier_overrides_path() -> Path | None:
+    """Resolve the deployed ``outlier_overrides.csv`` path via gps_parser.
+
+    Resolution order (mirrors :func:`default_steps_path`):
+
+    1. ``postprocess.cfg`` ``[FILES] outlier_overrides`` (resolved by
+       :meth:`gps_parser.ConfigParser.getPostProcessConfig`);
+    2. ``<gpsconfig dir>/outlier_overrides.csv`` (the deploy-target default).
+
+    Returns:
+        The resolved path (which may not exist yet — the override catalog is
+        an optional enhancement), or None when no gpsconfig is reachable.
+    """
+    try:
+        config = ConfigParser()
+    except Exception:  # pragma: no cover - no gpsconfig deployed at all
+        logger.warning(
+            "no gpsconfig available; cannot resolve %s", OUTLIER_OVERRIDES_FILENAME
+        )
+        return None
+    try:
+        return Path(str(config.getPostProcessConfig("outlier_overrides")))
+    except Exception:
+        # additive key not deployed yet - fall back to the gpsconfig dir
+        config_path = getattr(config, "config_path", None)
+        if config_path:
+            return Path(str(config_path)) / OUTLIER_OVERRIDES_FILENAME
+        return None
+
+
+def _parse_override_bool(marker: str, field: str, raw: str) -> bool:
+    token = raw.strip().lower()
+    if token in _TRUE_TOKENS:
+        return True
+    if token in _FALSE_TOKENS:
+        return False
+    raise ValueError(
+        f"station {marker}: {field} {raw!r} is not boolean "
+        f"(use one of {_TRUE_TOKENS + _FALSE_TOKENS})"
+    )
+
+
+def _parse_override_row(
+    resolved: Path, marker: str, row: Mapping[str, Any]
+) -> dict[str, object]:
+    """Parse ONE ``outlier_overrides.csv`` row to OutlierParams field values.
+
+    Only columns the operator actually filled contribute (blank = leave at
+    the base default). Returns the OutlierParams-keyed override dict for
+    this station (possibly empty).
+    """
+    overrides: dict[str, object] = {}
+
+    despike = str(row.get("despike") or "").strip()
+    if despike:
+        overrides["despike"] = _parse_override_bool(marker, "despike", despike)
+
+    window_order = str(row.get("window_order") or "").strip()
+    if window_order:
+        try:
+            value = int(window_order)
+        except ValueError:
+            raise ValueError(
+                f"station {marker}: window_order {window_order!r} is not an integer"
+            ) from None
+        if value not in _OVERRIDE_WINDOW_ORDERS:
+            raise ValueError(
+                f"station {marker}: window_order {value} — "
+                f"must be one of {_OVERRIDE_WINDOW_ORDERS}"
+            )
+        overrides["window_order"] = value
+
+    window_iters = str(row.get("window_robust_iterations") or "").strip()
+    if window_iters:
+        try:
+            value = int(window_iters)
+        except ValueError:
+            raise ValueError(
+                f"station {marker}: window_robust_iterations {window_iters!r} "
+                "is not an integer"
+            ) from None
+        if value < 0:
+            raise ValueError(
+                f"station {marker}: window_robust_iterations {value} must be >= 0"
+            )
+        overrides["window_robust_iterations"] = value
+
+    epoch_policy = str(row.get("epoch_policy") or "").strip()
+    if epoch_policy:
+        if epoch_policy not in _OVERRIDE_EPOCH_POLICIES:
+            raise ValueError(
+                f"station {marker}: epoch_policy {epoch_policy!r} — "
+                f"must be one of {_OVERRIDE_EPOCH_POLICIES}"
+            )
+        overrides["epoch_policy"] = epoch_policy
+
+    despike_n_sigma = str(row.get("despike_n_sigma") or "").strip()
+    if despike_n_sigma:
+        try:
+            overrides["despike_n_sigma"] = float(despike_n_sigma)
+        except ValueError:
+            raise ValueError(
+                f"station {marker}: despike_n_sigma {despike_n_sigma!r} is not a number"
+            ) from None
+
+    # min_outlier_{n,e,u} → the SCALAR OutlierParams.min_outlier floor.
+    # OutlierParams.min_outlier is a single float (not a per-component
+    # triple), so this catalog only expresses a UNIFORM floor: supply all
+    # three equal (or none). Partial or differing values are rejected — a
+    # true per-component floor would need the detect_outliers ``min_outlier``
+    # kwarg, a separate (not-yet-plumbed) path.
+    raw_floors = {
+        c: str(row.get(f"min_outlier_{c}") or "").strip() for c in ("n", "e", "u")
+    }
+    provided = {c: v for c, v in raw_floors.items() if v}
+    if provided:
+        if len(provided) != 3:
+            raise ValueError(
+                f"station {marker}: supply all three of min_outlier_n/e/u "
+                "or none (OutlierParams.min_outlier is a single scalar floor)"
+            )
+        try:
+            floats = {c: float(v) for c, v in raw_floors.items()}
+        except ValueError:
+            raise ValueError(
+                f"station {marker}: min_outlier_n/e/u "
+                f"{tuple(raw_floors.values())!r} are not all numbers"
+            ) from None
+        unique = set(floats.values())
+        if len(unique) != 1:
+            raise ValueError(
+                f"station {marker}: min_outlier_n/e/u {tuple(floats.values())!r} "
+                "differ — OutlierParams.min_outlier is a single scalar floor, "
+                "so per-component floors are not supported by this catalog"
+            )
+        overrides["min_outlier"] = next(iter(unique))
+
+    return overrides
+
+
+def read_outlier_overrides(
+    path: str | Path | None = None,
+) -> dict[str, dict[str, object]]:
+    """Read the deployed per-station outlier-parameter override catalog.
+
+    Lets an operator enable the stronger detection levers PER STATION for
+    active/unrest stations (Stage-0 despike, robust local-polynomial
+    identifier ``window_order=1``, ``epoch_policy="union"``) while the global
+    default stays conservative order-0 — zero regression for quiet stations.
+
+    This is geo_dataread's OWN reader (Tier 1 must not import ``gps_api``).
+    Columns (all except ``sta`` optional; blank = leave at the base default;
+    a ``comment`` column is allowed and ignored)::
+
+        sta,despike,window_order,window_robust_iterations,epoch_policy,
+        despike_n_sigma,min_outlier_n,min_outlier_e,min_outlier_u
+
+    Args:
+        path: Explicit catalog path; None resolves via
+            :func:`default_outlier_overrides_path`.
+
+    Returns:
+        ``{station: {field: value, ...}}`` — per station, ONLY the
+        OutlierParams fields the operator supplied (ready for
+        :func:`dataclasses.replace`). Only stations with rows appear.
+
+    Raises:
+        FileNotFoundError: When the catalog (or a gpsconfig to resolve it
+            from) does not exist.
+        ValueError: On an unknown column, a duplicate station row, a missing
+            marker, a bad enum (``window_order``/``epoch_policy``), a
+            non-numeric field, or an unsupported ``min_outlier`` triple — a
+            corrupt catalog is rejected, never silently dropped. The
+            graceful-degrade wrapping lives in :func:`station_outlier_params`.
+    """
+    resolved = Path(path) if path is not None else default_outlier_overrides_path()
+    if resolved is None:
+        raise FileNotFoundError(
+            f"no gpsconfig available to resolve {OUTLIER_OVERRIDES_FILENAME}"
+        )
+    if not resolved.is_file():
+        raise FileNotFoundError(f"outlier-override catalog not found: {resolved}")
+    lines = [
+        line
+        for line in resolved.read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+    reader = csv.DictReader(lines)
+    fieldnames = reader.fieldnames or []
+    unknown = [c for c in fieldnames if c not in _OUTLIER_OVERRIDE_COLUMNS]
+    if unknown:
+        raise ValueError(
+            f"{resolved}: unknown column(s) {unknown!r}; recognised columns "
+            f"are {_OUTLIER_OVERRIDE_COLUMNS}"
+        )
+    catalog: dict[str, dict[str, object]] = {}
+    for row in reader:
+        marker = str(row.get("sta") or "").strip()
+        if not marker:
+            raise ValueError(
+                f"{resolved}: outlier_overrides.csv row without a 'sta' marker: {row}"
+            )
+        if marker in catalog:
+            raise ValueError(
+                f"{resolved}: duplicate row for station {marker} — one override "
+                "row per station"
+            )
+        try:
+            catalog[marker] = _parse_override_row(resolved, marker, row)
+        except ValueError as exc:
+            raise ValueError(f"{resolved}: {exc}") from None
+    return catalog
+
+
+def station_outlier_params(
+    sta: str, *, base: OutlierParams | None = None, catalog: str | Path | None = None
+) -> tuple[OutlierParams, str | None]:
+    """Per-station outlier parameters, with catalog overrides + graceful degrade.
+
+    Starts from ``base`` (or :class:`gps_analysis.OutlierParams` defaults) and
+    applies the station's catalog overrides via :func:`dataclasses.replace`.
+    Overrides are an ENHANCEMENT — a missing / unreadable / corrupt catalog
+    must NEVER hard-fail cleaning, so ANY problem warns (``UserWarning`` +
+    log, deduped once) and returns the base unchanged.
+
+    Args:
+        sta: Station four-letter name.
+        base: Base parameters to override; None = spec defaults.
+        catalog: Explicit catalog path; None resolves the deployed default.
+
+    Returns:
+        ``(params, source)`` — the resolved parameters and the catalog path
+        (or None when unavailable / degraded). The base is returned unchanged
+        when the station has no override row.
+    """
+    default = base if base is not None else OutlierParams()
+    resolved = default_outlier_overrides_path() if catalog is None else Path(catalog)
+    try:
+        overrides_by_sta = read_outlier_overrides(resolved)
+    except FileNotFoundError as exc:
+        # common case: no catalog deployed. Generic message (no station
+        # name) so the warning filter dedups it to once per run.
+        warnings.warn(
+            f"no outlier-override catalog ({exc}); cleaning with the base "
+            "OutlierParams (conservative default levers)",
+            UserWarning,
+            stacklevel=2,
+        )
+        logger.warning("no outlier-override catalog: %s", exc)
+        return default, None
+    except (ValueError, OSError) as exc:
+        warnings.warn(
+            f"{sta}: outlier-override catalog unreadable ({exc}); cleaning "
+            "with the base OutlierParams",
+            UserWarning,
+            stacklevel=2,
+        )
+        logger.warning("%s: outlier-override catalog unreadable: %s", sta, exc)
+        return default, None
+    overrides = overrides_by_sta.get(sta)
+    if not overrides:
+        return default, str(resolved)
+    # values are per-field OutlierParams types (validated in the reader); the
+    # dict is object-typed for a permissive public API, so narrow for replace.
+    updated = dataclasses.replace(default, **cast("dict[str, Any]", overrides))
+    return updated, str(resolved)
+
+
+def outlier_override_delta(
+    params: OutlierParams, base: OutlierParams | None = None
+) -> dict[str, object]:
+    """Fields where ``params`` differs from ``base`` (for provenance).
+
+    Since :func:`station_outlier_params` only changes the operator-supplied
+    fields, this delta is exactly the applied overrides — an empty dict means
+    the base was used unchanged.
+    """
+    reference = base if base is not None else OutlierParams()
+    return {
+        f.name: getattr(params, f.name)
+        for f in dataclasses.fields(params)
+        if getattr(params, f.name) != getattr(reference, f.name)
+    }
+
+
+# ---------------------------------------------------------------------------
 # Outlier flags (cleaned view)
 # ---------------------------------------------------------------------------
 
@@ -816,6 +1133,7 @@ def read_gps_view(
     outlier_params: OutlierParams | None = None,
     steps: str | Path | None = None,
     protect_windows: str | Path | Sequence[tuple[float, float]] | None = None,
+    outlier_overrides: str | Path | None = None,
     frame: str | None = None,
     Dir: str | None = None,
     tType: str = "TOT",
@@ -865,7 +1183,15 @@ def read_gps_view(
         params: Detrend parameter document (path or loaded mapping);
             None = deployed default.
         use_sta: Borrow the named station's stored parameters (UseSTA).
-        outlier_params: Detection thresholds; None = spec defaults.
+        outlier_params: Detection thresholds. An EXPLICIT value wins over
+            the per-station override catalog (REPL override); None resolves
+            per-station via ``outlier_overrides`` then the spec defaults.
+        outlier_overrides: Per-station outlier-parameter override catalog
+            path (``outlier_overrides.csv``) — enables the stronger levers
+            (despike, ``window_order=1``, ``epoch_policy="union"``) for
+            active stations. None = deployed default; missing / unreadable
+            degrades gracefully (warn + base OutlierParams). Ignored when
+            ``outlier_params`` is passed explicitly.
         steps: Declared step catalog path (``steps.csv``) fed to outlier
             detection so the trajectory model absorbs known offsets instead
             of over-flagging them; None = deployed default. A missing /
@@ -943,6 +1269,8 @@ def read_gps_view(
         "steps_source": None,
         "protect_windows_applied": 0,
         "protect_windows_source": None,
+        "outlier_overrides_applied": {},
+        "outlier_overrides_source": None,
     }
 
     do_clean = attrs["clean"]
@@ -953,11 +1281,20 @@ def read_gps_view(
         pwindows, pw_source = resolve_protect_windows(sta, protect_windows)
         attrs["protect_windows_applied"] = len(pwindows)
         attrs["protect_windows_source"] = pw_source
+        # precedence: explicit outlier_params arg > catalog override > default
+        if outlier_params is not None:
+            resolved_params = outlier_params
+        else:
+            resolved_params, ov_source = station_outlier_params(
+                sta, catalog=outlier_overrides
+            )
+            attrs["outlier_overrides_source"] = ov_source
+            attrs["outlier_overrides_applied"] = outlier_override_delta(resolved_params)
         flags, oprov = detect_view_outliers(
             yearf,
             data,
             Ddata,
-            outlier_params=outlier_params,
+            outlier_params=resolved_params,
             step_epochs=step_epochs if step_epochs.size else None,
             protect_windows=pwindows,
         )
