@@ -752,3 +752,261 @@ def test_cleaned_view_records_protect_windows(write_env):
     assert attrs["protect_windows_source"] == "explicit"
     # the wide window clears the abort -> not degraded, real flags present
     assert attrs["degraded"] is False and attrs["outlier_abort"] is False
+
+
+# ---------------------------------------------------------------------------
+# per-station outlier-parameter overrides (outlier_overrides.csv)
+# ---------------------------------------------------------------------------
+
+
+def _write_overrides_csv(path, header, rows):
+    path.write_text(header + "".join(rows))
+
+
+def _capture_params(monkeypatch):
+    """Detector double that records the resolved OutlierParams it received."""
+    captured = {}
+
+    def capture(model, t, y, sigma=None, **kwargs):
+        captured["params"] = kwargs.get("params")
+        captured["step_epochs"] = kwargs.get("step_epochs")
+        captured["protect_windows"] = kwargs.get("protect_windows")
+        flags = np.zeros(np.atleast_2d(y).shape, dtype=np.bool_)
+        return SimpleNamespace(flags=flags, excess_flag_abort=False)
+
+    monkeypatch.setattr(gps_views, "detect_outliers", capture)
+    return captured
+
+
+def test_read_outlier_overrides_parses_only_provided_fields(tmp_path):
+    p = tmp_path / "outlier_overrides.csv"
+    _write_overrides_csv(
+        p,
+        "sta,despike,window_order,window_robust_iterations,epoch_policy,"
+        "despike_n_sigma,min_outlier_n,min_outlier_e,min_outlier_u,comment\n",
+        [
+            "SENG,true,1,2,union,4.5,5,5,5,unrest\n",
+            "ELDC,,2,,,,,,,quad only\n",  # only window_order provided
+        ],
+    )
+    catalog = gps_views.read_outlier_overrides(p)
+    assert catalog["SENG"] == {
+        "despike": True,
+        "window_order": 1,
+        "window_robust_iterations": 2,
+        "epoch_policy": "union",
+        "despike_n_sigma": 4.5,
+        "min_outlier": 5.0,
+    }
+    assert catalog["ELDC"] == {"window_order": 2}  # blanks left at default
+
+
+def test_read_outlier_overrides_rejects_bad(tmp_path):
+    cases = {
+        "sta,window_order\nSENG,3\n": "window_order",
+        "sta,epoch_policy\nSENG,bogus\n": "epoch_policy",
+        "sta,despike\nSENG,maybe\n": "boolean",
+        "sta,window_robust_iterations\nSENG,-1\n": ">= 0",
+        "sta,frobnicate\nSENG,7\n": "unknown column",
+        "sta,window_order\nSENG,1\nSENG,2\n": "duplicate",
+        "sta,min_outlier_n,min_outlier_e,min_outlier_u\nSENG,5,,\n": "all three",
+        "sta,min_outlier_n,min_outlier_e,min_outlier_u\nSENG,5,6,7\n": "differ",
+    }
+    for content, needle in cases.items():
+        p = tmp_path / "bad.csv"
+        p.write_text(content)
+        with pytest.raises(ValueError, match=needle):
+            gps_views.read_outlier_overrides(p)
+    with pytest.raises(FileNotFoundError):
+        gps_views.read_outlier_overrides(tmp_path / "missing.csv")
+
+
+def test_station_outlier_params_applies_and_absent(tmp_path):
+    p = tmp_path / "outlier_overrides.csv"
+    _write_overrides_csv(
+        p, "sta,despike,window_order,epoch_policy\n", ["SENG,true,1,union\n"]
+    )
+    params, source = gps_views.station_outlier_params(STA, catalog=p)
+    assert params.despike is True
+    assert params.window_order == 1
+    assert params.epoch_policy == "union"
+    assert source == str(p)
+    assert gps_views.outlier_override_delta(params) == {
+        "despike": True,
+        "window_order": 1,
+        "epoch_policy": "union",
+    }
+    # a station with no row -> base unchanged, source still known
+    absent, absent_src = gps_views.station_outlier_params("ZZZZ", catalog=p)
+    assert absent == OutlierParams() and absent_src == str(p)
+    # an explicit base is honoured
+    based, _ = gps_views.station_outlier_params(
+        STA, base=OutlierParams(global_n_sigma=9.0), catalog=p
+    )
+    assert based.global_n_sigma == 9.0 and based.window_order == 1
+
+
+def test_station_outlier_params_graceful_missing(tmp_path):
+    with pytest.warns(UserWarning, match="no outlier-override catalog"):
+        params, source = gps_views.station_outlier_params(
+            STA, catalog=tmp_path / "nope.csv"
+        )
+    assert params == OutlierParams() and source is None
+
+
+def test_station_outlier_params_graceful_corrupt(tmp_path):
+    p = tmp_path / "outlier_overrides.csv"
+    p.write_text("sta,window_order\nSENG,7\n")
+    with pytest.warns(UserWarning, match="unreadable"):
+        params, source = gps_views.station_outlier_params(STA, catalog=p)
+    assert params == OutlierParams() and source is None
+
+
+def test_override_changes_detection_behaviorally():
+    """The resolved params actually change detection (order-1 vs order-0)."""
+    rng = np.random.default_rng(11)
+    t = 2015.0 + np.arange(1200) / 365.25
+    trend = 50.0 * np.sin(2 * np.pi * (t - 2015.0) / 1.5)  # sharp local curvature
+    y = np.vstack([trend + rng.normal(0.0, 1.0, t.size) for _ in range(3)])
+    sigma = np.full(y.shape, 1.0)
+    base = OutlierParams()
+    override = OutlierParams(window_order=1, despike=True, epoch_policy="union")
+    flags_base, _ = gps_views.detect_view_outliers(t, y, sigma, outlier_params=base)
+    flags_over, _ = gps_views.detect_view_outliers(t, y, sigma, outlier_params=override)
+    assert int(flags_base.sum()) != int(flags_over.sum())
+    # and the params_hash separates the two configurations
+    assert gps_write.outlier_params_hash(base) != gps_write.outlier_params_hash(
+        override
+    )
+
+
+def test_writer_catalog_override_provenance(write_env, tmp_path, monkeypatch):
+    ov_csv = tmp_path / "outlier_overrides.csv"
+    _write_overrides_csv(
+        ov_csv, "sta,despike,window_order,epoch_policy\n", ["SENG,true,1,union\n"]
+    )
+    captured = _capture_params(monkeypatch)
+    out = tmp_path / f"{STA}-{REF}_cleaned.NEU"
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")  # no steps/protect catalogs deployed
+        result = gps_write.write_cleaned_neu(
+            STA, out, Dir=TOT, outlier_overrides=ov_csv, **SAVETIMES_KW
+        )
+    # the resolved params (with overrides) reached the detector
+    used = captured["params"]
+    assert used.despike is True and used.window_order == 1
+    assert used.epoch_policy == "union"
+    det = result["detector"]
+    assert det["outlier_overrides_applied"] == {
+        "despike": True,
+        "window_order": 1,
+        "epoch_policy": "union",
+    }
+    assert det["outlier_overrides_source"] == str(ov_csv)
+    # params/params_hash echo the RESOLVED params actually used
+    assert det["params"]["despike"] is True and det["params"]["window_order"] == 1
+    assert det["params_hash"] == gps_write.outlier_params_hash(
+        gps_views.station_outlier_params(STA, catalog=ov_csv)[0]
+    )
+
+
+def test_writer_precedence_explicit_over_catalog_over_default(
+    write_env, tmp_path, monkeypatch
+):
+    ov_csv = tmp_path / "outlier_overrides.csv"
+    _write_overrides_csv(ov_csv, "sta,window_order\n", ["SENG,1\n"])
+
+    # (1) explicit outlier_params WINS — catalog ignored entirely
+    captured = _capture_params(monkeypatch)
+    out1 = tmp_path / "explicit.NEU"
+    explicit = OutlierParams(global_n_sigma=9.0)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        r1 = gps_write.write_cleaned_neu(
+            STA,
+            out1,
+            Dir=TOT,
+            outlier_params=explicit,
+            outlier_overrides=ov_csv,
+            **SAVETIMES_KW,
+        )
+    assert captured["params"].global_n_sigma == 9.0
+    assert captured["params"].window_order == 0  # catalog NOT applied
+    assert r1["detector"]["outlier_overrides_applied"] == {}
+    assert r1["detector"]["outlier_overrides_source"] is None
+
+    # (2) no explicit arg -> catalog override applies
+    captured2 = _capture_params(monkeypatch)
+    out2 = tmp_path / "catalog.NEU"
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        r2 = gps_write.write_cleaned_neu(
+            STA, out2, Dir=TOT, outlier_overrides=ov_csv, **SAVETIMES_KW
+        )
+    assert captured2["params"].window_order == 1
+    assert r2["detector"]["outlier_overrides_applied"] == {"window_order": 1}
+
+    # (3) no explicit, no catalog -> base default (byte/hash unchanged from today)
+    captured3 = _capture_params(monkeypatch)
+    out3 = tmp_path / "default.NEU"
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        r3 = gps_write.write_cleaned_neu(
+            STA, out3, Dir=TOT, outlier_overrides=tmp_path / "nope.csv", **SAVETIMES_KW
+        )
+    assert captured3["params"] == OutlierParams()
+    assert r3["detector"]["outlier_overrides_applied"] == {}
+    assert r3["detector"]["outlier_overrides_source"] is None
+    assert r3["detector"]["params_hash"] == gps_write.outlier_params_hash(
+        OutlierParams()
+    )
+
+
+def test_overrides_compose_with_steps_and_protect_windows(
+    write_env, tmp_path, monkeypatch
+):
+    steps_csv = tmp_path / "steps.csv"
+    _write_steps_csv(steps_csv, [("SENG", 2020.5, "ALL", "equip", "tos", "a")])
+    pw_csv = tmp_path / "protect_windows.csv"
+    _write_protect_windows_csv(pw_csv, [("SENG", 2023.9, 2025.0, "unrest")])
+    ov_csv = tmp_path / "outlier_overrides.csv"
+    _write_overrides_csv(ov_csv, "sta,window_order,despike\n", ["SENG,1,true\n"])
+
+    captured = _capture_params(monkeypatch)
+    out = tmp_path / f"{STA}-{REF}_cleaned.NEU"
+    result = gps_write.write_cleaned_neu(
+        STA,
+        out,
+        Dir=TOT,
+        steps=steps_csv,
+        protect_windows=pw_csv,
+        outlier_overrides=ov_csv,
+        **SAVETIMES_KW,
+    )
+    # all three levers arrive in the SAME detection call
+    np.testing.assert_array_equal(
+        np.asarray(captured["step_epochs"], dtype=float), np.array([2020.5])
+    )
+    assert tuple(captured["protect_windows"]) == ((2023.9, 2025.0),)
+    assert captured["params"].window_order == 1 and captured["params"].despike is True
+    det = result["detector"]
+    assert det["step_epochs_applied"] == 1
+    assert det["protect_windows_applied"] == 1
+    assert det["outlier_overrides_applied"] == {"window_order": 1, "despike": True}
+
+
+def test_cleaned_view_records_outlier_overrides(write_env, tmp_path):
+    ov_csv = tmp_path / "outlier_overrides.csv"
+    _write_overrides_csv(ov_csv, "sta,window_order,despike\n", ["SENG,1,true\n"])
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        df = gps_views.read_gps_view(
+            STA,
+            view="cleaned",
+            outlier_overrides=ov_csv,
+            protect_windows=((2016.5, 2025.2),),  # keep it from aborting
+            Dir=TOT,
+        )
+    attrs = df.attrs["gps_view"]
+    assert attrs["outlier_overrides_source"] == str(ov_csv)
+    assert attrs["outlier_overrides_applied"] == {"window_order": 1, "despike": True}

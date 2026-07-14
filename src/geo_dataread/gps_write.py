@@ -52,7 +52,9 @@ from gps_analysis import OutlierParams
 
 from geo_dataread.gps_views import (
     detect_view_outliers,
+    outlier_override_delta,
     resolve_protect_windows,
+    station_outlier_params,
     station_step_epochs,
 )
 
@@ -153,6 +155,7 @@ def write_cleaned_neu(
     outlier_params: OutlierParams | None = None,
     steps: str | Path | None = None,
     protect_windows: str | Path | Sequence[tuple[float, float]] | None = None,
+    outlier_overrides: str | Path | None = None,
 ) -> dict[str, Any]:
     """Write an outlier-cleaned ``.NEU`` file plus its provenance sidecar.
 
@@ -177,6 +180,16 @@ def write_cleaned_neu(
     the abort — SENG on defaults) CLEANS to a plain ``_cleaned.NEU`` instead
     of degrading. A missing / unreadable catalog degrades gracefully; the
     sidecar records how many windows were applied and their source.
+
+    Per-station outlier-parameter overrides (``outlier_overrides.csv``) let
+    an operator enable the stronger detection levers (Stage-0 despike, robust
+    local-polynomial identifier ``window_order=1``, ``epoch_policy="union"``)
+    for active stations while the fleet default stays conservative order-0
+    (zero regression for quiet stations). Precedence: an explicit
+    ``outlier_params`` arg wins; otherwise the station's catalog overrides
+    apply on top of the defaults. The sidecar's ``params`` / ``params_hash``
+    echo the RESOLVED parameters actually used, plus the applied-override
+    delta and its source.
 
     Graceful degrade (design §0.4): a failed or aborted detection writes
     the FULL raw series and names the file ``..._cleaned.DEGRADED.NEU``
@@ -204,9 +217,18 @@ def write_cleaned_neu(
         reference: Reference frame for the plate-velocity model.
         Dir: Input series directory override (as :func:`gamittoNEU`).
         rhour: Round the time tag (as :func:`gamittoNEU`).
-        outlier_params: :class:`gps_analysis.OutlierParams` thresholds;
-            None = spec defaults. Magnitude thresholds are in mm
-            regardless of ``mm`` (detection always runs in mm).
+        outlier_params: :class:`gps_analysis.OutlierParams` thresholds. An
+            EXPLICIT value wins over the per-station override catalog (REPL
+            override); None resolves per-station via ``outlier_overrides``
+            then the spec defaults. Magnitude thresholds are in mm regardless
+            of ``mm`` (detection always runs in mm).
+        outlier_overrides: Per-station outlier-parameter override catalog
+            path (``outlier_overrides.csv``) — enables the stronger levers
+            (despike, ``window_order=1``, ``epoch_policy="union"``) for
+            active stations while the global default stays conservative.
+            None = deployed default; missing / unreadable degrades
+            gracefully (warn + base OutlierParams). Ignored when
+            ``outlier_params`` is passed explicitly.
         steps: Declared step catalog path (``steps.csv``); None = deployed
             default. A missing / unreadable catalog degrades gracefully
             (warn + detect without steps).
@@ -226,7 +248,18 @@ def write_cleaned_neu(
     from geo_dataread import gps_read  # deferred: gps_read lazily imports back
 
     requested = Path(outfile)
-    params = outlier_params if outlier_params is not None else OutlierParams()
+
+    # precedence: explicit outlier_params arg > per-station catalog override
+    # > OutlierParams() default. The stronger detection levers (despike,
+    # window_order=1, epoch_policy="union") are enabled per active station
+    # via the catalog while the fleet default stays conservative order-0.
+    if outlier_params is not None:
+        params = outlier_params
+        ov_source: str | None = None
+        ov_applied: dict[str, object] = {}
+    else:
+        params, ov_source = station_outlier_params(sta, catalog=outlier_overrides)
+        ov_applied = outlier_override_delta(params)
 
     # the record array that gets written - identical to the raw product
     neudata = gps_read.gamittoNEU(  # type: ignore[no-untyped-call]
@@ -320,6 +353,8 @@ def write_cleaned_neu(
             "row_policy": "union",
             "params": dataclasses.asdict(params),
             "params_hash": outlier_params_hash(params),
+            "outlier_overrides_applied": ov_applied,
+            "outlier_overrides_source": ov_source,
             "step_epochs_applied": int(step_epochs.size),
             "steps_source": steps_source,
             "protect_windows_applied": len(pwindows),
