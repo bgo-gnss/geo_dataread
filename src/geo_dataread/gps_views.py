@@ -33,6 +33,7 @@ This module supersedes the first-draft mechanism
 callers are migrated (design §8 step 5).
 """
 
+import csv
 import json
 import logging
 import warnings
@@ -63,6 +64,12 @@ DOC_SCHEMA_VERSION = 1
 
 PARAMS_FILENAME = "detrend_params.json"
 """Deployed parameter-document filename (design §3.3: gpsconfig-owned)."""
+
+STEPS_FILENAME = "steps.csv"
+"""Deployed per-station step-catalog filename (gpsconfig-owned)."""
+
+STEP_COMPONENTS = ("N", "E", "U", "ALL")
+"""Component tags a ``steps.csv`` row may carry (``ALL`` = every component)."""
 
 _COMPONENTS = ("north", "east", "up")
 
@@ -227,6 +234,150 @@ def _degrade(prov: dict[str, Any], reason: str) -> dict[str, Any]:
     logger.warning("%s", reason)
     warnings.warn(reason, UserWarning, stacklevel=3)
     return prov
+
+
+# ---------------------------------------------------------------------------
+# Declared step catalog (feeds outlier detection)
+# ---------------------------------------------------------------------------
+
+
+def default_steps_path() -> Path | None:
+    """Resolve the deployed ``steps.csv`` path via gps_parser.
+
+    Resolution order (mirrors :func:`default_params_path`):
+
+    1. ``postprocess.cfg`` ``[FILES] steps`` (resolved by
+       :meth:`gps_parser.ConfigParser.getPostProcessConfig`);
+    2. ``<gpsconfig dir>/steps.csv`` (the deploy-target default).
+
+    Returns:
+        The resolved path (which may not exist yet — the step catalog is
+        an optional enhancement), or None when no gpsconfig is reachable.
+    """
+    try:
+        config = ConfigParser()
+    except Exception:  # pragma: no cover - no gpsconfig deployed at all
+        logger.warning("no gpsconfig available; cannot resolve %s", STEPS_FILENAME)
+        return None
+    try:
+        return Path(str(config.getPostProcessConfig("steps")))
+    except Exception:
+        # additive key not deployed yet - fall back to the gpsconfig dir
+        config_path = getattr(config, "config_path", None)
+        if config_path:
+            return Path(str(config_path)) / STEPS_FILENAME
+        return None
+
+
+def read_step_catalog(path: str | Path | None = None) -> dict[str, tuple[float, ...]]:
+    """Read the deployed per-station step catalog (``steps.csv``).
+
+    This is geo_dataread's OWN reader (Tier 1 must not import ``gps_api``);
+    it parses the SAME format as
+    ``gps_api.precompute.config.load_step_catalog`` for parity —
+    ``sta,epoch_yearf,component,kind,source,comment`` with ``#`` comment
+    lines and ``component`` in ``N|E|U|ALL``.
+
+    Because ``detect_outliers`` takes a FLAT ``step_epochs`` array applied
+    across all components (amplitudes are estimated per-component), the
+    per-station value returned here is the sorted, de-duplicated UNION of
+    every declared epoch for the station — a step declared for one
+    component only picks up a ~0 estimated amplitude on the others
+    (harmless).
+
+    Args:
+        path: Explicit catalog path; None resolves via
+            :func:`default_steps_path`.
+
+    Returns:
+        ``{station: (epoch_yearf, ...)}`` — sorted unique fractional-year
+        step epochs per station (only stations with rows appear).
+
+    Raises:
+        FileNotFoundError: When the catalog (or a gpsconfig to resolve it
+            from) does not exist.
+        ValueError: On a malformed row (missing marker, unknown component
+            tag, non-numeric epoch) — a corrupt catalog is rejected, never
+            silently dropped. The graceful-degrade wrapping lives in
+            :func:`station_step_epochs`.
+    """
+    resolved = Path(path) if path is not None else default_steps_path()
+    if resolved is None:
+        raise FileNotFoundError(f"no gpsconfig available to resolve {STEPS_FILENAME}")
+    if not resolved.is_file():
+        raise FileNotFoundError(f"step catalog not found: {resolved}")
+    lines = [
+        line
+        for line in resolved.read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+    catalog: dict[str, set[float]] = {}
+    for row in csv.DictReader(lines):
+        marker = str(row.get("sta") or "").strip()
+        if not marker:
+            raise ValueError(f"{resolved}: steps.csv row without a 'sta' marker: {row}")
+        component = str(row.get("component") or "ALL").strip().upper()
+        if component not in STEP_COMPONENTS:
+            raise ValueError(
+                f"{resolved}: station {marker}: component {component!r} — "
+                f"must be one of {STEP_COMPONENTS}"
+            )
+        try:
+            epoch = float(str(row.get("epoch_yearf")))
+        except (TypeError, ValueError):
+            raise ValueError(
+                f"{resolved}: station {marker}: epoch_yearf "
+                f"{row.get('epoch_yearf')!r} is not a fractional year"
+            ) from None
+        catalog.setdefault(marker, set()).add(epoch)
+    return {marker: tuple(sorted(epochs)) for marker, epochs in catalog.items()}
+
+
+def station_step_epochs(
+    sta: str, *, steps: str | Path | None = None
+) -> tuple[FloatArray, str | None]:
+    """Declared step epochs for one station, with graceful degrade.
+
+    The graceful convenience the cleaning paths call: resolves and reads
+    the catalog, returns the station's flat union step-epoch array and the
+    resolved source path. Steps are an ENHANCEMENT — a missing or
+    unreadable catalog (or a corrupt row) must NEVER hard-fail cleaning, so
+    ANY problem warns (``UserWarning`` + log) and returns no steps.
+
+    Args:
+        sta: Station four-letter name.
+        steps: Explicit catalog path; None resolves the deployed default.
+
+    Returns:
+        ``(step_epochs, source)`` — a float64 ``(K,)`` array (possibly
+        empty) and the resolved catalog path (or None when unavailable /
+        degraded).
+    """
+    empty = np.empty(0, dtype=np.float64)
+    resolved = default_steps_path() if steps is None else Path(steps)
+    try:
+        catalog = read_step_catalog(resolved)
+    except FileNotFoundError as exc:
+        # common case: no catalog deployed. Generic message (no station
+        # name) so the warning filter dedups it to once per run.
+        warnings.warn(
+            f"no step catalog ({exc}); cleaning WITHOUT declared steps — "
+            "active stations may over-flag real signal",
+            UserWarning,
+            stacklevel=2,
+        )
+        logger.warning("no step catalog: %s", exc)
+        return empty, None
+    except (ValueError, OSError) as exc:
+        warnings.warn(
+            f"{sta}: step catalog unreadable ({exc}); cleaning WITHOUT declared steps",
+            UserWarning,
+            stacklevel=2,
+        )
+        logger.warning("%s: step catalog unreadable: %s", sta, exc)
+        return empty, None
+    epochs = np.asarray(catalog.get(sta, ()), dtype=np.float64)
+    return epochs, str(resolved)
 
 
 # ---------------------------------------------------------------------------
@@ -479,6 +630,7 @@ def read_gps_view(
     params: str | Path | Mapping[str, Any] | None = None,
     use_sta: str | None = None,
     outlier_params: OutlierParams | None = None,
+    steps: str | Path | None = None,
     frame: str | None = None,
     Dir: str | None = None,
     tType: str = "TOT",
@@ -529,6 +681,10 @@ def read_gps_view(
             None = deployed default.
         use_sta: Borrow the named station's stored parameters (UseSTA).
         outlier_params: Detection thresholds; None = spec defaults.
+        steps: Declared step catalog path (``steps.csv``) fed to outlier
+            detection so the trajectory model absorbs known offsets instead
+            of over-flagging them; None = deployed default. A missing /
+            unreadable catalog degrades gracefully (warn + no steps).
         frame: Series frame tag for the record integrity check.
         Dir: Series directory override (as :func:`gps_read.getData`).
         tType: GLOBK scheme (as :func:`gps_read.getData`).
@@ -591,12 +747,21 @@ def read_gps_view(
         "degrade_reason": None,
         "outlier_abort": False,
         "n_flagged": 0,
+        "step_epochs_applied": 0,
+        "steps_source": None,
     }
 
     do_clean = attrs["clean"]
     if do_clean:
+        step_epochs, steps_source = station_step_epochs(sta, steps=steps)
+        attrs["step_epochs_applied"] = int(step_epochs.size)
+        attrs["steps_source"] = steps_source
         flags, oprov = detect_view_outliers(
-            yearf, data, Ddata, outlier_params=outlier_params
+            yearf,
+            data,
+            Ddata,
+            outlier_params=outlier_params,
+            step_epochs=step_epochs if step_epochs.size else None,
         )
         flags2d = np.atleast_2d(flags)
         for c, name in enumerate(_COMPONENTS):

@@ -102,14 +102,16 @@ def main():
             # print "Time series of  %s using: %s, %s" % (sta, kwargs['ref'], kwargs['special'])
 
             if args.clean:
+                # requested plain name; write_cleaned_neu inserts .DEGRADED
+                # before the suffix when the station degrades (option b).
                 cleanedFile = os.path.join(Dir, f"{sta}-{ref}_cleaned.NEU")
-                print(f"writing cleaned series to {cleanedFile} ")
                 result = gpsw.write_cleaned_neu(
                     sta, cleanedFile, ref=ref, mm=meters, dstring=tformat, rhour=True
                 )
                 print(
-                    "  removed {n_removed}/{n_total} epochs "
-                    "(degraded={degraded}); provenance: {sidecar}".format(**result)
+                    "wrote cleaned series to {outfile} — removed "
+                    "{n_removed}/{n_total} epochs (degraded={degraded}); "
+                    "provenance: {sidecar}".format(**result)
                 )
 
         except (IndexError, TypeError) as e:

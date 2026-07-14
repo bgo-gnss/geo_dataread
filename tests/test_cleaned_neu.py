@@ -9,10 +9,13 @@ Pinned here:
 - the provenance sidecar: counts add up, params echo + stable params_hash,
   version stamps,
 - graceful degrade (detector error AND excess-flag abort): the FULL raw
-  series is written, the sidecar is marked degraded, a UserWarning fires,
-- the gps-savetimes CLI: --clean ALSO writes <STA>-<ref>_cleaned.NEU
-  (+ sidecar) and leaves the raw output byte-identical; --clean without
-  --file is refused.
+  series is written to a `.DEGRADED.` filename, the sidecar is marked
+  degraded, a UserWarning fires,
+- declared steps (steps.csv) are read (per-station flat union of epochs)
+  and fed to detect_outliers so a stepped series that aborts BARE no
+  longer aborts; a missing/unreadable catalog degrades gracefully,
+- the gps-savetimes CLI: --clean ALSO writes the cleaned .NEU (+ sidecar)
+  and leaves the raw output byte-identical; --clean without --file refused.
 
 Uses the goldenmaster fixtures (frozen GLOBK series + hermetic gpsconfig).
 """
@@ -237,8 +240,12 @@ def test_detector_error_degrades_to_full_marked_file(
     with pytest.warns(UserWarning, match="cleaned .NEU degraded"):
         result = gps_write.write_cleaned_neu(STA, out, Dir=TOT, **SAVETIMES_KW)
 
+    # degrade -> structurally-marked name; the plain name must NOT appear
+    actual = Path(result["outfile"])
+    assert actual.name == f"{STA}-{REF}_cleaned.DEGRADED.NEU"
+    assert not out.exists()
     # the FULL raw series, byte-identical
-    assert out.read_text() == raw_neu.read_text()
+    assert actual.read_text() == raw_neu.read_text()
     prov = json.loads(Path(result["sidecar"]).read_text())
     assert prov["degraded"] is True
     assert prov["excess_flag_abort"] is False
@@ -258,7 +265,10 @@ def test_excess_flag_abort_degrades_to_full_marked_file(
     with pytest.warns(UserWarning, match="degraded"):
         result = gps_write.write_cleaned_neu(STA, out, Dir=TOT, **SAVETIMES_KW)
 
-    assert out.read_text() == raw_neu.read_text()
+    actual = Path(result["outfile"])
+    assert actual.name == f"{STA}-{REF}_cleaned.DEGRADED.NEU"
+    assert not out.exists()
+    assert actual.read_text() == raw_neu.read_text()
     prov = json.loads(Path(result["sidecar"]).read_text())
     assert prov["degraded"] is True
     assert prov["excess_flag_abort"] is True
@@ -277,7 +287,7 @@ def test_real_detection_end_to_end(write_env, raw_neu, tmp_path):
         result = gps_write.write_cleaned_neu(STA, out, Dir=TOT, **SAVETIMES_KW)
 
     raw_header, raw_data = _lines(raw_neu)
-    cln_header, cln_data = _lines(out)
+    cln_header, cln_data = _lines(Path(result["outfile"]))  # may be .DEGRADED
     assert cln_header == raw_header
     assert result["n_total"] == len(raw_data)
     assert result["n_kept"] == len(cln_data)
@@ -312,9 +322,13 @@ def test_cli_clean_also_writes_cleaned_and_sidecar(
 ):
     _run_cli(monkeypatch, [STA, "--file", "--clean", "--Dir", str(tmp_path)])
     raw = tmp_path / f"{STA}-{REF}.NEU"
-    cleaned = tmp_path / f"{STA}-{REF}_cleaned.NEU"
-    sidecar = tmp_path / f"{STA}-{REF}_cleaned.NEU.prov.json"
-    assert raw.is_file() and cleaned.is_file() and sidecar.is_file()
+    # full-span SENG aborts on defaults -> structurally-marked .DEGRADED name
+    cleaned_glob = sorted(tmp_path.glob(f"{STA}-{REF}_cleaned*.NEU"))
+    assert raw.is_file()
+    assert len(cleaned_glob) == 1
+    cleaned = cleaned_glob[0]
+    sidecar = Path(str(cleaned) + ".prov.json")
+    assert sidecar.is_file()
 
     # raw output byte-identical to a run without --clean
     assert raw.read_text() == raw_neu.read_text()
@@ -324,6 +338,11 @@ def test_cli_clean_also_writes_cleaned_and_sidecar(
     assert prov["n_kept"] == len(cln_data)
     assert prov["n_total"] == prov["n_kept"] + prov["n_removed"]
     assert prov["station"] == STA and prov["ref"] == REF
+    # cleaned file name carries the degrade state structurally
+    if prov["degraded"]:
+        assert cleaned.name == f"{STA}-{REF}_cleaned.DEGRADED.NEU"
+    else:
+        assert cleaned.name == f"{STA}-{REF}_cleaned.NEU"
 
 
 def test_cli_clean_requires_file(write_env, tmp_path, monkeypatch, capsys):
@@ -331,3 +350,175 @@ def test_cli_clean_requires_file(write_env, tmp_path, monkeypatch, capsys):
     with pytest.raises(SystemExit):
         gps_savetimes.main()
     assert "--clean requires --file" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# declared steps (steps.csv) -> step_epochs into detection
+# ---------------------------------------------------------------------------
+
+
+def _end_stepped_series(seed=5):
+    """Synthetic series with a step in the last ~7% of epochs.
+
+    A step near the end makes a STEPLESS model over-flag the offset tail
+    (fraction > max_flag_fraction -> excess-candidate abort); declaring the
+    step lets the model absorb it, so detection no longer aborts.
+    """
+    rng = np.random.default_rng(seed)
+    t = 2015.0 + np.arange(1461) / 365.25
+    step_t = float(t[int(0.93 * t.size)])
+    base = (
+        20.0 * (t - 2015.0) + 3.0 * np.cos(2 * np.pi * t) + 1.5 * np.sin(2 * np.pi * t)
+    )
+    jump = np.where(t >= step_t, 40.0, 0.0)
+    y = np.vstack([base + jump + rng.normal(0.0, 1.0, t.size) for _ in range(3)])
+    sigma = np.full(y.shape, 1.0)
+    return t, y, sigma, step_t
+
+
+def test_declared_step_prevents_abort():
+    t, y, sigma, step_t = _end_stepped_series()
+    with pytest.warns(UserWarning, match="aborted"):
+        bare_flags, bare = gps_views.detect_view_outliers(t, y, sigma)
+    assert bare["outlier_abort"] is True and bare["degraded"] is True
+
+    stepped_flags, stepped = gps_views.detect_view_outliers(
+        t, y, sigma, step_epochs=np.array([step_t])
+    )
+    assert stepped["outlier_abort"] is False and stepped["degraded"] is False
+
+
+def _write_steps_csv(path, rows):
+    header = "sta,epoch_yearf,component,kind,source,comment\n"
+    body = "".join(
+        f"{sta},{epoch},{comp},{kind},{src},{cmt}\n"
+        for sta, epoch, comp, kind, src, cmt in rows
+    )
+    path.write_text(header + body)
+
+
+def test_read_step_catalog_flat_union(tmp_path):
+    p = tmp_path / "steps.csv"
+    _write_steps_csv(
+        p,
+        [
+            ("SENG", 2020.5, "ALL", "equip", "tos", "antenna"),
+            ("SENG", 2021.0, "N", "coseismic", "sil", "eq"),
+            ("SENG", 2020.5, "E", "dup", "x", "same epoch, other comp"),
+            ("ELDC", 2019.25, "U", "equip", "tos", "receiver"),
+        ],
+    )
+    catalog = gps_views.read_step_catalog(p)
+    # per-station flat union, sorted + de-duplicated across components
+    assert catalog["SENG"] == (2020.5, 2021.0)
+    assert catalog["ELDC"] == (2019.25,)
+
+
+def test_read_step_catalog_rejects_bad_rows(tmp_path):
+    bad_comp = tmp_path / "badcomp.csv"
+    _write_steps_csv(bad_comp, [("SENG", 2020.5, "X", "k", "s", "c")])
+    with pytest.raises(ValueError, match="component"):
+        gps_views.read_step_catalog(bad_comp)
+
+    bad_epoch = tmp_path / "badepoch.csv"
+    bad_epoch.write_text(
+        "sta,epoch_yearf,component,kind,source,comment\nSENG,notayear,N,k,s,c\n"
+    )
+    with pytest.raises(ValueError, match="fractional year"):
+        gps_views.read_step_catalog(bad_epoch)
+
+    with pytest.raises(FileNotFoundError):
+        gps_views.read_step_catalog(tmp_path / "missing.csv")
+
+
+def test_station_step_epochs_graceful_missing(tmp_path):
+    with pytest.warns(UserWarning, match="no step catalog"):
+        epochs, source = gps_views.station_step_epochs(STA, steps=tmp_path / "nope.csv")
+    assert epochs.size == 0 and source is None
+
+
+def test_station_step_epochs_graceful_corrupt(tmp_path):
+    p = tmp_path / "steps.csv"
+    _write_steps_csv(p, [("SENG", 2020.5, "BOGUS", "k", "s", "c")])
+    with pytest.warns(UserWarning, match="unreadable"):
+        epochs, source = gps_views.station_step_epochs(STA, steps=p)
+    assert epochs.size == 0 and source is None
+
+
+def test_writer_feeds_step_epochs_and_records_source(write_env, tmp_path, monkeypatch):
+    steps_csv = tmp_path / "steps.csv"
+    _write_steps_csv(
+        steps_csv,
+        [
+            ("SENG", 2020.5, "ALL", "equip", "tos", "antenna"),
+            ("SENG", 2021.0, "N", "coseismic", "sil", "eq"),
+        ],
+    )
+    captured = {}
+
+    def capture(model, t, y, sigma=None, **kwargs):
+        captured["step_epochs"] = kwargs.get("step_epochs")
+        flags = np.zeros(np.atleast_2d(y).shape, dtype=np.bool_)
+        return SimpleNamespace(flags=flags, excess_flag_abort=False)
+
+    monkeypatch.setattr(gps_views, "detect_outliers", capture)
+    out = tmp_path / f"{STA}-{REF}_cleaned.NEU"
+    result = gps_write.write_cleaned_neu(
+        STA, out, Dir=TOT, steps=steps_csv, **SAVETIMES_KW
+    )
+
+    np.testing.assert_array_equal(
+        np.asarray(captured["step_epochs"], dtype=float), np.array([2020.5, 2021.0])
+    )
+    det = result["detector"]
+    assert det["step_epochs_applied"] == 2
+    assert det["steps_source"] == str(steps_csv)
+    # sidecar echoes the same
+    prov = json.loads(Path(result["sidecar"]).read_text())
+    assert prov["detector"]["step_epochs_applied"] == 2
+    assert prov["detector"]["steps_source"] == str(steps_csv)
+
+
+def test_writer_missing_steps_records_zero(write_env, tmp_path, monkeypatch):
+    _fake_detection(monkeypatch)
+    out = tmp_path / f"{STA}-{REF}_cleaned.NEU"
+    with pytest.warns(UserWarning, match="no step catalog"):
+        result = gps_write.write_cleaned_neu(
+            STA, out, Dir=TOT, steps=tmp_path / "nope.csv", **SAVETIMES_KW
+        )
+    assert result["detector"]["step_epochs_applied"] == 0
+    assert result["detector"]["steps_source"] is None
+
+
+# ---------------------------------------------------------------------------
+# .DEGRADED. filename (structural cleanliness signal)
+# ---------------------------------------------------------------------------
+
+
+def test_plain_name_when_clean(write_env, tmp_path, monkeypatch):
+    _fake_detection(monkeypatch)  # no abort
+    out = tmp_path / f"{STA}-{REF}_cleaned.NEU"
+    result = gps_write.write_cleaned_neu(STA, out, Dir=TOT, **SAVETIMES_KW)
+    assert result["degraded"] is False
+    assert Path(result["outfile"]).name == f"{STA}-{REF}_cleaned.NEU"
+    assert out.is_file()
+    assert not (tmp_path / f"{STA}-{REF}_cleaned.DEGRADED.NEU").exists()
+
+
+def test_degraded_name_on_abort(write_env, raw_neu, tmp_path, monkeypatch):
+    def abort(*args, **kwargs):
+        return SimpleNamespace(flags=None, excess_flag_abort=True)
+
+    monkeypatch.setattr(gps_views, "detect_outliers", abort)
+    requested = tmp_path / f"{STA}-{REF}_cleaned.NEU"
+    with pytest.warns(UserWarning, match="DEGRADED"):
+        result = gps_write.write_cleaned_neu(STA, requested, Dir=TOT, **SAVETIMES_KW)
+
+    degraded = tmp_path / f"{STA}-{REF}_cleaned.DEGRADED.NEU"
+    assert Path(result["outfile"]) == degraded
+    assert degraded.is_file()
+    assert not requested.exists(), "the plain _cleaned.NEU name must NOT appear"
+    assert Path(result["sidecar"]) == Path(str(degraded) + ".prov.json")
+    # degraded file is the FULL raw series
+    assert degraded.read_text() == raw_neu.read_text()
+    assert result["degraded"] is True and result["n_removed"] == 0

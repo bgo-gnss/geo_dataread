@@ -49,7 +49,7 @@ import numpy as np
 import numpy.typing as npt
 from gps_analysis import OutlierParams
 
-from geo_dataread.gps_views import detect_view_outliers
+from geo_dataread.gps_views import detect_view_outliers, station_step_epochs
 
 logger = logging.getLogger(__name__)
 
@@ -146,6 +146,7 @@ def write_cleaned_neu(
     Dir: str | None = None,
     rhour: bool = False,
     outlier_params: OutlierParams | None = None,
+    steps: str | Path | None = None,
 ) -> dict[str, Any]:
     """Write an outlier-cleaned ``.NEU`` file plus its provenance sidecar.
 
@@ -156,18 +157,31 @@ def write_cleaned_neu(
     through :func:`geo_dataread.gps_read.gamittoFile` — so the cleaned file
     is byte-format identical to the raw product, just with fewer rows.
 
+    Declared steps (``steps.csv``) are fed to detection so the trajectory
+    model absorbs known offsets (equipment changes, coseismic jumps)
+    instead of over-flagging real signal on active stations — the empirical
+    SENG lesson. A missing / unreadable catalog degrades gracefully (warn +
+    detect without steps); the sidecar records how many step epochs were
+    applied and their source.
+
     Graceful degrade (design §0.4): a failed or aborted detection writes
-    the FULL raw series, marks the sidecar ``degraded`` (with the reason
-    and, for the excess-candidate rule, ``excess_flag_abort``), and warns
-    (``UserWarning`` + log). The alternative — refusing to write — would
-    break the publishing pipeline on any detector hiccup; a full-but-marked
-    file keeps delivery alive while never misrepresenting itself, because
-    the sidecar is the trust contract. Never a silent clip.
+    the FULL raw series and names the file ``..._cleaned.DEGRADED.NEU``
+    (instead of the plain ``..._cleaned.NEU``) so a consumer globbing
+    ``*_cleaned.NEU`` can NOT ingest uncleaned data — the sidecar
+    ``degraded`` flag stays too, but the filename is now a structural
+    signal as well. The sidecar is marked ``degraded`` (with the reason
+    and, for the excess-candidate rule, ``excess_flag_abort``) and a
+    ``UserWarning`` + log fire. The alternative — refusing to write —
+    would break the publishing pipeline on any detector hiccup; a
+    full-but-clearly-named file keeps delivery alive while never
+    misrepresenting itself. Never a silent clip.
 
     Args:
         sta: Station four-letter name.
-        outfile: Cleaned-file path (a real path — not stdout; the sidecar
-            is written next to it as ``<outfile>.prov.json``).
+        outfile: Requested cleaned-file path (a real path — not stdout).
+            The ACTUAL name is this when clean, or ``.DEGRADED`` inserted
+            before the suffix when degraded; the sidecar is written next to
+            the actual file as ``<actual>.prov.json``.
         ref: Series reference, as :func:`gamittoNEU` (``"plate"`` |
             ``"detrend"`` | ``"itrf2008"``).
         mm: True writes millimetres, False metres (as :func:`gamittoNEU`).
@@ -179,14 +193,17 @@ def write_cleaned_neu(
         outlier_params: :class:`gps_analysis.OutlierParams` thresholds;
             None = spec defaults. Magnitude thresholds are in mm
             regardless of ``mm`` (detection always runs in mm).
+        steps: Declared step catalog path (``steps.csv``); None = deployed
+            default. A missing / unreadable catalog degrades gracefully
+            (warn + detect without steps).
 
     Returns:
         The provenance record (the sidecar content) plus ``"outfile"`` and
-        ``"sidecar"`` paths.
+        ``"sidecar"`` paths (the ACTUAL paths, ``.DEGRADED`` included).
     """
     from geo_dataread import gps_read  # deferred: gps_read lazily imports back
 
-    out_path = Path(outfile)
+    requested = Path(outfile)
     params = outlier_params if outlier_params is not None else OutlierParams()
 
     # the record array that gets written - identical to the raw product
@@ -218,22 +235,38 @@ def write_cleaned_neu(
         np.float64
     )
 
+    # declared steps let the model absorb known offsets instead of
+    # over-flagging them (SENG lesson); missing catalog degrades gracefully
+    step_epochs, steps_source = station_step_epochs(sta, steps=steps)
+
     # detection always in mm so OutlierParams thresholds are unit-stable
     unit_scale = 1.0 if mm else 1000.0
     flags, oprov = detect_view_outliers(
-        t, y * unit_scale, sigma * unit_scale, outlier_params=params
+        t,
+        y * unit_scale,
+        sigma * unit_scale,
+        outlier_params=params,
+        step_epochs=step_epochs if step_epochs.size else None,
     )
 
     degraded = bool(oprov["degraded"])
+
+    # option (b): the filename STRUCTURALLY signals cleanliness — a degraded
+    # product is `..._cleaned.DEGRADED.NEU`, so a consumer globbing
+    # `*_cleaned.NEU` (Vincent) cannot ingest uncleaned data.
     if degraded:
+        out_path = requested.with_name(requested.stem + ".DEGRADED" + requested.suffix)
         # detect_view_outliers already warned about the detection failure;
         # make the FILE consequence explicit (design §0.4: never silent).
         reason = (
             f"{sta}: cleaned .NEU degraded - writing the FULL raw series to "
-            f"{out_path.name}; consumers must honour the sidecar 'degraded' flag"
+            f"{out_path.name} (structurally marked); consumers must still "
+            "honour the sidecar 'degraded' flag"
         )
         logger.warning("%s", reason)
         warnings.warn(reason, UserWarning, stacklevel=2)
+    else:
+        out_path = requested
 
     union: npt.NDArray[np.bool_] = np.asarray(flags.any(axis=0), dtype=np.bool_)
     cleaned = neudata[~union]
@@ -259,6 +292,8 @@ def write_cleaned_neu(
             "row_policy": "union",
             "params": dataclasses.asdict(params),
             "params_hash": outlier_params_hash(params),
+            "step_epochs_applied": int(step_epochs.size),
+            "steps_source": steps_source,
         },
         "n_total": int(len(neudata)),
         "n_removed": int(np.count_nonzero(union)),
