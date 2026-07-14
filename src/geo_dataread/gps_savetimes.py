@@ -10,6 +10,7 @@ import traceback
 
 # special lib
 import geo_dataread.gps_read as gpsr
+import geo_dataread.gps_write as gpsw
 import gps_parser as cp
 
 
@@ -52,6 +53,13 @@ def main():
         " -> decimal year." + " See datetime documentation for formating",
     )
     parser.add_argument(
+        "--clean",
+        action="store_true",
+        help="ALSO write an outlier-cleaned Dir/STA-ref_cleaned.NEU (plus a "
+        "provenance sidecar .prov.json) next to the raw file. The raw file is "
+        "always written unchanged. Requires --file.",
+    )
+    parser.add_argument(
         "-d",
         "--Dir",
         type=str,
@@ -63,6 +71,12 @@ def main():
 
     args = parser.parse_args()
     print(args, file=sys.stderr)
+
+    if args.clean and not args.file:
+        parser.error(
+            "--clean requires --file (the cleaned .NEU and its "
+            ".prov.json sidecar are file products)"
+        )
 
     stations = args.Stations  # station list
     wfile = args.file
@@ -86,6 +100,19 @@ def main():
                 sta, outFile, mm=meters, ref=ref, dstring=tformat, rhour=True
             )
             # print "Time series of  %s using: %s, %s" % (sta, kwargs['ref'], kwargs['special'])
+
+            if args.clean:
+                # requested plain name; write_cleaned_neu inserts .DEGRADED
+                # before the suffix when the station degrades (option b).
+                cleanedFile = os.path.join(Dir, f"{sta}-{ref}_cleaned.NEU")
+                result = gpsw.write_cleaned_neu(
+                    sta, cleanedFile, ref=ref, mm=meters, dstring=tformat, rhour=True
+                )
+                print(
+                    "wrote cleaned series to {outfile} — removed "
+                    "{n_removed}/{n_total} epochs (degraded={degraded}); "
+                    "provenance: {sidecar}".format(**result)
+                )
 
         except (IndexError, TypeError) as e:
             tb = sys.exc_info()[2]
