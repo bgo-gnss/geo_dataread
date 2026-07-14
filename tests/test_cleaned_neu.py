@@ -771,6 +771,7 @@ def _capture_params(monkeypatch):
         captured["params"] = kwargs.get("params")
         captured["step_epochs"] = kwargs.get("step_epochs")
         captured["protect_windows"] = kwargs.get("protect_windows")
+        captured["min_outlier"] = kwargs.get("min_outlier")
         flags = np.zeros(np.atleast_2d(y).shape, dtype=np.bool_)
         return SimpleNamespace(flags=flags, excess_flag_abort=False)
 
@@ -790,15 +791,18 @@ def test_read_outlier_overrides_parses_only_provided_fields(tmp_path):
         ],
     )
     catalog = gps_views.read_outlier_overrides(p)
-    assert catalog["SENG"] == {
+    seng = catalog["SENG"]
+    assert seng.params_fields == {
         "despike": True,
         "window_order": 1,
         "window_robust_iterations": 2,
         "epoch_policy": "union",
         "despike_n_sigma": 4.5,
-        "min_outlier": 5.0,
     }
-    assert catalog["ELDC"] == {"window_order": 2}  # blanks left at default
+    # min_outlier_{n,e,u} route to the per-component floor, NOT params_fields
+    assert seng.min_outlier == (5.0, 5.0, 5.0)
+    assert catalog["ELDC"].params_fields == {"window_order": 2}
+    assert catalog["ELDC"].min_outlier is None  # blanks left at default
 
 
 def test_read_outlier_overrides_rejects_bad(tmp_path):
@@ -809,8 +813,8 @@ def test_read_outlier_overrides_rejects_bad(tmp_path):
         "sta,window_robust_iterations\nSENG,-1\n": ">= 0",
         "sta,frobnicate\nSENG,7\n": "unknown column",
         "sta,window_order\nSENG,1\nSENG,2\n": "duplicate",
-        "sta,min_outlier_n,min_outlier_e,min_outlier_u\nSENG,5,,\n": "all three",
-        "sta,min_outlier_n,min_outlier_e,min_outlier_u\nSENG,5,6,7\n": "differ",
+        "sta,min_outlier_n\nSENG,notanum\n": "not a number",
+        "sta,min_outlier_u\nSENG,-3\n": "finite and >= 0",
     }
     for content, needle in cases.items():
         p = tmp_path / "bad.csv"
@@ -821,15 +825,30 @@ def test_read_outlier_overrides_rejects_bad(tmp_path):
         gps_views.read_outlier_overrides(tmp_path / "missing.csv")
 
 
+def test_read_outlier_overrides_min_outlier_per_component(tmp_path):
+    p = tmp_path / "outlier_overrides.csv"
+    # differing per-component floors are now VALID (the whole point)
+    _write_overrides_csv(
+        p,
+        "sta,min_outlier_n,min_outlier_e,min_outlier_u\n",
+        ["SENG,5,6,7\n", "ELDC,,,10\n"],  # ELDC: partial -> missing fill 0.0
+    )
+    catalog = gps_views.read_outlier_overrides(p)
+    assert catalog["SENG"].min_outlier == (5.0, 6.0, 7.0)
+    assert catalog["ELDC"].min_outlier == (0.0, 0.0, 10.0)  # partial fills 0.0
+    assert catalog["ELDC"].params_fields == {}
+
+
 def test_station_outlier_params_applies_and_absent(tmp_path):
     p = tmp_path / "outlier_overrides.csv"
     _write_overrides_csv(
         p, "sta,despike,window_order,epoch_policy\n", ["SENG,true,1,union\n"]
     )
-    params, source = gps_views.station_outlier_params(STA, catalog=p)
+    params, floor, source = gps_views.station_outlier_params(STA, catalog=p)
     assert params.despike is True
     assert params.window_order == 1
     assert params.epoch_policy == "union"
+    assert floor is None  # no min_outlier columns in this catalog
     assert source == str(p)
     assert gps_views.outlier_override_delta(params) == {
         "despike": True,
@@ -837,29 +856,44 @@ def test_station_outlier_params_applies_and_absent(tmp_path):
         "epoch_policy": "union",
     }
     # a station with no row -> base unchanged, source still known
-    absent, absent_src = gps_views.station_outlier_params("ZZZZ", catalog=p)
-    assert absent == OutlierParams() and absent_src == str(p)
+    absent, absent_floor, absent_src = gps_views.station_outlier_params(
+        "ZZZZ", catalog=p
+    )
+    assert absent == OutlierParams() and absent_floor is None and absent_src == str(p)
     # an explicit base is honoured
-    based, _ = gps_views.station_outlier_params(
+    based, _, _ = gps_views.station_outlier_params(
         STA, base=OutlierParams(global_n_sigma=9.0), catalog=p
     )
     assert based.global_n_sigma == 9.0 and based.window_order == 1
 
 
+def test_station_outlier_params_returns_floor(tmp_path):
+    p = tmp_path / "outlier_overrides.csv"
+    _write_overrides_csv(
+        p,
+        "sta,window_order,min_outlier_n,min_outlier_e,min_outlier_u\n",
+        ["SENG,1,5,5,10\n"],
+    )
+    params, floor, source = gps_views.station_outlier_params(STA, catalog=p)
+    assert params.window_order == 1
+    assert floor == (5.0, 5.0, 10.0)
+    assert source == str(p)
+
+
 def test_station_outlier_params_graceful_missing(tmp_path):
     with pytest.warns(UserWarning, match="no outlier-override catalog"):
-        params, source = gps_views.station_outlier_params(
+        params, floor, source = gps_views.station_outlier_params(
             STA, catalog=tmp_path / "nope.csv"
         )
-    assert params == OutlierParams() and source is None
+    assert params == OutlierParams() and floor is None and source is None
 
 
 def test_station_outlier_params_graceful_corrupt(tmp_path):
     p = tmp_path / "outlier_overrides.csv"
     p.write_text("sta,window_order\nSENG,7\n")
     with pytest.warns(UserWarning, match="unreadable"):
-        params, source = gps_views.station_outlier_params(STA, catalog=p)
-    assert params == OutlierParams() and source is None
+        params, floor, source = gps_views.station_outlier_params(STA, catalog=p)
+    assert params == OutlierParams() and floor is None and source is None
 
 
 def test_override_changes_detection_behaviorally():
@@ -1010,3 +1044,182 @@ def test_cleaned_view_records_outlier_overrides(write_env, tmp_path):
     attrs = df.attrs["gps_view"]
     assert attrs["outlier_overrides_source"] == str(ov_csv)
     assert attrs["outlier_overrides_applied"] == {"window_order": 1, "despike": True}
+
+
+# ---------------------------------------------------------------------------
+# per-component min_outlier floor (detect_outliers kwarg)
+# ---------------------------------------------------------------------------
+
+
+def _spiked_series(seed=4):
+    """Clean periodic series with an 8 mm (8-sigma) spike in N and in U."""
+    rng = np.random.default_rng(seed)
+    t = 2015.0 + np.arange(800) / 365.25
+    base = 3.0 * np.cos(2 * np.pi * t) + 1.5 * np.sin(2 * np.pi * t)
+    y = np.vstack([base + rng.normal(0.0, 1.0, t.size) for _ in range(3)])
+    sigma = np.full(y.shape, 1.0)
+    i_n, i_u = 200, 500
+    y[0, i_n] += 8.0  # N: statistical outlier, magnitude 8 mm
+    y[2, i_u] += 8.0  # U: statistical outlier, magnitude 8 mm
+    return t, y, sigma, i_n, i_u
+
+
+def test_per_component_floor_gates_by_magnitude():
+    """[5,5,10]: the 8 mm N spike (>5) is flagged, the 8 mm U spike (<10) is not."""
+    t, y, sigma, i_n, i_u = _spiked_series()
+    bare, _ = gps_views.detect_view_outliers(t, y, sigma)
+    assert bare[0, i_n] and bare[2, i_u]  # both are real statistical outliers
+
+    floored, _ = gps_views.detect_view_outliers(t, y, sigma, min_outlier=[5, 5, 10])
+    assert floored[0, i_n], "N spike (8 mm) is above its 5 mm floor -> flagged"
+    assert not floored[2, i_u], "U spike (8 mm) is below its 10 mm floor -> NOT flagged"
+
+
+def test_min_outlier_scalar_broadcasts():
+    triple = gps_views._normalize_min_outlier(7.0)
+    assert triple == (7.0, 7.0, 7.0)
+    assert gps_views._normalize_min_outlier([5, 5, 10]) == (5.0, 5.0, 10.0)
+    with pytest.raises(ValueError, match="scalar or length-3"):
+        gps_views._normalize_min_outlier([5, 5])
+    with pytest.raises(ValueError, match="finite and >= 0"):
+        gps_views._normalize_min_outlier([5, -1, 10])
+
+
+def test_resolve_outlier_detection_precedence(tmp_path):
+    ov_csv = tmp_path / "outlier_overrides.csv"
+    _write_overrides_csv(
+        ov_csv,
+        "sta,window_order,min_outlier_n,min_outlier_e,min_outlier_u\n",
+        ["SENG,1,5,5,10\n"],
+    )
+    # explicit min_outlier arg WINS over the catalog floor
+    r_arg = gps_views.resolve_outlier_detection(
+        STA, min_outlier=[1, 2, 3], outlier_overrides=ov_csv
+    )
+    assert r_arg.min_outlier == (1.0, 2.0, 3.0)
+    assert r_arg.min_outlier_source == "explicit"
+    assert r_arg.params.window_order == 1  # catalog params still apply
+
+    # no explicit arg -> catalog floor applies
+    r_cat = gps_views.resolve_outlier_detection(STA, outlier_overrides=ov_csv)
+    assert r_cat.min_outlier == (5.0, 5.0, 10.0)
+    assert r_cat.min_outlier_source == str(ov_csv)
+
+    # neither -> None (leaf default)
+    with pytest.warns(UserWarning, match="no outlier-override catalog"):
+        r_none = gps_views.resolve_outlier_detection(
+            STA, outlier_overrides=tmp_path / "nope.csv"
+        )
+    assert r_none.min_outlier is None and r_none.min_outlier_source is None
+
+
+def test_explicit_params_still_lets_catalog_floor_apply(tmp_path):
+    """explicit outlier_params bypasses catalog PARAMS but not the floor."""
+    ov_csv = tmp_path / "outlier_overrides.csv"
+    _write_overrides_csv(
+        ov_csv,
+        "sta,window_order,min_outlier_n,min_outlier_e,min_outlier_u\n",
+        ["SENG,1,5,5,10\n"],
+    )
+    r = gps_views.resolve_outlier_detection(
+        STA, outlier_params=OutlierParams(global_n_sigma=9.0), outlier_overrides=ov_csv
+    )
+    # params from the explicit arg (catalog window_order IGNORED)
+    assert r.params.global_n_sigma == 9.0
+    assert r.params.window_order == 0
+    assert r.overrides_applied == {}
+    # but the catalog's per-component floor STILL applies
+    assert r.min_outlier == (5.0, 5.0, 10.0)
+    assert r.min_outlier_source == str(ov_csv)
+
+
+def test_both_explicit_skips_catalog(tmp_path):
+    """explicit params + explicit floor -> catalog not consulted (no warning)."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")  # any catalog read would warn -> fail
+        r = gps_views.resolve_outlier_detection(
+            STA,
+            outlier_params=OutlierParams(global_n_sigma=9.0),
+            min_outlier=[5, 5, 10],
+            outlier_overrides=tmp_path / "nope.csv",
+        )
+    assert r.params.global_n_sigma == 9.0
+    assert r.min_outlier == (5.0, 5.0, 10.0)
+    assert r.min_outlier_source == "explicit"
+    assert r.overrides_source is None
+
+
+def test_writer_records_min_outlier_provenance(write_env, tmp_path, monkeypatch):
+    captured = _capture_params(monkeypatch)
+    out = tmp_path / f"{STA}-{REF}_cleaned.NEU"
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        result = gps_write.write_cleaned_neu(
+            STA, out, Dir=TOT, min_outlier=[5, 5, 10], **SAVETIMES_KW
+        )
+    # the floor reached the detector
+    np.testing.assert_array_equal(
+        np.asarray(captured["min_outlier"], dtype=float), np.array([5.0, 5.0, 10.0])
+    )
+    det = result["detector"]
+    assert det["min_outlier"] == [5.0, 5.0, 10.0]
+    assert det["min_outlier_source"] == "explicit"
+    # params_hash folds the floor in
+    assert det["params_hash"] == gps_write.outlier_params_hash(
+        OutlierParams(), [5.0, 5.0, 10.0]
+    )
+    assert det["params_hash"] != gps_write.outlier_params_hash(OutlierParams())
+
+
+def test_writer_catalog_min_outlier_provenance(write_env, tmp_path, monkeypatch):
+    ov_csv = tmp_path / "outlier_overrides.csv"
+    _write_overrides_csv(
+        ov_csv,
+        "sta,min_outlier_n,min_outlier_e,min_outlier_u\n",
+        ["SENG,5,5,10\n"],
+    )
+    captured = _capture_params(monkeypatch)
+    out = tmp_path / f"{STA}-{REF}_cleaned.NEU"
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        result = gps_write.write_cleaned_neu(
+            STA, out, Dir=TOT, outlier_overrides=ov_csv, **SAVETIMES_KW
+        )
+    np.testing.assert_array_equal(
+        np.asarray(captured["min_outlier"], dtype=float), np.array([5.0, 5.0, 10.0])
+    )
+    det = result["detector"]
+    assert det["min_outlier"] == [5.0, 5.0, 10.0]
+    assert det["min_outlier_source"] == str(ov_csv)
+
+
+def test_writer_default_no_floor_hash_unchanged(write_env, tmp_path, monkeypatch):
+    """Zero regression: no catalog + no arg -> min_outlier None, hash == today."""
+    captured = _capture_params(monkeypatch)
+    out = tmp_path / f"{STA}-{REF}_cleaned.NEU"
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        result = gps_write.write_cleaned_neu(
+            STA, out, Dir=TOT, outlier_overrides=tmp_path / "nope.csv", **SAVETIMES_KW
+        )
+    assert captured["min_outlier"] is None  # leaf default, not (0,0,0)
+    det = result["detector"]
+    assert det["min_outlier"] is None
+    assert det["min_outlier_source"] is None
+    # the None branch reproduces the pre-floor payload byte-for-byte
+    assert det["params_hash"] == gps_write.outlier_params_hash(OutlierParams())
+
+
+def test_cleaned_view_records_min_outlier(write_env):
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        df = gps_views.read_gps_view(
+            STA,
+            view="cleaned",
+            min_outlier=[5, 5, 10],
+            protect_windows=((2016.5, 2025.2),),  # keep it from aborting
+            Dir=TOT,
+        )
+    attrs = df.attrs["gps_view"]
+    assert attrs["min_outlier"] == [5.0, 5.0, 10.0]
+    assert attrs["min_outlier_source"] == "explicit"

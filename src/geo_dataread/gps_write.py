@@ -52,9 +52,8 @@ from gps_analysis import OutlierParams
 
 from geo_dataread.gps_views import (
     detect_view_outliers,
-    outlier_override_delta,
+    resolve_outlier_detection,
     resolve_protect_windows,
-    station_outlier_params,
     station_step_epochs,
 )
 
@@ -78,14 +77,23 @@ def _package_version(dist: str) -> str:
         return "unknown"
 
 
-def outlier_params_hash(params: OutlierParams, model: str = DETECTION_MODEL) -> str:
+def outlier_params_hash(
+    params: OutlierParams,
+    min_outlier: Sequence[float] | None = None,
+    model: str = DETECTION_MODEL,
+) -> str:
     """Stable content hash of a detection configuration.
 
     Hashes the model name plus the full :class:`OutlierParams` field set
     (canonical JSON, sorted keys) — two runs with the same configuration
-    produce the same hash, any parameter change produces a new one.
+    produce the same hash, any parameter change produces a new one. When a
+    per-component ``min_outlier`` floor is in effect it is folded in too (so
+    ``[5,5,10]`` and ``[5,5,5]`` differ); ``None`` reproduces the pre-floor
+    payload byte-for-byte, so the default path's hash is unchanged.
     """
-    payload = {"model": model, "params": dataclasses.asdict(params)}
+    payload: dict[str, object] = {"model": model, "params": dataclasses.asdict(params)}
+    if min_outlier is not None:
+        payload["min_outlier"] = [float(v) for v in min_outlier]
     digest = hashlib.sha256(
         json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
@@ -153,6 +161,7 @@ def write_cleaned_neu(
     Dir: str | None = None,
     rhour: bool = False,
     outlier_params: OutlierParams | None = None,
+    min_outlier: float | Sequence[float] | None = None,
     steps: str | Path | None = None,
     protect_windows: str | Path | Sequence[tuple[float, float]] | None = None,
     outlier_overrides: str | Path | None = None,
@@ -222,6 +231,12 @@ def write_cleaned_neu(
             override); None resolves per-station via ``outlier_overrides``
             then the spec defaults. Magnitude thresholds are in mm regardless
             of ``mm`` (detection always runs in mm).
+        min_outlier: Per-component magnitude floor ``[N, E, U]`` (or a scalar)
+            routed to ``detect_outliers`` — a candidate below its component
+            floor is NOT flagged (active stations use e.g. ``[5, 5, 10]`` mm,
+            U noisier). Always in mm. An EXPLICIT value wins over the catalog
+            ``min_outlier_{n,e,u}``; None resolves from the catalog then the
+            leaf default. Independent of ``outlier_params``.
         outlier_overrides: Per-station outlier-parameter override catalog
             path (``outlier_overrides.csv``) — enables the stronger levers
             (despike, ``window_order=1``, ``epoch_policy="union"``) for
@@ -249,17 +264,20 @@ def write_cleaned_neu(
 
     requested = Path(outfile)
 
-    # precedence: explicit outlier_params arg > per-station catalog override
-    # > OutlierParams() default. The stronger detection levers (despike,
-    # window_order=1, epoch_policy="union") are enabled per active station
-    # via the catalog while the fleet default stays conservative order-0.
-    if outlier_params is not None:
-        params = outlier_params
-        ov_source: str | None = None
-        ov_applied: dict[str, object] = {}
-    else:
-        params, ov_source = station_outlier_params(sta, catalog=outlier_overrides)
-        ov_applied = outlier_override_delta(params)
+    # precedence (params): explicit outlier_params arg > per-station catalog
+    # override > OutlierParams() default — the stronger levers (despike,
+    # window_order=1, epoch_policy="union") per active station while the fleet
+    # default stays conservative order-0. precedence (floor): explicit
+    # min_outlier arg > catalog min_outlier_{n,e,u} > None (leaf default). The
+    # two are independent (min_outlier is a separate detect_outliers kwarg).
+    resolved = resolve_outlier_detection(
+        sta,
+        outlier_params=outlier_params,
+        min_outlier=min_outlier,
+        outlier_overrides=outlier_overrides,
+    )
+    params = resolved.params
+    floor = resolved.min_outlier
 
     # the record array that gets written - identical to the raw product
     neudata = gps_read.gamittoNEU(  # type: ignore[no-untyped-call]
@@ -299,7 +317,8 @@ def write_cleaned_neu(
     # station CLEANS instead of degrading. Composes with step_epochs.
     pwindows, pw_source = resolve_protect_windows(sta, protect_windows)
 
-    # detection always in mm so OutlierParams thresholds are unit-stable
+    # detection always in mm so OutlierParams thresholds AND the per-component
+    # min_outlier floor are unit-stable (the floor is authored in mm)
     unit_scale = 1.0 if mm else 1000.0
     flags, oprov = detect_view_outliers(
         t,
@@ -308,6 +327,7 @@ def write_cleaned_neu(
         outlier_params=params,
         step_epochs=step_epochs if step_epochs.size else None,
         protect_windows=pwindows,
+        min_outlier=floor,
     )
 
     degraded = bool(oprov["degraded"])
@@ -351,10 +371,17 @@ def write_cleaned_neu(
             "model": DETECTION_MODEL,
             "detection_unit": "mm",
             "row_policy": "union",
+            # `params` echoes the OutlierParams (its scalar `min_outlier` is
+            # the fallback); the load-bearing floors that RAN are the
+            # per-component `min_outlier` below (overrides the scalar in the
+            # leaf when set). `params_hash` folds the floor in so a consumer
+            # can tell [5,5,10] from [5,5,5] / the bare default apart.
             "params": dataclasses.asdict(params),
-            "params_hash": outlier_params_hash(params),
-            "outlier_overrides_applied": ov_applied,
-            "outlier_overrides_source": ov_source,
+            "params_hash": outlier_params_hash(params, floor),
+            "outlier_overrides_applied": resolved.overrides_applied,
+            "outlier_overrides_source": resolved.overrides_source,
+            "min_outlier": list(floor) if floor is not None else None,
+            "min_outlier_source": resolved.min_outlier_source,
             "step_epochs_applied": int(step_epochs.size),
             "steps_source": steps_source,
             "protect_windows_applied": len(pwindows),

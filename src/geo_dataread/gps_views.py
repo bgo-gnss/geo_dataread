@@ -596,6 +596,40 @@ def resolve_protect_windows(
 # ---------------------------------------------------------------------------
 
 
+@dataclasses.dataclass(frozen=True)
+class OutlierOverride:
+    """One station's parsed ``outlier_overrides.csv`` row.
+
+    Splits the two kinds of override the catalog carries:
+
+    - ``params_fields`` — :class:`gps_analysis.OutlierParams` field values
+      (``despike``, ``window_order``, …), ready for
+      :func:`dataclasses.replace`;
+    - ``min_outlier`` — the PER-COMPONENT magnitude floor ``[N, E, U]`` that
+      goes to the ``detect_outliers`` ``min_outlier`` kwarg (a separate array
+      from the scalar ``OutlierParams.min_outlier``), or None.
+    """
+
+    params_fields: dict[str, object]
+    min_outlier: tuple[float, float, float] | None
+
+
+@dataclasses.dataclass(frozen=True)
+class ResolvedOutlierConfig:
+    """Fully-resolved outlier-detection inputs for one station read.
+
+    The single object both cleaning paths get back from
+    :func:`resolve_outlier_detection`, after applying the
+    explicit-arg > catalog > default precedence.
+    """
+
+    params: OutlierParams
+    min_outlier: tuple[float, float, float] | None
+    overrides_applied: dict[str, object]
+    overrides_source: str | None
+    min_outlier_source: str | None
+
+
 def default_outlier_overrides_path() -> Path | None:
     """Resolve the deployed ``outlier_overrides.csv`` path via gps_parser.
 
@@ -640,12 +674,12 @@ def _parse_override_bool(marker: str, field: str, raw: str) -> bool:
 
 def _parse_override_row(
     resolved: Path, marker: str, row: Mapping[str, Any]
-) -> dict[str, object]:
-    """Parse ONE ``outlier_overrides.csv`` row to OutlierParams field values.
+) -> OutlierOverride:
+    """Parse ONE ``outlier_overrides.csv`` row into an :class:`OutlierOverride`.
 
     Only columns the operator actually filled contribute (blank = leave at
-    the base default). Returns the OutlierParams-keyed override dict for
-    this station (possibly empty).
+    the base default). Splits the OutlierParams field overrides from the
+    per-component ``min_outlier`` floor.
     """
     overrides: dict[str, object] = {}
 
@@ -701,44 +735,42 @@ def _parse_override_row(
                 f"station {marker}: despike_n_sigma {despike_n_sigma!r} is not a number"
             ) from None
 
-    # min_outlier_{n,e,u} → the SCALAR OutlierParams.min_outlier floor.
-    # OutlierParams.min_outlier is a single float (not a per-component
-    # triple), so this catalog only expresses a UNIFORM floor: supply all
-    # three equal (or none). Partial or differing values are rejected — a
-    # true per-component floor would need the detect_outliers ``min_outlier``
-    # kwarg, a separate (not-yet-plumbed) path.
-    raw_floors = {
-        c: str(row.get(f"min_outlier_{c}") or "").strip() for c in ("n", "e", "u")
-    }
-    provided = {c: v for c, v in raw_floors.items() if v}
-    if provided:
-        if len(provided) != 3:
-            raise ValueError(
-                f"station {marker}: supply all three of min_outlier_n/e/u "
-                "or none (OutlierParams.min_outlier is a single scalar floor)"
-            )
-        try:
-            floats = {c: float(v) for c, v in raw_floors.items()}
-        except ValueError:
-            raise ValueError(
-                f"station {marker}: min_outlier_n/e/u "
-                f"{tuple(raw_floors.values())!r} are not all numbers"
-            ) from None
-        unique = set(floats.values())
-        if len(unique) != 1:
-            raise ValueError(
-                f"station {marker}: min_outlier_n/e/u {tuple(floats.values())!r} "
-                "differ — OutlierParams.min_outlier is a single scalar floor, "
-                "so per-component floors are not supported by this catalog"
-            )
-        overrides["min_outlier"] = next(iter(unique))
+    # min_outlier_{n,e,u} → the PER-COMPONENT magnitude floor [N,E,U] routed
+    # to the detect_outliers ``min_outlier`` kwarg (a separate array, NOT the
+    # scalar OutlierParams.min_outlier). Active stations want e.g. N/E=5, U=10
+    # (U is ~2-3x noisier). Partial: any component left blank fills 0.0 (no
+    # floor there); all blank → None (leaf falls back to params.min_outlier).
+    raw_floors = [
+        str(row.get(f"min_outlier_{c}") or "").strip() for c in ("n", "e", "u")
+    ]
+    if any(raw_floors):
+        floor: list[float] = []
+        for comp, raw in zip(("n", "e", "u"), raw_floors, strict=True):
+            if not raw:
+                floor.append(0.0)
+                continue
+            try:
+                floor_value = float(raw)
+            except ValueError:
+                raise ValueError(
+                    f"station {marker}: min_outlier_{comp} {raw!r} is not a number"
+                ) from None
+            if floor_value < 0.0 or not np.isfinite(floor_value):
+                raise ValueError(
+                    f"station {marker}: min_outlier_{comp} {floor_value} must be "
+                    "finite and >= 0"
+                )
+            floor.append(floor_value)
+        min_outlier: tuple[float, float, float] | None = (floor[0], floor[1], floor[2])
+    else:
+        min_outlier = None
 
-    return overrides
+    return OutlierOverride(params_fields=overrides, min_outlier=min_outlier)
 
 
 def read_outlier_overrides(
     path: str | Path | None = None,
-) -> dict[str, dict[str, object]]:
+) -> dict[str, OutlierOverride]:
     """Read the deployed per-station outlier-parameter override catalog.
 
     Lets an operator enable the stronger detection levers PER STATION for
@@ -758,18 +790,18 @@ def read_outlier_overrides(
             :func:`default_outlier_overrides_path`.
 
     Returns:
-        ``{station: {field: value, ...}}`` — per station, ONLY the
-        OutlierParams fields the operator supplied (ready for
-        :func:`dataclasses.replace`). Only stations with rows appear.
+        ``{station: OutlierOverride}`` — per station, the supplied
+        OutlierParams field overrides plus the per-component ``min_outlier``
+        floor. Only stations with rows appear.
 
     Raises:
         FileNotFoundError: When the catalog (or a gpsconfig to resolve it
             from) does not exist.
         ValueError: On an unknown column, a duplicate station row, a missing
-            marker, a bad enum (``window_order``/``epoch_policy``), a
-            non-numeric field, or an unsupported ``min_outlier`` triple — a
-            corrupt catalog is rejected, never silently dropped. The
-            graceful-degrade wrapping lives in :func:`station_outlier_params`.
+            marker, a bad enum (``window_order``/``epoch_policy``), or a
+            non-numeric / negative field — a corrupt catalog is rejected,
+            never silently dropped. The graceful-degrade wrapping lives in
+            :func:`station_outlier_params`.
     """
     resolved = Path(path) if path is not None else default_outlier_overrides_path()
     if resolved is None:
@@ -791,7 +823,7 @@ def read_outlier_overrides(
             f"{resolved}: unknown column(s) {unknown!r}; recognised columns "
             f"are {_OUTLIER_OVERRIDE_COLUMNS}"
         )
-    catalog: dict[str, dict[str, object]] = {}
+    catalog: dict[str, OutlierOverride] = {}
     for row in reader:
         marker = str(row.get("sta") or "").strip()
         if not marker:
@@ -812,14 +844,16 @@ def read_outlier_overrides(
 
 def station_outlier_params(
     sta: str, *, base: OutlierParams | None = None, catalog: str | Path | None = None
-) -> tuple[OutlierParams, str | None]:
-    """Per-station outlier parameters, with catalog overrides + graceful degrade.
+) -> tuple[OutlierParams, tuple[float, float, float] | None, str | None]:
+    """Per-station outlier params + floor, with catalog overrides + degrade.
 
     Starts from ``base`` (or :class:`gps_analysis.OutlierParams` defaults) and
-    applies the station's catalog overrides via :func:`dataclasses.replace`.
-    Overrides are an ENHANCEMENT — a missing / unreadable / corrupt catalog
-    must NEVER hard-fail cleaning, so ANY problem warns (``UserWarning`` +
-    log, deduped once) and returns the base unchanged.
+    applies the station's catalog overrides via :func:`dataclasses.replace`,
+    and separately returns the per-component ``min_outlier`` floor (a distinct
+    ``detect_outliers`` kwarg, NOT an OutlierParams field). Overrides are an
+    ENHANCEMENT — a missing / unreadable / corrupt catalog must NEVER
+    hard-fail cleaning, so ANY problem warns (``UserWarning`` + log, deduped
+    once) and returns the base with no floor.
 
     Args:
         sta: Station four-letter name.
@@ -827,9 +861,10 @@ def station_outlier_params(
         catalog: Explicit catalog path; None resolves the deployed default.
 
     Returns:
-        ``(params, source)`` — the resolved parameters and the catalog path
-        (or None when unavailable / degraded). The base is returned unchanged
-        when the station has no override row.
+        ``(params, min_outlier, source)`` — the resolved parameters, the
+        station's per-component floor ``[N, E, U]`` (or None), and the catalog
+        path (or None when unavailable / degraded). The base is returned
+        unchanged with no floor when the station has no override row.
     """
     default = base if base is not None else OutlierParams()
     resolved = default_outlier_overrides_path() if catalog is None else Path(catalog)
@@ -845,7 +880,7 @@ def station_outlier_params(
             stacklevel=2,
         )
         logger.warning("no outlier-override catalog: %s", exc)
-        return default, None
+        return default, None, None
     except (ValueError, OSError) as exc:
         warnings.warn(
             f"{sta}: outlier-override catalog unreadable ({exc}); cleaning "
@@ -854,14 +889,18 @@ def station_outlier_params(
             stacklevel=2,
         )
         logger.warning("%s: outlier-override catalog unreadable: %s", sta, exc)
-        return default, None
-    overrides = overrides_by_sta.get(sta)
-    if not overrides:
-        return default, str(resolved)
-    # values are per-field OutlierParams types (validated in the reader); the
-    # dict is object-typed for a permissive public API, so narrow for replace.
-    updated = dataclasses.replace(default, **cast("dict[str, Any]", overrides))
-    return updated, str(resolved)
+        return default, None, None
+    override = overrides_by_sta.get(sta)
+    if override is None:
+        return default, None, str(resolved)
+    params = default
+    if override.params_fields:
+        # values are per-field OutlierParams types (validated in the reader);
+        # object-typed for a permissive public API, so narrow for replace.
+        params = dataclasses.replace(
+            default, **cast("dict[str, Any]", override.params_fields)
+        )
+    return params, override.min_outlier, str(resolved)
 
 
 def outlier_override_delta(
@@ -879,6 +918,103 @@ def outlier_override_delta(
         for f in dataclasses.fields(params)
         if getattr(params, f.name) != getattr(reference, f.name)
     }
+
+
+def _normalize_min_outlier(
+    min_outlier: float | Sequence[float],
+) -> tuple[float, float, float]:
+    """Coerce a scalar or ``[N, E, U]`` floor to a validated 3-tuple.
+
+    A scalar broadcasts to all three components. Values must be finite and
+    ``>= 0`` (matching the leaf ``detect_outliers`` contract) — a bad value is
+    a hard ``ValueError`` (an explicit floor the caller asked for, not
+    optional config).
+    """
+    arr = np.atleast_1d(np.asarray(min_outlier, dtype=np.float64))
+    if arr.size == 1:
+        arr = np.full(3, float(arr[0]), dtype=np.float64)
+    if arr.shape != (3,):
+        raise ValueError(
+            f"min_outlier must be a scalar or length-3 [N,E,U] sequence, got "
+            f"shape {arr.shape}"
+        )
+    if np.any(arr < 0.0) or not np.all(np.isfinite(arr)):
+        raise ValueError("min_outlier must be finite and >= 0")
+    return (float(arr[0]), float(arr[1]), float(arr[2]))
+
+
+def resolve_outlier_detection(
+    sta: str,
+    *,
+    outlier_params: OutlierParams | None = None,
+    min_outlier: float | Sequence[float] | None = None,
+    outlier_overrides: str | Path | None = None,
+) -> ResolvedOutlierConfig:
+    """Resolve the detection params + per-component floor for one station.
+
+    The shared resolver both cleaning paths use, applying the precedence:
+
+    - **params:** explicit ``outlier_params`` arg > catalog override >
+      ``OutlierParams()`` default;
+    - **min_outlier:** explicit ``min_outlier`` arg > catalog
+      ``min_outlier_{n,e,u}`` > None (leaf falls back to
+      ``params.min_outlier``).
+
+    The two are INDEPENDENT: an explicit ``outlier_params`` bypasses the
+    catalog for the params only — the catalog's per-station ``min_outlier``
+    still applies unless an explicit ``min_outlier`` arg is also given. When
+    BOTH are explicit the catalog is not consulted at all (no spurious
+    "no catalog" warning).
+
+    Returns:
+        A :class:`ResolvedOutlierConfig` with the resolved params, the
+        per-component floor (or None), the applied param-override delta (for
+        provenance), and the params / floor sources.
+    """
+    explicit_floor = (
+        None if min_outlier is None else _normalize_min_outlier(min_outlier)
+    )
+
+    # short-circuit: neither params nor floor needs the catalog
+    if outlier_params is not None and explicit_floor is not None:
+        return ResolvedOutlierConfig(
+            params=outlier_params,
+            min_outlier=explicit_floor,
+            overrides_applied={},
+            overrides_source=None,
+            min_outlier_source="explicit",
+        )
+
+    cat_params, cat_floor, cat_source = station_outlier_params(
+        sta, catalog=outlier_overrides
+    )
+
+    if outlier_params is not None:
+        params = outlier_params
+        overrides_applied: dict[str, object] = {}
+        overrides_source: str | None = None
+    else:
+        params = cat_params
+        overrides_applied = outlier_override_delta(params)
+        overrides_source = cat_source
+
+    if explicit_floor is not None:
+        floor = explicit_floor
+        floor_source: str | None = "explicit"
+    elif cat_floor is not None:
+        floor = cat_floor
+        floor_source = cat_source
+    else:
+        floor = None
+        floor_source = None
+
+    return ResolvedOutlierConfig(
+        params=params,
+        min_outlier=floor,
+        overrides_applied=overrides_applied,
+        overrides_source=overrides_source,
+        min_outlier_source=floor_source,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1131,6 +1267,7 @@ def read_gps_view(
     params: str | Path | Mapping[str, Any] | None = None,
     use_sta: str | None = None,
     outlier_params: OutlierParams | None = None,
+    min_outlier: float | Sequence[float] | None = None,
     steps: str | Path | None = None,
     protect_windows: str | Path | Sequence[tuple[float, float]] | None = None,
     outlier_overrides: str | Path | None = None,
@@ -1186,6 +1323,14 @@ def read_gps_view(
         outlier_params: Detection thresholds. An EXPLICIT value wins over
             the per-station override catalog (REPL override); None resolves
             per-station via ``outlier_overrides`` then the spec defaults.
+        min_outlier: Per-component magnitude floor ``[N, E, U]`` (or a scalar
+            broadcast to all three) routed to ``detect_outliers`` — a
+            candidate below its component floor is NOT flagged (active
+            stations use e.g. ``[5, 5, 10]`` mm, U noisier). An EXPLICIT value
+            wins over the catalog ``min_outlier_{n,e,u}``; None resolves from
+            the catalog then the leaf default. Independent of
+            ``outlier_params`` (it is a separate leaf kwarg, not an
+            OutlierParams field).
         outlier_overrides: Per-station outlier-parameter override catalog
             path (``outlier_overrides.csv``) — enables the stronger levers
             (despike, ``window_order=1``, ``epoch_policy="union"``) for
@@ -1271,6 +1416,8 @@ def read_gps_view(
         "protect_windows_source": None,
         "outlier_overrides_applied": {},
         "outlier_overrides_source": None,
+        "min_outlier": None,
+        "min_outlier_source": None,
     }
 
     do_clean = attrs["clean"]
@@ -1281,22 +1428,28 @@ def read_gps_view(
         pwindows, pw_source = resolve_protect_windows(sta, protect_windows)
         attrs["protect_windows_applied"] = len(pwindows)
         attrs["protect_windows_source"] = pw_source
-        # precedence: explicit outlier_params arg > catalog override > default
-        if outlier_params is not None:
-            resolved_params = outlier_params
-        else:
-            resolved_params, ov_source = station_outlier_params(
-                sta, catalog=outlier_overrides
-            )
-            attrs["outlier_overrides_source"] = ov_source
-            attrs["outlier_overrides_applied"] = outlier_override_delta(resolved_params)
+        # precedence: explicit arg > catalog override > default, resolved for
+        # BOTH the params and the (independent) per-component min_outlier floor
+        resolved = resolve_outlier_detection(
+            sta,
+            outlier_params=outlier_params,
+            min_outlier=min_outlier,
+            outlier_overrides=outlier_overrides,
+        )
+        attrs["outlier_overrides_source"] = resolved.overrides_source
+        attrs["outlier_overrides_applied"] = resolved.overrides_applied
+        attrs["min_outlier"] = (
+            list(resolved.min_outlier) if resolved.min_outlier is not None else None
+        )
+        attrs["min_outlier_source"] = resolved.min_outlier_source
         flags, oprov = detect_view_outliers(
             yearf,
             data,
             Ddata,
-            outlier_params=resolved_params,
+            outlier_params=resolved.params,
             step_epochs=step_epochs if step_epochs.size else None,
             protect_windows=pwindows,
+            min_outlier=resolved.min_outlier,
         )
         flags2d = np.atleast_2d(flags)
         for c, name in enumerate(_COMPONENTS):
