@@ -21,7 +21,12 @@ dependencies = [
 ]
 
 [dependency-groups]
-dev = ["pytest>=8.3", "pytest-cov>=6.0"]
+dev = [
+    "mypy>=1.13",
+    "pytest>=8.3",
+    "pytest-cov>=6.0",
+    "ruff>=0.8",
+]
 
 [project.scripts]
 geo-dataread = "geo_dataread:main"
@@ -40,3 +45,45 @@ gps_analysis = { path = "../gps_analysis", editable = true }
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+# Lint/format scope: the maintained GPS lane (gps_read, gps_views,
+# gps_savetimes, tests). The legacy auxiliary readers (GAS/SIL/hydro) and the
+# legacy displacement CLI are older maintenance-only code with real lint debt
+# — excluded per the gps_plot ruff-scope precedent (BGÓ: ignore legacy code)
+# until they are deliberately modernized.
+[tool.ruff]
+extend-exclude = [
+    "src/geo_dataread/gas_read.py",   # legacy GAS reader (maintenance only)
+    "src/geo_dataread/sil_read.py",   # legacy SIL reader (maintenance only)
+    "src/geo_dataread/hytro_read.py", # legacy hydrology reader (maintenance only)
+    "src/geo_dataread/gps_displ.py",  # legacy displacement CLI (maintenance only)
+]
+
+# Typing policy: `mypy --strict src/` is the gate; the pre-typing legacy
+# modules are per-module ignore_errors (same scope rationale as the ruff
+# excludes above) so strict typing is enforced on the new view lane
+# (gps_views) without rewriting golden-pinned legacy code. Modernization
+# ledger: PLAN-geo_dataread-refactor-B.md.
+[tool.mypy]
+strict = true
+
+[[tool.mypy.overrides]]
+module = [
+    "pandas.*",
+    "gps_parser.*",
+    "geofunc.*",
+    "gtimes.*",
+    "scipy.*",
+]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = [
+    "geo_dataread.gps_read",
+    "geo_dataread.gas_read",
+    "geo_dataread.sil_read",
+    "geo_dataread.hytro_read",
+    "geo_dataread.gps_displ",
+    "geo_dataread.gps_savetimes",
+]
+ignore_errors = true

@@ -8,7 +8,6 @@ import os
 import re
 import sys
 from collections import OrderedDict
-from pathlib import Path
 from typing import Optional
 
 import geofunc.geofunc as gf
@@ -26,7 +25,6 @@ from gtimes.timefunc import (
     TimetoYearf,
     convfromYearf,
     currYearfDate,
-    round_to_hour,
 )
 
 #
@@ -246,6 +244,11 @@ def getDetrFit(
 ):
     """
     this function defines the type of detrending to be applied. it is based on the detrending parameters file, detrfile, which is stored in the gpsconfig directory of the gpsplot server.
+
+    SUPERSEDED (with convconst/save_detrend_const, DESIGN_live_detrending
+    §0.1/§8): the stored-parameter path is geo_dataread.gps_views
+    (detrend_params.json + gps_analysis.apply_detrend). Kept as a legacy
+    shim for read_gps_data until its callers are migrated.
 
     examples:
         >>> getDetrFit('gric', useSTA=None, useFIT=None, onlyperiodic=false, detrfile='detrend_itrf2008.csv')
@@ -656,7 +659,6 @@ def extractfromgamitbakf(cfile, stations):
     slines = []
 
     site = re.compile(stations)
-    tim = re.compile("solution refers to", re.ignorecase)
     f = open(cfile, "r")
 
     for line in f:
@@ -888,9 +890,7 @@ def read_join(sta, schemes=("TOT", "08h"), Dir=None, missing="warn"):
     """
 
     if missing not in ("warn", "raise"):
-        raise ValueError(
-            'missing must be "warn" or "raise", got {0!r}'.format(missing)
-        )
+        raise ValueError('missing must be "warn" or "raise", got {0!r}'.format(missing))
 
     frames = []
     for scheme in schemes:
@@ -899,7 +899,11 @@ def read_join(sta, schemes=("TOT", "08h"), Dir=None, missing="warn"):
         except FileNotFoundError as e:
             if missing == "raise":
                 raise
-            print("WARNING: skipping scheme {0!r} for station {1}: {2}".format(scheme, sta, e))
+            print(
+                "WARNING: skipping scheme {0!r} for station {1}: {2}".format(
+                    scheme, sta, e
+                )
+            )
             continue
 
         frame = convGlobktopandas(yearf, data, Ddata)
@@ -1291,6 +1295,18 @@ def gamittoNEU(
     # remove plate velocity (shared helper — data still in m, so scale=1)
     if ref == "plate":
         data = _remove_plate_velocity(sta, yearf, data, reference=reference)
+    elif ref == "detrend":
+        # Stored-parameter detrended .NEU product (internal-delivery slice,
+        # DESIGN_live_detrending §0/§4.2). Previously ref="detrend" fell
+        # through SILENTLY (no plate removal, no detrend). Now: plate-first
+        # (locked decision 5), then a pure apply of the deployed record —
+        # data is still in METERS here, so the mm-unit record is scaled.
+        # Graceful degrade (warning + plate-removed series) is inside
+        # gps_views.detrend_arrays.
+        from geo_dataread import gps_views  # deferred: avoids import cycle
+
+        data = _remove_plate_velocity(sta, yearf, data, reference=reference)
+        data, _detrend_prov = gps_views.detrend_arrays(sta, yearf, data, data_unit="m")
 
     # convert to mm
     if mm:
@@ -1393,6 +1409,16 @@ def read_gps_data(
         const: detrending constants coefficient, for a lineperiodic function.
         data:  Data array for the three components including the uncertainties from the raw_data (measurement uncertainty)
 
+    Note:
+        SUPERSEDED for cleaned/detrended delivery (internal-delivery slice,
+        DESIGN_live_detrending §0): this function re-fits on every read and
+        seeds from the legacy half-specified CSV. The first-class
+        raw|cleaned|detrended toggle is
+        :func:`geo_dataread.gps_views.read_gps_view` (stored-parameter pure
+        apply, provenance in ``df.attrs``); the array paths are
+        ``getData(..., ref="detrend")`` / ``gamittoNEU(..., ref="detrend")``.
+        Kept unchanged (golden-pinned) for the research workflows until
+        design §8 step 5 retires the CSV mechanism.
     """
 
     # Handling logging
@@ -1569,12 +1595,13 @@ def fromord(yearf):
 
     """
 
-    # from floating point year to floating point ordinal
-
-    for i in range(len(yearf)):
-        yearf[i] = Timeto(yearf[i], "ordinalf")
-
-    return yearf
+    # Deliberate dead-branch removal (internal-delivery slice, slice-4
+    # precedent D4): this function always crashed with NameError on the
+    # undefined `Timeto`. Replaced with an explicit error.
+    raise NotImplementedError(
+        "fromord was never functional (it crashed with NameError on the "
+        "undefined 'Timeto'); use gtimes.timefunc conversions instead"
+    )
 
 
 def getData(
@@ -1635,13 +1662,16 @@ def getData(
         data = _remove_plate_velocity(sta, yearf, data, scale=1000)
 
     elif ref == "detrend":
-        # Deliberate dead-branch removal (refactor-B slice 4): this branch
-        # called detrend() with the wrong signature and the deleted legacy
-        # leastsq errfunc — it always crashed. Replaced with an explicit error.
-        raise ValueError(
-            "unsupported ref='detrend': the branch was dead (wrong detrend() "
-            "call signature) and was removed in the refactor-B slice-4 cleanup"
-        )
+        # Revived (internal-delivery slice, DESIGN_live_detrending §0/§4.2):
+        # stored-parameter detrended view — plate removal FIRST (locked
+        # decision 5: params live in the plate-removed frame), then a pure
+        # apply of the deployed record. No re-fit on read. Graceful degrade
+        # (warning + plate-removed series) lives in gps_views.detrend_arrays.
+        from geo_dataread import gps_views  # deferred: avoids import cycle
+
+        # shared helper — data already in mm after iprep, so scale=1000
+        data = _remove_plate_velocity(sta, yearf, data, scale=1000)
+        data, _detrend_prov = gps_views.detrend_arrays(sta, yearf, data)
 
     elif ref == "itrf2008":
         pass
@@ -1667,7 +1697,7 @@ def __converter(x):
 
     try:
         return float(x)
-    except:
+    except (TypeError, ValueError):
         return np.nan
 
     # if x == '********':

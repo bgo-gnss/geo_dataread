@@ -40,16 +40,38 @@ Stable, ~3948 LOC. Used by research workflows and `gps_plot`.
 geo_dataread/
 ├── src/geo_dataread/
 │   ├── __init__.py
-│   ├── gps_read.py       # ~1640 LOC — main GPS time-series reader (slice-4 purge + slice-6 read_join)
+│   ├── gps_read.py       # ~1660 LOC — main GPS time-series reader (slice-4 purge + slice-6 read_join)
+│   ├── gps_views.py      # apply-on-read views: raw|cleaned|detrended toggle (typed, mypy-strict)
 │   ├── gps_displ.py      # displacements / station-relative motion
 │   ├── gps_savetimes.py  # serialise time series to disk
 │   ├── gas_read.py       # GAS (strainmeter) data
 │   ├── sil_read.py       # SIL seismic data
 │   └── hytro_read.py     # hydrology data
 ├── tests/test-gps_read.py      # legacy smoke script (not pytest-collected)
+├── tests/test_gps_views.py     # view-toggle suite (raw parity, degrade, borrowing, provenance)
 ├── tests/goldenmaster/         # behavior pins for the Phase 1 refactor 📄 README
 └── pyproject.toml
 ```
+
+## View toggle (internal delivery, DESIGN_live_detrending §0)
+
+`gps_views.read_gps_view(sta, view="raw"|"cleaned"|"detrended", ...)` is the
+first-class raw↔cleaned↔detrended switch of the internal (direct-read) path:
+raw columns are ALWAYS present and bit-identical to the legacy read; views
+only ADD columns (`*_outlier`/`*_cleaned` masks from
+`gps_analysis.detect_outliers`; `*_detrended` = raw − stored trajectory via
+`gps_analysis.apply_detrend` — pure apply of the deployed
+`detrend_params.json` record, NO re-fit on read). Provenance in
+`df.attrs["gps_view"]` (`detrend_method`, frame, record version, `fitted_at`,
+borrowed/UseSTA source, degrade state). Graceful degrade: any clean/detrend
+failure warns (`UserWarning` + log) and serves raw — only a frame mismatch
+hard-fails. Array paths revived: `getData(..., ref="detrend")` and
+`gamittoNEU(..., ref="detrend")` (so `gps-savetimes --ref detrend` now
+produces stored-params detrended .NEU, plate-first). The legacy
+`getDetrFit`/`convconst`/`save_detrend_const` + `detrend_itrf2008.csv`
+mechanism is SUPERSEDED (kept as shims for `read_gps_data` until design §8
+step 5). Lint/type scope: ruff excludes + mypy per-module ignores cover the
+legacy aux readers only — new code must pass `mypy --strict` (pyproject).
 
 ## Dependencies
 
@@ -79,4 +101,4 @@ gps-displacemnts ...  # entry: geo_dataread.gps_displ:main   (sic — typo prese
 
 ---
 
-*Last reviewed: 2026-07-12*
+*Last reviewed: 2026-07-14 (internal-delivery slice: gps_views view toggle)*

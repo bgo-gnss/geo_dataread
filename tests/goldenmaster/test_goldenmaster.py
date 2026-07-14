@@ -24,10 +24,16 @@ def _assert_dict_matches(actual, case_id):
     )
     for key in golden.files:
         got, want = np.asarray(actual[key]), golden[key]
-        assert got.shape == want.shape, f"{case_id}/{key}: shape {got.shape} != {want.shape}"
+        assert got.shape == want.shape, (
+            f"{case_id}/{key}: shape {got.shape} != {want.shape}"
+        )
         if want.dtype.kind in "fc":
             np.testing.assert_allclose(
-                got, want, rtol=RTOL, atol=ATOL, equal_nan=True,
+                got,
+                want,
+                rtol=RTOL,
+                atol=ATOL,
+                equal_nan=True,
                 err_msg=f"{case_id}/{key}",
             )
         else:

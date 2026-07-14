@@ -26,7 +26,9 @@ ATOL = 1e-12
 def gm_real_env(tmp_path_factory):
     """Rendered realdata gpsconfig dir. Unlike the synthetic gm_env this does
     NOT mutate GPS_CONFIG_PATH session-wide — runners swap it per call."""
-    return {"config_dir": build_real_config_dir(tmp_path_factory.mktemp("real-gpsconfig"))}
+    return {
+        "config_dir": build_real_config_dir(tmp_path_factory.mktemp("real-gpsconfig"))
+    }
 
 
 def _assert_dict_matches(actual, case_id):
@@ -37,10 +39,16 @@ def _assert_dict_matches(actual, case_id):
     )
     for key in golden.files:
         got, want = np.asarray(actual[key]), golden[key]
-        assert got.shape == want.shape, f"{case_id}/{key}: shape {got.shape} != {want.shape}"
+        assert got.shape == want.shape, (
+            f"{case_id}/{key}: shape {got.shape} != {want.shape}"
+        )
         if want.dtype.kind in "fc":
             np.testing.assert_allclose(
-                got, want, rtol=RTOL, atol=ATOL, equal_nan=True,
+                got,
+                want,
+                rtol=RTOL,
+                atol=ATOL,
+                equal_nan=True,
                 err_msg=f"{case_id}/{key}",
             )
         else:

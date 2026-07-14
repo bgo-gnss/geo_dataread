@@ -170,7 +170,9 @@ REAL_CASES["real_ogt_SENG_08h"] = _real_ogt("SENG", tType="08h")
 REAL_CASES["real_join_SENG_TOT_08h"] = _real_join("SENG", ("TOT", "08h"))
 
 # .NEU product files: the exact production gps-savetimes call. Golden = file.
-REAL_NEU_FILE_CASES = {f"real_neufile_{_sta}_plate": (_sta, "plate") for _sta in REAL_STATIONS}
+REAL_NEU_FILE_CASES = {
+    f"real_neufile_{_sta}_plate": (_sta, "plate") for _sta in REAL_STATIONS
+}
 
 
 def run_real_neu_file_case(case_id, env, out_dir: Path) -> Path:

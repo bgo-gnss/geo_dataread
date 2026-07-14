@@ -76,7 +76,9 @@ def main(only=()) -> int:
             (REAL_EXPECTED / f"{case_id}.NEU").write_bytes(out1.read_bytes())
             print(f"captured {case_id}")
 
-    print(f"\n{len(cases) + len(neu_cases)} real-data golden(s) written to {REAL_EXPECTED}")
+    print(
+        f"\n{len(cases) + len(neu_cases)} real-data golden(s) written to {REAL_EXPECTED}"
+    )
     return 0
 
 

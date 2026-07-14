@@ -154,9 +154,7 @@ CASES = {
     "getdata_SENG_plate_uncert20": _getdata(
         "SENG", ref="plate", tType="TOT", uncert=20
     ),
-    "getdata_SENG_window": _getdata(
-        "SENG", fstart=2020.0, fend=2024.5, ref="plate"
-    ),
+    "getdata_SENG_window": _getdata("SENG", fstart=2020.0, fend=2024.5, ref="plate"),
     "getdata_SENG_itrf2008": _getdata("SENG"),
     "getdata_ELDC_plate": _getdata("ELDC", ref="plate"),
     "getdata_SKSH_plate": _getdata("SKSH", ref="plate"),
@@ -187,9 +185,7 @@ CASES = {
     ),
     "rgd_SENG_nodetrend": _read_gps_data("SENG", detrend_periodic=False),
     "rgd_SENG_no_csv": _read_gps_data("SENG", csv_present=False),
-    "rgd_SENG_detrendline_list": _read_gps_data(
-        "SENG", detrend_line=[2020.0, 2024.0]
-    ),
+    "rgd_SENG_detrendline_list": _read_gps_data("SENG", detrend_line=[2020.0, 2024.0]),
     "rgd_OLAC_useSTA_lineperiodic": _read_gps_data(
         "OLAC", useSTA="DYNG", useFIT="lineperiodic"
     ),
