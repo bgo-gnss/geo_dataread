@@ -19,7 +19,11 @@ from cases import build_config_dir  # noqa: E402
 @pytest.fixture(scope="session")
 def gm_env(tmp_path_factory):
     config_dir = build_config_dir(tmp_path_factory.mktemp("gpsconfig"))
-    empty_dir = tmp_path_factory.mktemp("no-detrend-csv")
+    # Config dir WITHOUT the detrend CSV — the 0.4.x config-dir-relative
+    # equivalent of the old "no CSV on CWD" fallback branch.
+    empty_dir = build_config_dir(
+        tmp_path_factory.mktemp("no-detrend-csv"), include_detrend=False
+    )
     old = os.environ.get("GPS_CONFIG_PATH")
     os.environ["GPS_CONFIG_PATH"] = str(config_dir)
     yield {"config_dir": config_dir, "empty_dir": empty_dir}

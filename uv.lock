@@ -154,7 +154,7 @@ dev = [
 requires-dist = [
     { name = "geofunc", git = "https://github.com/bgo-gnss/geofunc.git" },
     { name = "gps-analysis", editable = "../gps_analysis" },
-    { name = "gps-parser", git = "https://github.com/bgo-gnss/gps_parser.git" },
+    { name = "gps-parser", editable = "../gps_parser" },
     { name = "gtimes", specifier = ">=0.5.1" },
     { name = "numpy", specifier = ">=2.1" },
     { name = "pandas", specifier = ">=2.2" },
@@ -203,8 +203,17 @@ dev = [
 
 [[package]]
 name = "gps-parser"
-version = "0.3.0"
-source = { git = "https://github.com/bgo-gnss/gps_parser.git#6257deb9bf7498a862e53c680246749659f3a112" }
+version = "0.4.0"
+source = { editable = "../gps_parser" }
+
+[package.metadata]
+requires-dist = [
+    { name = "black", marker = "extra == 'dev'", specifier = ">=23.0.0" },
+    { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0.0" },
+    { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=4.0.0" },
+    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.1.0" },
+]
+provides-extras = ["dev"]
 
 [[package]]
 name = "gtimes"

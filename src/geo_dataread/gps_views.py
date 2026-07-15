@@ -33,7 +33,6 @@ This module supersedes the first-draft mechanism
 callers are migrated (design §8 step 5).
 """
 
-import csv
 import dataclasses
 import json
 import logging
@@ -49,6 +48,7 @@ import pandas as pd
 from gps_analysis import OutlierParams, apply_detrend, detect_outliers
 from gps_analysis import models as ga_models
 from gps_parser import ConfigParser
+from gps_parser import outlier_catalogs as _oc
 
 from gtimes.timefunc import TimetoYearf
 
@@ -66,40 +66,20 @@ DOC_SCHEMA_VERSION = 1
 PARAMS_FILENAME = "detrend_params.json"
 """Deployed parameter-document filename (design §3.3: gpsconfig-owned)."""
 
-STEPS_FILENAME = "steps.csv"
+# Catalog filenames + format vocab now live in the shared gps_parser resolver
+# (the single source both this package and gps_api read); aliased here for
+# back-compat with any importer of the old geo_dataread names.
+STEPS_FILENAME = _oc.STEPS_FILENAME
 """Deployed per-station step-catalog filename (gpsconfig-owned)."""
 
-STEP_COMPONENTS = ("N", "E", "U", "ALL")
+STEP_COMPONENTS = _oc.STEP_COMPONENTS
 """Component tags a ``steps.csv`` row may carry (``ALL`` = every component)."""
 
-PROTECT_WINDOWS_FILENAME = "protect_windows.csv"
+PROTECT_WINDOWS_FILENAME = _oc.PROTECT_WINDOWS_FILENAME
 """Deployed per-station protect-window catalog filename (gpsconfig-owned)."""
 
-OUTLIER_OVERRIDES_FILENAME = "outlier_overrides.csv"
+OUTLIER_OVERRIDES_FILENAME = _oc.OUTLIER_OVERRIDES_FILENAME
 """Deployed per-station outlier-override catalog filename (gpsconfig-owned)."""
-
-_OVERRIDE_WINDOW_ORDERS = (0, 1, 2)
-"""Valid ``window_order`` values (0 = constant, 1 = local linear, 2 = quad)."""
-
-_OVERRIDE_EPOCH_POLICIES = ("per_component", "union")
-"""Valid ``epoch_policy`` values."""
-
-_OUTLIER_OVERRIDE_COLUMNS = (
-    "sta",
-    "despike",
-    "window_order",
-    "window_robust_iterations",
-    "epoch_policy",
-    "despike_n_sigma",
-    "min_outlier_n",
-    "min_outlier_e",
-    "min_outlier_u",
-    "comment",
-)
-"""Recognised ``outlier_overrides.csv`` columns (any other column is rejected)."""
-
-_TRUE_TOKENS = ("1", "true", "yes", "y", "t")
-_FALSE_TOKENS = ("0", "false", "no", "n", "f")
 
 _COMPONENTS = ("north", "east", "up")
 
@@ -284,19 +264,7 @@ def default_steps_path() -> Path | None:
         The resolved path (which may not exist yet — the step catalog is
         an optional enhancement), or None when no gpsconfig is reachable.
     """
-    try:
-        config = ConfigParser()
-    except Exception:  # pragma: no cover - no gpsconfig deployed at all
-        logger.warning("no gpsconfig available; cannot resolve %s", STEPS_FILENAME)
-        return None
-    try:
-        return Path(str(config.getPostProcessConfig("steps")))
-    except Exception:
-        # additive key not deployed yet - fall back to the gpsconfig dir
-        config_path = getattr(config, "config_path", None)
-        if config_path:
-            return Path(str(config_path)) / STEPS_FILENAME
-        return None
+    return cast("Path | None", _oc.catalog_path("steps", _oc.STEPS_FILENAME))
 
 
 def read_step_catalog(path: str | Path | None = None) -> dict[str, tuple[float, ...]]:
@@ -331,36 +299,14 @@ def read_step_catalog(path: str | Path | None = None) -> dict[str, tuple[float, 
             silently dropped. The graceful-degrade wrapping lives in
             :func:`station_step_epochs`.
     """
-    resolved = Path(path) if path is not None else default_steps_path()
-    if resolved is None:
-        raise FileNotFoundError(f"no gpsconfig available to resolve {STEPS_FILENAME}")
-    if not resolved.is_file():
-        raise FileNotFoundError(f"step catalog not found: {resolved}")
-    lines = [
-        line
-        for line in resolved.read_text(encoding="utf-8").splitlines()
-        if line.strip() and not line.lstrip().startswith("#")
-    ]
-    catalog: dict[str, set[float]] = {}
-    for row in csv.DictReader(lines):
-        marker = str(row.get("sta") or "").strip()
-        if not marker:
-            raise ValueError(f"{resolved}: steps.csv row without a 'sta' marker: {row}")
-        component = str(row.get("component") or "ALL").strip().upper()
-        if component not in STEP_COMPONENTS:
-            raise ValueError(
-                f"{resolved}: station {marker}: component {component!r} — "
-                f"must be one of {STEP_COMPONENTS}"
-            )
-        try:
-            epoch = float(str(row.get("epoch_yearf")))
-        except (TypeError, ValueError):
-            raise ValueError(
-                f"{resolved}: station {marker}: epoch_yearf "
-                f"{row.get('epoch_yearf')!r} is not a fractional year"
-            ) from None
-        catalog.setdefault(marker, set()).add(epoch)
-    return {marker: tuple(sorted(epochs)) for marker, epochs in catalog.items()}
+    # Delegate parse + resolution to the shared gps_parser reader (the single
+    # source gps_api also reads), then flatten its per-component records to the
+    # flat, de-duplicated union step_epochs this package's cleaning path uses.
+    records = _oc.read_steps(path)
+    return {
+        marker: tuple(sorted({record.epoch_yearf for record in recs}))
+        for marker, recs in records.items()
+    }
 
 
 def station_step_epochs(
@@ -429,21 +375,10 @@ def default_protect_windows_path() -> Path | None:
         catalog is an optional enhancement), or None when no gpsconfig is
         reachable.
     """
-    try:
-        config = ConfigParser()
-    except Exception:  # pragma: no cover - no gpsconfig deployed at all
-        logger.warning(
-            "no gpsconfig available; cannot resolve %s", PROTECT_WINDOWS_FILENAME
-        )
-        return None
-    try:
-        return Path(str(config.getPostProcessConfig("protect_windows")))
-    except Exception:
-        # additive key not deployed yet - fall back to the gpsconfig dir
-        config_path = getattr(config, "config_path", None)
-        if config_path:
-            return Path(str(config_path)) / PROTECT_WINDOWS_FILENAME
-        return None
+    return cast(
+        "Path | None",
+        _oc.catalog_path("protect_windows", _oc.PROTECT_WINDOWS_FILENAME),
+    )
 
 
 def read_protect_windows(
@@ -478,42 +413,11 @@ def read_protect_windows(
             silently dropped. The graceful-degrade wrapping lives in
             :func:`station_protect_windows`.
     """
-    resolved = Path(path) if path is not None else default_protect_windows_path()
-    if resolved is None:
-        raise FileNotFoundError(
-            f"no gpsconfig available to resolve {PROTECT_WINDOWS_FILENAME}"
-        )
-    if not resolved.is_file():
-        raise FileNotFoundError(f"protect-window catalog not found: {resolved}")
-    lines = [
-        line
-        for line in resolved.read_text(encoding="utf-8").splitlines()
-        if line.strip() and not line.lstrip().startswith("#")
-    ]
-    catalog: dict[str, list[tuple[float, float]]] = {}
-    for row in csv.DictReader(lines):
-        marker = str(row.get("sta") or "").strip()
-        if not marker:
-            raise ValueError(
-                f"{resolved}: protect_windows.csv row without a 'sta' marker: {row}"
-            )
-        try:
-            start = float(str(row.get("start_yearf")))
-            end = float(str(row.get("end_yearf")))
-        except (TypeError, ValueError):
-            raise ValueError(
-                f"{resolved}: station {marker}: start_yearf/end_yearf "
-                f"{row.get('start_yearf')!r}/{row.get('end_yearf')!r} "
-                "are not fractional years"
-            ) from None
-        if end < start:
-            raise ValueError(
-                f"{resolved}: station {marker}: protect window end {end} < "
-                f"start {start} — an interval must be (start, end) with "
-                "end >= start"
-            )
-        catalog.setdefault(marker, []).append((start, end))
-    return {marker: tuple(sorted(windows)) for marker, windows in catalog.items()}
+    # Same shape as the shared reader — direct passthrough (single source).
+    return cast(
+        "dict[str, tuple[tuple[float, float], ...]]",
+        _oc.read_protect_windows(path),
+    )
 
 
 def station_protect_windows(
@@ -643,129 +547,10 @@ def default_outlier_overrides_path() -> Path | None:
         The resolved path (which may not exist yet — the override catalog is
         an optional enhancement), or None when no gpsconfig is reachable.
     """
-    try:
-        config = ConfigParser()
-    except Exception:  # pragma: no cover - no gpsconfig deployed at all
-        logger.warning(
-            "no gpsconfig available; cannot resolve %s", OUTLIER_OVERRIDES_FILENAME
-        )
-        return None
-    try:
-        return Path(str(config.getPostProcessConfig("outlier_overrides")))
-    except Exception:
-        # additive key not deployed yet - fall back to the gpsconfig dir
-        config_path = getattr(config, "config_path", None)
-        if config_path:
-            return Path(str(config_path)) / OUTLIER_OVERRIDES_FILENAME
-        return None
-
-
-def _parse_override_bool(marker: str, field: str, raw: str) -> bool:
-    token = raw.strip().lower()
-    if token in _TRUE_TOKENS:
-        return True
-    if token in _FALSE_TOKENS:
-        return False
-    raise ValueError(
-        f"station {marker}: {field} {raw!r} is not boolean "
-        f"(use one of {_TRUE_TOKENS + _FALSE_TOKENS})"
+    return cast(
+        "Path | None",
+        _oc.catalog_path("outlier_overrides", _oc.OUTLIER_OVERRIDES_FILENAME),
     )
-
-
-def _parse_override_row(
-    resolved: Path, marker: str, row: Mapping[str, Any]
-) -> OutlierOverride:
-    """Parse ONE ``outlier_overrides.csv`` row into an :class:`OutlierOverride`.
-
-    Only columns the operator actually filled contribute (blank = leave at
-    the base default). Splits the OutlierParams field overrides from the
-    per-component ``min_outlier`` floor.
-    """
-    overrides: dict[str, object] = {}
-
-    despike = str(row.get("despike") or "").strip()
-    if despike:
-        overrides["despike"] = _parse_override_bool(marker, "despike", despike)
-
-    window_order = str(row.get("window_order") or "").strip()
-    if window_order:
-        try:
-            value = int(window_order)
-        except ValueError:
-            raise ValueError(
-                f"station {marker}: window_order {window_order!r} is not an integer"
-            ) from None
-        if value not in _OVERRIDE_WINDOW_ORDERS:
-            raise ValueError(
-                f"station {marker}: window_order {value} — "
-                f"must be one of {_OVERRIDE_WINDOW_ORDERS}"
-            )
-        overrides["window_order"] = value
-
-    window_iters = str(row.get("window_robust_iterations") or "").strip()
-    if window_iters:
-        try:
-            value = int(window_iters)
-        except ValueError:
-            raise ValueError(
-                f"station {marker}: window_robust_iterations {window_iters!r} "
-                "is not an integer"
-            ) from None
-        if value < 0:
-            raise ValueError(
-                f"station {marker}: window_robust_iterations {value} must be >= 0"
-            )
-        overrides["window_robust_iterations"] = value
-
-    epoch_policy = str(row.get("epoch_policy") or "").strip()
-    if epoch_policy:
-        if epoch_policy not in _OVERRIDE_EPOCH_POLICIES:
-            raise ValueError(
-                f"station {marker}: epoch_policy {epoch_policy!r} — "
-                f"must be one of {_OVERRIDE_EPOCH_POLICIES}"
-            )
-        overrides["epoch_policy"] = epoch_policy
-
-    despike_n_sigma = str(row.get("despike_n_sigma") or "").strip()
-    if despike_n_sigma:
-        try:
-            overrides["despike_n_sigma"] = float(despike_n_sigma)
-        except ValueError:
-            raise ValueError(
-                f"station {marker}: despike_n_sigma {despike_n_sigma!r} is not a number"
-            ) from None
-
-    # min_outlier_{n,e,u} → the PER-COMPONENT magnitude floor [N,E,U] routed
-    # to the detect_outliers ``min_outlier`` kwarg (a separate array, NOT the
-    # scalar OutlierParams.min_outlier). Active stations want e.g. N/E=5, U=10
-    # (U is ~2-3x noisier). Partial: any component left blank fills 0.0 (no
-    # floor there); all blank → None (leaf falls back to params.min_outlier).
-    raw_floors = [
-        str(row.get(f"min_outlier_{c}") or "").strip() for c in ("n", "e", "u")
-    ]
-    if any(raw_floors):
-        floor: list[float] = []
-        for comp, raw in zip(("n", "e", "u"), raw_floors, strict=True):
-            if not raw:
-                floor.append(0.0)
-                continue
-            try:
-                floor_value = float(raw)
-            except ValueError:
-                raise ValueError(
-                    f"station {marker}: min_outlier_{comp} {raw!r} is not a number"
-                ) from None
-            if floor_value < 0.0 or not np.isfinite(floor_value):
-                raise ValueError(
-                    f"station {marker}: min_outlier_{comp} {floor_value} must be "
-                    "finite and >= 0"
-                )
-            floor.append(floor_value)
-        min_outlier: tuple[float, float, float] | None = (floor[0], floor[1], floor[2])
-    else:
-        min_outlier = None
-
-    return OutlierOverride(params_fields=overrides, min_outlier=min_outlier)
 
 
 def read_outlier_overrides(
@@ -803,43 +588,16 @@ def read_outlier_overrides(
             never silently dropped. The graceful-degrade wrapping lives in
             :func:`station_outlier_params`.
     """
-    resolved = Path(path) if path is not None else default_outlier_overrides_path()
-    if resolved is None:
-        raise FileNotFoundError(
-            f"no gpsconfig available to resolve {OUTLIER_OVERRIDES_FILENAME}"
+    # Delegate parse + resolution to the shared gps_parser reader (single
+    # source), then adapt its StationOutlierOverride to this package's
+    # OutlierOverride (identical split; the ``.params_fields`` name is kept for
+    # the existing public API + provenance callers).
+    return {
+        marker: OutlierOverride(
+            params_fields=override.fields, min_outlier=override.min_outlier
         )
-    if not resolved.is_file():
-        raise FileNotFoundError(f"outlier-override catalog not found: {resolved}")
-    lines = [
-        line
-        for line in resolved.read_text(encoding="utf-8").splitlines()
-        if line.strip() and not line.lstrip().startswith("#")
-    ]
-    reader = csv.DictReader(lines)
-    fieldnames = reader.fieldnames or []
-    unknown = [c for c in fieldnames if c not in _OUTLIER_OVERRIDE_COLUMNS]
-    if unknown:
-        raise ValueError(
-            f"{resolved}: unknown column(s) {unknown!r}; recognised columns "
-            f"are {_OUTLIER_OVERRIDE_COLUMNS}"
-        )
-    catalog: dict[str, OutlierOverride] = {}
-    for row in reader:
-        marker = str(row.get("sta") or "").strip()
-        if not marker:
-            raise ValueError(
-                f"{resolved}: outlier_overrides.csv row without a 'sta' marker: {row}"
-            )
-        if marker in catalog:
-            raise ValueError(
-                f"{resolved}: duplicate row for station {marker} — one override "
-                "row per station"
-            )
-        try:
-            catalog[marker] = _parse_override_row(resolved, marker, row)
-        except ValueError as exc:
-            raise ValueError(f"{resolved}: {exc}") from None
-    return catalog
+        for marker, override in _oc.read_outlier_overrides(path).items()
+    }
 
 
 def station_outlier_params(

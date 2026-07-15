@@ -79,8 +79,15 @@ legacy aux readers only — new code must pass `mypy --strict` (pyproject).
 
 - **In** (declared in `pyproject.toml`):
   - `geofunc` (git+https) — coordinate transforms
-  - `gps_parser` (git+https) — station configuration (pinned 0.3.0: note
-    `detrendFile` resolves CWD-relative there, config-dir-relative in local 0.4.x)
+  - `gps_parser` (git+https; **local editable via `[tool.uv.sources]`, 0.4.x**)
+    — station configuration + the shared `outlier_catalogs` resolver (steps /
+    protect_windows / outlier_overrides — the single source gps_api also reads).
+    **Migrated 0.3.0 → 0.4.x 2026-07-14**: `detrendFile` now resolves
+    config-dir-relative (was CWD-relative). Golden `read_gps_data` cases select
+    CSV presence via `GPS_CONFIG_PATH` (config dir with/without the CSV), not
+    chdir; pinned VALUES unchanged. **Deploy note:** CI/prod without the local
+    source override pull git HEAD — bump the git dep to a 0.4.x commit carrying
+    `outlier_catalogs` before that path is exercised (mirrors gps_api).
   - `gtimes`, `numpy`, `pandas`, `pyproj`, `scipy` — external (gtimes/numpy/
     pandas added 2026-07-08; the package could not import from a clean install
     without them)

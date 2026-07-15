@@ -50,9 +50,8 @@ def main(only=()) -> int:
         tmp = Path(tmp)
         env = {
             "config_dir": build_config_dir(tmp / "gpsconfig"),
-            "empty_dir": tmp / "empty",
+            "empty_dir": build_config_dir(tmp / "empty", include_detrend=False),
         }
-        env["empty_dir"].mkdir()
         os.environ["GPS_CONFIG_PATH"] = str(env["config_dir"])
         EXPECTED.mkdir(exist_ok=True)
 

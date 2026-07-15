@@ -23,14 +23,17 @@ Known quirks pinned ON PURPOSE (do not "fix" without a decision):
 - `gamittoNEU` subtracts plate velocity in METERS before the optional mm
   conversion; `getData` subtracts ``plateVelo * 1000`` on mm data (post
   `iprep`). Same idea, different unit order — both pinned as-is.
-- With gps_parser 0.3.0 (the pinned git dep) `detrendFile` resolves relative
-  to the CURRENT WORKING DIRECTORY, so `read_gps_data` cases chdir explicitly.
+- With gps_parser 0.4.x `detrendFile` resolves relative to GPS_CONFIG_PATH
+  (config-dir-relative, was CWD-relative under the old 0.3.0 pin), so the
+  `read_gps_data` cases control CSV presence by pointing GPS_CONFIG_PATH at a
+  config dir that HAS (`config_dir`) or LACKS (`empty_dir`) the detrend CSV —
+  not by chdir. The pinned golden VALUES are unchanged: a config dir without
+  the CSV reproduces the old CWD-without-CSV fallback exactly.
 - The detrend CSV columns are ``UseSTA``/``Fit`` while getDetrFit writes
   lowercase ``useSTA``/``fit`` — the useSTA branch therefore grows extra
   columns. Pinned as-is.
 """
 
-import contextlib
 import datetime as dt
 import os
 from pathlib import Path
@@ -55,15 +58,18 @@ platefile = {config_dir}/station-plate
 """
 
 
-def build_config_dir(dest: Path) -> Path:
-    """Render a hermetic gpsconfig dir (for GPS_CONFIG_PATH) from fixtures."""
+def build_config_dir(dest: Path, *, include_detrend: bool = True) -> Path:
+    """Render a hermetic gpsconfig dir (for GPS_CONFIG_PATH) from fixtures.
+
+    ``include_detrend=False`` renders the SAME dir without the
+    ``detrend_itrf2008.csv`` catalog — the config-dir-relative equivalent of
+    the old "no CSV on CWD" fallback branch (gps_parser 0.4.x resolution).
+    """
     dest.mkdir(parents=True, exist_ok=True)
-    for name in (
-        "stations.cfg",
-        "detrend_itrf2008.csv",
-        "station-plate",
-        "station_coord.llh",
-    ):
+    names = ["stations.cfg", "station-plate", "station_coord.llh"]
+    if include_detrend:
+        names.append("detrend_itrf2008.csv")
+    for name in names:
         dest.joinpath(name).write_bytes((FIXTURES / "gpsconfig" / name).read_bytes())
     dest.joinpath("postprocess.cfg").write_text(
         POSTPROCESS_TEMPLATE.format(totdir=TOT, config_dir=dest)
@@ -130,9 +136,19 @@ def _gamittoneu(sta, **kwargs):
 
 def _read_gps_data(sta, csv_present=True, **kwargs):
     def run(env):
-        cwd = env["config_dir"] if csv_present else env["empty_dir"]
-        with contextlib.chdir(cwd):
+        # gps_parser 0.4.x resolves detrendFile relative to GPS_CONFIG_PATH, so
+        # CSV presence is selected by the config dir, not the CWD: config_dir
+        # HAS the detrend CSV, empty_dir LACKS it (fallback branch).
+        cfg = env["config_dir"] if csv_present else env["empty_dir"]
+        old = os.environ.get("GPS_CONFIG_PATH")
+        os.environ["GPS_CONFIG_PATH"] = str(cfg)
+        try:
             df, const = gpsr.read_gps_data(sta, Dir=TOT, **kwargs)
+        finally:
+            if old is None:
+                os.environ.pop("GPS_CONFIG_PATH", None)
+            else:
+                os.environ["GPS_CONFIG_PATH"] = old
         return _frame_to_dict(df, const)
 
     return run

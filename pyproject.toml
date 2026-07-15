@@ -41,6 +41,7 @@ allow-direct-references = true
 # (git+https pin) is a later item on the refactor-B plan.
 [tool.uv.sources]
 gps_analysis = { path = "../gps_analysis", editable = true }
+gps_parser = { path = "../gps_parser", editable = true }
 
 [build-system]
 requires = ["hatchling"]
