@@ -45,12 +45,16 @@ geo_dataread/
 │   ├── gps_write.py      # cleaned .NEU writer: gamittoNEU→gamittoFile, union-drop + .prov.json sidecar; steps.csv→step_epochs + protect_windows.csv (unrest lever) + outlier_overrides.csv (per-station levers incl. per-component min_outlier floor [N,E,U]); degrade → _cleaned.DEGRADED.NEU (typed, mypy-strict)
 │   ├── gps_displ.py      # displacements / station-relative motion
 │   ├── gps_savetimes.py  # serialise time series to disk (gps-savetimes; --clean also-writes cleaned .NEU)
+│   ├── globk_join.py     # GLOBK multibase segment read + datum-consistent join (10 m de-wrap, min-σ dedup) + mb_STA_TOT.dat writer (format_tot_file/write_joined_series, 3-line-header contract) (typed, mypy-strict)
+│   ├── globk_tot.py      # gps-globk-tot CLI: batch pre/rap → local TOT dir; per-station segment-exclusion CSV (station,drop_dir,drop_before_year,reason — reviewed decisions, reason mandatory) (typed, mypy-strict)
 │   ├── gas_read.py       # GAS (strainmeter) data
 │   ├── sil_read.py       # SIL seismic data
 │   └── hytro_read.py     # hydrology data
 ├── tests/test-gps_read.py      # legacy smoke script (not pytest-collected)
 ├── tests/test_gps_views.py     # view-toggle suite (raw parity, degrade, borrowing, provenance)
 ├── tests/test_cleaned_neu.py   # cleaned .NEU writer: byte-format identity, union drop, sidecar, steps.csv→step_epochs, protect_windows.csv (abort→clean), outlier_overrides.csv (per-station levers, precedence), .DEGRADED naming, --clean CLI
+├── tests/test_globk_join.py    # segment read/join acceptance gates (SENG wrap, REYK dedup, HOFN) + TOT-writer format contract & openGlobkTimes round-trip
+├── tests/test_globk_tot.py     # gps-globk-tot CLI + exclusion rules (seed CSV: fixtures/globk/segment_exclusions.csv)
 ├── tests/goldenmaster/         # behavior pins for the Phase 1 refactor 📄 README
 └── pyproject.toml
 ```
@@ -99,6 +103,7 @@ legacy aux readers only — new code must pass `mypy --strict` (pyproject).
 geo-dataread          # entry: geo_dataread:main
 gps-savetimes ...     # entry: geo_dataread.gps_savetimes:main
 gps-displacemnts ...  # entry: geo_dataread.gps_displ:main   (sic — typo preserved verbatim from pyproject.toml)
+gps-globk-tot ...     # entry: geo_dataread.globk_tot:main — batch GLOBK pre/rap segments → local mb_STA_TOT.dat{1,2,3} (--exclusions CSV for reviewed per-station segment drops)
 ```
 
 ## Cross-References
@@ -110,4 +115,4 @@ gps-displacemnts ...  # entry: geo_dataread.gps_displ:main   (sic — typo prese
 
 ---
 
-*Last reviewed: 2026-07-14 (internal-delivery slice: gps_views view toggle)*
+*Last reviewed: 2026-07-18 (local-TOT pipeline Stage A: mb_STA_TOT.dat writer + gps-globk-tot CLI)*

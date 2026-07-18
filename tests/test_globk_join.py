@@ -37,11 +37,13 @@ from geo_dataread.globk_join import (
     GlobkJoinError,
     dedup_min_sigma,
     estimate_segment_offset,
+    format_tot_file,
     join_segments,
     join_station_component,
     read_mb_segment,
     select_min_sigma_indices,
     wrap_correction,
+    write_joined_series,
 )
 
 FIXTURES = Path(__file__).parent / "fixtures" / "globk"
@@ -462,3 +464,101 @@ class TestThobReferenceDivergence:
     def test_discover_missing_station_raises(self) -> None:
         with pytest.raises(GlobkJoinError, match="no mb_XXXX"):
             join_station_component("XXXX", 2, [PRE, RAP])
+
+
+class TestTotWriter:
+    """format_tot_file / write_joined_series — the mb_STA_TOT.dat contract.
+
+    The format is what ``openGlobkTimes`` reads with ``skiprows=3``: exactly
+    three header lines (provenance, reference, single-space separator) then
+    `` epoch value sigma`` rows in metres — a lost header line would
+    silently drop the first data epoch, so header cardinality is pinned.
+    """
+
+    def test_bytes_match_production_tot_lines(self) -> None:
+        # SENG anchor = the Pre segment production TOT starts from, so the
+        # 3 header lines are byte-identical to the live okada TOT file. The
+        # data rows are the min-σ dedup of production's solutions (exact per
+        # the acceptance gate) but EPOCH-SORTED, while production TOT is an
+        # unsorted concat (pre block first, older rap epochs later) — so the
+        # byte contract is set-wise. Two documented production warts are
+        # normalized rather than reproduced: ordering (above) and the legacy
+        # ``fixGlobkoffset`` mutation, which rewrote the offset rap East
+        # values as raw float repr (`` -1.1019400000000008``) instead of the
+        # multibase ``%12.5f`` field — canonicalizing production lines
+        # through the same field layout must recover every written line.
+        joined = join_station_component("SENG", 2, [PRE, RAP])
+        written = format_tot_file(joined).splitlines()
+        production = (TOT / "mb_SENG_TOT.dat2").read_text().splitlines()
+        assert written[:3] == production[:3]
+
+        def canonical(line: str) -> str:
+            epoch, value, sigma = line.split()
+            val = "*" * 12 if "*" in value else f"{float(value):12.5f}"
+            sig = "*" * 8 if "*" in sigma else f"{float(sigma):8.5f}"
+            return f" {float(epoch):10.5f} {val} {sig}"
+
+        assert set(written[3:]) <= {canonical(line) for line in production[3:]}
+        # and the un-mutated majority of lines matches raw production bytes
+        assert len(set(written[3:]) & set(production[3:])) > 2500
+
+    def test_exactly_three_header_lines_then_first_epoch(self) -> None:
+        joined = join_station_component("SENG", 2, [PRE, RAP])
+        lines = format_tot_file(joined).splitlines()
+        assert lines[2] == " "  # production single-space separator line
+        assert float(lines[3].split()[0]) == joined.epochs[0]  # not dropped
+        assert len(lines) == 3 + joined.epochs.size
+
+    def test_roundtrip_openglobktimes_exact(self, tmp_path: Path) -> None:
+        from geo_dataread.gps_read import openGlobkTimes
+
+        joined = {
+            axis: join_station_component("SENG", axis, [PRE, RAP]) for axis in (1, 2, 3)
+        }
+        for axis, series in joined.items():
+            write_joined_series(series, tmp_path / f"mb_SENG_TOT.dat{axis}")
+        yearf, data, ddata = openGlobkTimes("SENG", Dir=str(tmp_path), tType="TOT")
+        np.testing.assert_array_equal(yearf, joined[1].epochs)
+        for axis in (1, 2, 3):
+            np.testing.assert_allclose(
+                data[axis - 1], joined[axis].values, rtol=0, atol=1e-9, equal_nan=True
+            )
+            np.testing.assert_allclose(
+                ddata[axis - 1], joined[axis].sigmas, rtol=0, atol=1e-9, equal_nan=True
+            )
+
+    def test_roundtrip_read_mb_segment_header(self, tmp_path: Path) -> None:
+        joined = join_station_component("THOB", 2, [PRE, RAP])
+        out = write_joined_series(joined, tmp_path / "mb_THOB_TOT.dat2")
+        reread = read_mb_segment(out)
+        assert reread.header == joined.header  # anchor header survives verbatim
+        np.testing.assert_array_equal(reread.epochs, joined.epochs)
+        np.testing.assert_allclose(
+            reread.values, joined.values, rtol=0, atol=1e-9, equal_nan=True
+        )
+
+    def test_masked_fields_render_as_production_star_fill(self, tmp_path: Path) -> None:
+        # Fortran-style star fill: 12 stars in the value field, 8 in the
+        # sigma field (matches live REYK TOT bytes); both re-parse to NaN.
+        src = tmp_path / "mb_MASK_GPS.dat2"
+        src.write_text(
+            "Globk Analysis GGVer 10.71.021 synthetic\n"
+            "MASK_GPS to E Solution  1 +  1.000 m\n"
+            " \n"
+            " 2020.10000      0.10000  0.00500\n"
+            " 2020.20000 ************  0.00500\n"
+            " 2020.30000      0.12000 ********\n"
+        )
+        joined = join_segments([read_mb_segment(src)])
+        lines = format_tot_file(joined).splitlines()
+        assert lines[4] == " 2020.20000 ************  0.00500"
+        assert lines[5] == " 2020.30000      0.12000 ********"
+        reread = read_mb_segment(write_joined_series(joined, tmp_path / "out.dat2"))
+        assert np.isnan(reread.values[1])
+        assert np.isnan(reread.sigmas[2])
+
+    def test_write_returns_path_and_matches_format(self, tmp_path: Path) -> None:
+        joined = join_station_component("SENG", 1, [PRE, RAP])
+        out = write_joined_series(joined, tmp_path / "mb_SENG_TOT.dat1")
+        assert out == tmp_path / "mb_SENG_TOT.dat1"
+        assert out.read_text() == format_tot_file(joined)

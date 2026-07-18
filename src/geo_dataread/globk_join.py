@@ -97,6 +97,8 @@ __all__ = [
     "join_segments",
     "discover_segments",
     "join_station_component",
+    "format_tot_file",
+    "write_joined_series",
 ]
 
 #: GLOBK wrap quantum in metres — boundary datum shifts are multiples of this.
@@ -544,3 +546,54 @@ def join_station_component(
     return join_segments(
         segments, wrap_quantum_m=wrap_quantum_m, max_residual_m=max_residual_m
     )
+
+
+def format_tot_file(joined: JoinedSeries) -> str:
+    """Render a joined series as an ``mb_STA_TOT.dat`` document (str).
+
+    Produces the exact format :func:`read_mb_segment` and
+    ``gps_read.openGlobkTimes`` (``skiprows=3``) consume — **exactly three
+    header lines**, then data rows::
+
+        Globk Analysis GGVer 10.71.021 Wed Sep 28 13:04:52 EDT 2022
+        SENG_GPS to E Solution  1 +  16542671.519 m
+        <single space>
+         2015.48356      1.51913  0.00156
+
+    Line 1 is the anchor segment's provenance line; line 2 is reconstructed
+    from the anchor header (identification/provenance only — the reference
+    constant does not encode the datum and is never applied to values, see
+    the module docstring); line 3 is the production single-space separator.
+    A missing header line would make the ``skiprows=3`` reader silently
+    drop the first data epoch, so the three-line contract is load-bearing.
+
+    Data rows are `` epoch value sigma`` in the production field layout
+    (``" %10.5f %12.5f %8.5f"``): epochs in fractional years, values and
+    sigmas in metres. NaN (masked) fields render as the Fortran-style star
+    fill (12 stars for a value, 8 for a sigma), which parses back to NaN in
+    both :func:`read_mb_segment` and ``openGlobkTimes``.
+    """
+    h = joined.header
+    ref_line = (
+        f"{h.station}_{h.marker} to {h.component} "
+        f"Solution  {h.solution} +  {h.reference_m:.3f} m"
+    )
+    lines = [h.provenance, ref_line, " "]
+    for t, v, s in zip(joined.epochs, joined.values, joined.sigmas, strict=True):
+        val = "*" * 12 if np.isnan(v) else f"{v:12.5f}"
+        sig = "*" * 8 if np.isnan(s) else f"{s:8.5f}"
+        lines.append(f" {t:10.5f} {val} {sig}")
+    return "\n".join(lines) + "\n"
+
+
+def write_joined_series(joined: JoinedSeries, path: Path) -> Path:
+    """Write a joined series to ``path`` in ``mb_STA_TOT.dat`` format.
+
+    Thin file wrapper over :func:`format_tot_file` (see there for the
+    3-line-header format contract). The conventional name for the TOT
+    scheme is ``mb_<STA>_TOT.dat<axis>`` with axis 1/2/3 ↔ N/E/U — the
+    caller chooses the path; the parent directory must exist. Returns
+    ``path`` for chaining.
+    """
+    path.write_text(format_tot_file(joined))
+    return path

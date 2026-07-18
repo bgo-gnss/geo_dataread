@@ -32,6 +32,7 @@ dev = [
 geo-dataread = "geo_dataread:main"
 gps-savetimes = "geo_dataread.gps_savetimes:main"
 gps-displacemnts = "geo_dataread.gps_displ:main"
+gps-globk-tot = "geo_dataread.globk_tot:main"
 
 [tool.hatch.metadata]
 allow-direct-references = true

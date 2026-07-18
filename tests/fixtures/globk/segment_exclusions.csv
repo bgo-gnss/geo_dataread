@@ -1,0 +1,3 @@
+station,drop_dir,drop_before_year,reason
+SEY1,,2020.0,1996 GPS segment is an old reference site that reused the code (name clash) - BGO 2026-07-18
+SUND,rap,,rap is a strict subset of pre (0 unique epochs) and the rapid solution is unreliable during the Nov-2023 dike intrusion - lossless drop - BGO 2026-07-18
