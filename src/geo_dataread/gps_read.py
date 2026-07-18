@@ -20,6 +20,8 @@ from gps_analysis import preprocess as ga_preprocess
 from gps_analysis.models import TrajectoryParams
 from gps_parser import ConfigParser
 
+from geo_dataread.globk_join import select_min_sigma_indices
+
 from gtimes.timefunc import (
     TimefromYearf,
     TimetoYearf,
@@ -761,7 +763,39 @@ def openGlobkTimes(sta, Dir=None, tType="TOT"):
     data = np.vstack([d1, d2, d3])
     ddata = np.vstack([D1, D2, D3])
 
+    # Safety net: min-σ dedup of any duplicate epochs (legacy TOT files are a
+    # raw concat of overlapping GLOBK segments and keep duplicate solutions;
+    # the join lane already dedups when it builds TOT). GUARDED so the common
+    # no-duplicate path is byte-identical to the legacy read (all goldens are
+    # duplicate-free — zero blast radius). Per component (N/E/U are separate
+    # .dat1/.dat2/.dat3 files): at a duplicated epoch each component keeps the
+    # solution with the smallest σ (masked ``********`` → NaN → +∞, never
+    # wins); the epoch axis is shared, so the components stay row-aligned.
+    if np.unique(yearf).size != yearf.size:
+        yearf, data, ddata = _dedup_globk_min_sigma(yearf, data, ddata)
+
     return yearf, data, ddata
+
+
+def _dedup_globk_min_sigma(yearf, data, ddata):
+    """Per-component min-σ dedup of duplicate epochs in a stacked GLOBK read.
+
+    ``data``/``ddata`` are (3, N) N/E/U value/σ stacks sharing the ``yearf``
+    epoch axis. For each component independently, keep the smallest-σ solution
+    per epoch (masked σ = +∞) via :func:`select_min_sigma_indices`; the unique
+    epoch set depends only on ``yearf`` so all three components realign on the
+    same ascending epochs. Returns (yearf, data, ddata) deduped + epoch-sorted.
+    """
+    epochs = np.asarray(yearf, dtype=np.float64)
+    out_values = []
+    out_sigmas = []
+    unique_epochs = None
+    for comp in range(data.shape[0]):
+        selected = select_min_sigma_indices(epochs, np.asarray(ddata[comp]))
+        unique_epochs = epochs[selected]
+        out_values.append(np.asarray(data[comp])[selected])
+        out_sigmas.append(np.asarray(ddata[comp])[selected])
+    return unique_epochs, np.vstack(out_values), np.vstack(out_sigmas)
 
 
 def open3DataFiles(STA, Dir=None, comp=["-N", "-E", "-U"]):
