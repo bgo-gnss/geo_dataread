@@ -21,12 +21,17 @@ name-clash/monument-reuse policy is future work). The reviewed seed rules:
   and unreliable during the Nov-2023 dike intrusion; dropping the ``rap``
   directory's segments is lossless.
 
-Rules are supplied as a CSV (``--exclusions``) with columns
-``station,drop_dir,drop_before_year,reason`` — one rule per row, ``reason``
-mandatory (every exclusion must be justified). The seed rules live in
-``tests/fixtures/globk/segment_exclusions.csv``; where the *deployed* copy
-of this policy should live (gps-config-data catalog via gps_parser, like
-steps.csv, vs. a repo-tracked file) is an open review question.
+Rules are a CSV with columns ``station,drop_dir,drop_before_year,reason``
+— one rule per row, ``reason`` mandatory (every exclusion must be
+justified); ``#`` comment lines allowed. The DEPLOYED catalog is
+``segment_exclusions.csv``, resolved through the shared
+:mod:`gps_parser.outlier_catalogs` mechanism exactly like ``steps.csv``
+(``postprocess.cfg`` ``[FILES] segment_exclusions``, else
+``<gpsconfig dir>/segment_exclusions.csv``; source of the deployed copy:
+``gps-config-data/analysis-lane/segment_exclusions.csv`` — the reviewed
+seed rules above live there). ``--exclusions`` is the dev override; with
+no deployed catalog and no flag the join proceeds WITHOUT exclusions,
+loudly.
 
 Usage::
 
@@ -43,9 +48,13 @@ from __future__ import annotations
 
 import argparse
 import csv
+import warnings
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import cast
+
+from gps_parser import outlier_catalogs as _oc
 
 from geo_dataread.globk_join import (
     GlobkJoinError,
@@ -58,9 +67,12 @@ from geo_dataread.globk_join import (
 
 __all__ = [
     "AXES",
+    "EXCLUSIONS_FILENAME",
     "AxisResult",
     "SegmentExclusion",
+    "default_exclusions_path",
     "load_exclusions",
+    "resolve_exclusions",
     "exclusion_reason",
     "join_station",
     "main",
@@ -69,7 +81,31 @@ __all__ = [
 #: mb ``.dat`` file suffix ↔ component letter.
 AXES: dict[int, str] = {1: "N", 2: "E", 3: "U"}
 
+EXCLUSIONS_FILENAME = "segment_exclusions.csv"
+"""Deployed segment-exclusion catalog filename (gpsconfig-owned)."""
+
 _EXCLUSION_COLUMNS = ("station", "drop_dir", "drop_before_year", "reason")
+
+
+def default_exclusions_path() -> Path | None:
+    """Resolve the deployed ``segment_exclusions.csv`` path via gps_parser.
+
+    Resolution order (the shared
+    :func:`gps_parser.outlier_catalogs.catalog_path` mechanism — identical
+    to ``steps.csv`` / ``protect_windows.csv``):
+
+    1. ``postprocess.cfg`` ``[FILES] segment_exclusions``;
+    2. ``<gpsconfig dir>/segment_exclusions.csv`` (the deploy-target
+       default).
+
+    Returns:
+        The resolved path (which may not exist yet — the catalog is an
+        optional reviewed-policy enhancement), or None when no gpsconfig
+        is reachable.
+    """
+    return cast(
+        "Path | None", _oc.catalog_path("segment_exclusions", EXCLUSIONS_FILENAME)
+    )
 
 
 @dataclass(frozen=True)
@@ -93,54 +129,92 @@ def load_exclusions(path: Path) -> dict[str, tuple[SegmentExclusion, ...]]:
     """Load per-station segment-exclusion rules from a CSV file.
 
     Expected columns (exactly): ``station,drop_dir,drop_before_year,reason``
-    — one rule per row; several rows per station are allowed. ``reason`` is
-    mandatory (an unjustified exclusion is a config error, not a default)
-    and every row must set ``drop_dir`` and/or ``drop_before_year``.
-    Station codes are upper-cased. Raises :class:`GlobkJoinError` with the
-    offending line number on any malformed row.
+    — one rule per row; several rows per station are allowed; ``#`` comment
+    lines and blank lines are skipped (the deployed-catalog convention).
+    ``reason`` is mandatory (an unjustified exclusion is a config error,
+    not a default) and every row must set ``drop_dir`` and/or
+    ``drop_before_year``. Station codes are upper-cased. Raises
+    :class:`GlobkJoinError` with the offending row number on any malformed
+    row.
     """
     rules: dict[str, list[SegmentExclusion]] = {}
-    with path.open(newline="") as fh:
-        reader = csv.DictReader(fh)
-        if reader.fieldnames is None or tuple(reader.fieldnames) != _EXCLUSION_COLUMNS:
+    lines = [
+        line
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+    reader = csv.DictReader(lines)
+    if reader.fieldnames is None or tuple(reader.fieldnames) != _EXCLUSION_COLUMNS:
+        raise GlobkJoinError(
+            f"{path}: exclusion CSV must have exactly the columns "
+            f"{','.join(_EXCLUSION_COLUMNS)!r}, got {reader.fieldnames!r}"
+        )
+    for lineno, row in enumerate(reader, start=2):
+        station = (row["station"] or "").strip().upper()
+        reason = (row["reason"] or "").strip()
+        drop_dir = (row["drop_dir"] or "").strip() or None
+        raw_year = (row["drop_before_year"] or "").strip()
+        if not station:
+            raise GlobkJoinError(f"{path}:{lineno}: missing station")
+        if not reason:
             raise GlobkJoinError(
-                f"{path}: exclusion CSV must have exactly the columns "
-                f"{','.join(_EXCLUSION_COLUMNS)!r}, got {reader.fieldnames!r}"
+                f"{path}:{lineno}: missing reason — every exclusion is a "
+                "reviewed decision and must be justified"
             )
-        for lineno, row in enumerate(reader, start=2):
-            station = (row["station"] or "").strip().upper()
-            reason = (row["reason"] or "").strip()
-            drop_dir = (row["drop_dir"] or "").strip() or None
-            raw_year = (row["drop_before_year"] or "").strip()
-            if not station:
-                raise GlobkJoinError(f"{path}:{lineno}: missing station")
-            if not reason:
+        drop_before_year: float | None = None
+        if raw_year:
+            try:
+                drop_before_year = float(raw_year)
+            except ValueError:
                 raise GlobkJoinError(
-                    f"{path}:{lineno}: missing reason — every exclusion is a "
-                    "reviewed decision and must be justified"
-                )
-            drop_before_year: float | None = None
-            if raw_year:
-                try:
-                    drop_before_year = float(raw_year)
-                except ValueError:
-                    raise GlobkJoinError(
-                        f"{path}:{lineno}: drop_before_year must be a "
-                        f"fractional year, got {raw_year!r}"
-                    ) from None
-            if drop_dir is None and drop_before_year is None:
-                raise GlobkJoinError(
-                    f"{path}:{lineno}: rule must set drop_dir and/or drop_before_year"
-                )
-            rules.setdefault(station, []).append(
-                SegmentExclusion(
-                    station=station,
-                    reason=reason,
-                    drop_dir=drop_dir,
-                    drop_before_year=drop_before_year,
-                )
+                    f"{path}:{lineno}: drop_before_year must be a "
+                    f"fractional year, got {raw_year!r}"
+                ) from None
+        if drop_dir is None and drop_before_year is None:
+            raise GlobkJoinError(
+                f"{path}:{lineno}: rule must set drop_dir and/or drop_before_year"
             )
+        rules.setdefault(station, []).append(
+            SegmentExclusion(
+                station=station,
+                reason=reason,
+                drop_dir=drop_dir,
+                drop_before_year=drop_before_year,
+            )
+        )
     return {station: tuple(station_rules) for station, station_rules in rules.items()}
+
+
+def resolve_exclusions(
+    explicit: Path | None,
+) -> tuple[dict[str, tuple[SegmentExclusion, ...]], str | None]:
+    """Resolve + load the exclusion rules (explicit path > deployed catalog).
+
+    An EXPLICIT ``--exclusions`` path must exist and parse (hard error —
+    the operator asked for it). With no explicit path the DEPLOYED catalog
+    (:func:`default_exclusions_path`) is used when present; an absent
+    catalog warns loudly (``UserWarning``) and joins WITHOUT exclusions —
+    a name-clash station like SEY1 will then trip the residual guard
+    instead of silently joining wrong. A corrupt deployed catalog is a
+    hard error (reviewed policy must never be half-applied).
+
+    Returns:
+        ``(rules, source)`` — the per-station rules (possibly empty) and
+        the resolved catalog path (None when no catalog was available).
+    """
+    if explicit is not None:
+        return load_exclusions(explicit), str(explicit)
+    resolved = default_exclusions_path()
+    if resolved is None or not resolved.is_file():
+        warnings.warn(
+            f"no deployed segment-exclusion catalog ({EXCLUSIONS_FILENAME}); "
+            "joining WITHOUT per-station exclusions — reviewed drops (e.g. "
+            "SEY1 name-clash, SUND rap subset) will NOT be applied",
+            UserWarning,
+            stacklevel=2,
+        )
+        return {}, None
+    return load_exclusions(resolved), str(resolved)
 
 
 def exclusion_reason(
@@ -249,15 +323,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         type=Path,
         default=None,
         help=(
-            "per-station segment-exclusion CSV "
-            "(columns: station,drop_dir,drop_before_year,reason)"
+            "per-station segment-exclusion CSV dev override "
+            "(columns: station,drop_dir,drop_before_year,reason); "
+            "default: the deployed segment_exclusions.csv via gps_parser"
         ),
     )
     args = parser.parse_args(argv)
 
-    exclusions = (
-        load_exclusions(args.exclusions.expanduser()) if args.exclusions else {}
+    exclusions, exclusions_source = resolve_exclusions(
+        args.exclusions.expanduser() if args.exclusions else None
     )
+    if exclusions_source is not None:
+        print(f"exclusions: {exclusions_source}")
     out_dir = args.out.expanduser()
     out_dir.mkdir(parents=True, exist_ok=True)
     segment_dirs = [args.pre.expanduser(), args.rap.expanduser()]

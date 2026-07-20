@@ -2,9 +2,10 @@
 
 Real-data cases reuse the frozen okada fixtures (``fixtures/globk/pre``·
 ``rap``, see test_globk_join.py for provenance). The seed exclusion rules
-(SEY1 name-clash orphan, SUND rap-subset drop) are pinned from
-``fixtures/globk/segment_exclusions.csv`` — the reviewed policy file the
-CLI's ``--exclusions`` consumes.
+(SEY1 name-clash orphan, SUND rap-subset drop) mirror the DEPLOYED catalog
+``gps-config-data/analysis-lane/segment_exclusions.csv`` — resolved by
+default via ``gps_parser.outlier_catalogs`` (``default_exclusions_path``),
+with ``--exclusions`` as the dev override.
 """
 
 from __future__ import annotations
@@ -14,6 +15,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+import geo_dataread.globk_tot as globk_tot
 from geo_dataread.globk_join import (
     GlobkJoinError,
     join_station_component,
@@ -25,12 +27,27 @@ from geo_dataread.globk_tot import (
     join_station,
     load_exclusions,
     main,
+    resolve_exclusions,
 )
 
 FIXTURES = Path(__file__).parent / "fixtures" / "globk"
 PRE = FIXTURES / "pre"
 RAP = FIXTURES / "rap"
-EXCLUSIONS_CSV = FIXTURES / "segment_exclusions.csv"
+
+# In-test mirror of the deployed seed catalog (comment lines included, to
+# pin the deployed-catalog convention the loader must accept).
+SEED_CSV = """\
+# segment_exclusions.csv — reviewed per-station GLOBK segment drops.
+station,drop_dir,drop_before_year,reason
+SEY1,,2020.0,1996 GPS segment is an old reference site that reused the code (name clash) - BGO 2026-07-18
+SUND,rap,,rap is a strict subset of pre (0 unique epochs) and the rapid solution is unreliable during the Nov-2023 dike intrusion - lossless drop - BGO 2026-07-18
+"""
+
+
+@pytest.fixture(autouse=True)
+def _no_deployed_exclusions(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Isolate from any real deployed segment_exclusions.csv on this host."""
+    monkeypatch.setattr(globk_tot, "default_exclusions_path", lambda: None)
 
 
 def _write_segment(
@@ -92,8 +109,10 @@ def _synthetic_pre_rap(
 
 
 class TestLoadExclusions:
-    def test_parses_seed_rules(self) -> None:
-        rules = load_exclusions(EXCLUSIONS_CSV)
+    def test_parses_seed_rules(self, tmp_path: Path) -> None:
+        csv_path = tmp_path / "segment_exclusions.csv"
+        csv_path.write_text(SEED_CSV)
+        rules = load_exclusions(csv_path)
         assert set(rules) == {"SEY1", "SUND"}
         (sey1,) = rules["SEY1"]
         assert sey1.drop_before_year == 2020.0
@@ -142,6 +161,46 @@ class TestLoadExclusions:
         csv_path = tmp_path / "x.csv"
         csv_path.write_text("station,drop_dir,drop_before_year,reason\nsund,rap,,r\n")
         assert set(load_exclusions(csv_path)) == {"SUND"}
+
+
+class TestResolveExclusions:
+    def test_explicit_path_wins_and_must_exist(self, tmp_path: Path) -> None:
+        csv_path = tmp_path / "excl.csv"
+        csv_path.write_text(SEED_CSV)
+        rules, source = resolve_exclusions(csv_path)
+        assert set(rules) == {"SEY1", "SUND"}
+        assert source == str(csv_path)
+        with pytest.raises(FileNotFoundError):
+            resolve_exclusions(tmp_path / "missing.csv")
+
+    def test_deployed_catalog_resolved(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        deployed = tmp_path / "segment_exclusions.csv"
+        deployed.write_text(SEED_CSV)
+        monkeypatch.setattr(globk_tot, "default_exclusions_path", lambda: deployed)
+        rules, source = resolve_exclusions(None)
+        assert set(rules) == {"SEY1", "SUND"}
+        assert source == str(deployed)
+
+    def test_absent_deployed_catalog_warns_and_joins_without(self) -> None:
+        with pytest.warns(UserWarning, match="WITHOUT per-station exclusions"):
+            rules, source = resolve_exclusions(None)
+        assert rules == {}
+        assert source is None
+
+    def test_cli_uses_deployed_catalog_by_default(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        pre, rap = _synthetic_pre_rap(tmp_path, station="SUND")
+        deployed = tmp_path / "segment_exclusions.csv"
+        deployed.write_text(SEED_CSV)
+        monkeypatch.setattr(globk_tot, "default_exclusions_path", lambda: deployed)
+        out = tmp_path / "TOT"
+        rc = main(["SUND", "--pre", str(pre), "--rap", str(rap), "--out", str(out)])
+        assert rc == 0
+        reread = read_mb_segment(out / "mb_SUND_TOT.dat2")
+        np.testing.assert_allclose(reread.epochs, [2024.1, 2024.2])  # rap dropped
 
 
 class TestExclusionReason:
