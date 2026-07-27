@@ -81,6 +81,20 @@ mechanism is SUPERSEDED (kept as shims for `read_gps_data` until design §8
 step 5). Lint/type scope: ruff excludes + mypy per-module ignores cover the
 legacy aux readers only — new code must pass `mypy --strict` (pyproject).
 
+**Provisional epochs (2026-07-27).** `detect_view_outliers` provenance also
+carries `provisional` (mask shaped like `flags`) + `n_provisional`: recent
+candidates the detector could NOT rule on because the step evidence is
+indeterminate (`D` NaN — no usable post-flank), so a blunder and the onset of
+real deformation are indistinguishable until data follows. Disjoint from
+`flags` and purely DIAGNOSTIC — the series is unchanged, a caller ignoring the
+key behaves exactly as before, and a reduced detection object degrades to an
+empty mask rather than raising (§0.4). The `provisional_days` bound (default
+`PROVISIONAL_DAYS = 14`) is load-bearing: indeterminate clusters also occur at
+mid-series gaps wider than `step_flank_max_reach_days` and would otherwise
+dominate the mask (RHOF: 3 clusters, at 323 / 3400 / 3400 days from the end).
+These verdicts are UNSTABLE by nature — they resolve as epochs arrive.
+`gps_plot` renders them gold; the epoch stays IN the series.
+
 ## Dependencies
 
 - **In** (declared in `pyproject.toml`):
