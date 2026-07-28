@@ -936,13 +936,36 @@ def detect_view_outliers(
         _degrade(prov, f"outlier detection failed ({exc}); serving unflagged data")
         return flags, prov
 
-    if detection.excess_flag_abort:
+    # §3.5a: the abort is per component. Read it with the module's degrade
+    # idiom so an older gps_analysis (scalar abort only) still works and this
+    # slice stays independently mergeable.
+    comp_abort = np.atleast_1d(
+        np.asarray(
+            getattr(detection, "component_abort", None)
+            if getattr(detection, "component_abort", None) is not None
+            and np.size(getattr(detection, "component_abort")) > 0
+            else np.full(y2d.shape[0], bool(detection.excess_flag_abort)),
+            dtype=np.bool_,
+        )
+    )
+    prov["component_abort"] = comp_abort.tolist()
+    prov["n_aborted_components"] = int(comp_abort.sum())
+
+    if comp_abort.any():
         prov["outlier_abort"] = True
+        which = ", ".join(
+            _COMPONENTS[i] if i < len(_COMPONENTS) else str(i)
+            for i in np.flatnonzero(comp_abort)
+        )
+        # ONE warning, as before — a second warnings.warn on this path would
+        # fail the filterwarnings=["error"] suites downstream.
         _degrade(
             prov,
-            "outlier detection aborted (excess-candidate rule); serving unflagged data",
+            f"outlier detection aborted (excess-candidate rule) for: {which}; "
+            "serving those components unflagged",
         )
-        return flags, prov
+        if comp_abort.all():
+            return flags, prov
 
     full = np.zeros(y2d.shape, dtype=np.bool_)
     full[:, finite] = np.atleast_2d(detection.flags)

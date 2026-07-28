@@ -300,7 +300,19 @@ def test_real_detection_end_to_end(write_env, raw_neu, tmp_path):
     it = iter(raw_data)
     assert all(ln in it for ln in cln_data)
     if result["degraded"]:
-        assert result["n_removed"] == 0
+        # Pre-2026-07-28 the abort was whole-station, so "degraded" implied
+        # nothing was removed. The abort is now PER COMPONENT (§3.5a): SENG
+        # spans unrest and only some components abort, while the healthy ones
+        # keep cleaning. "degraded" therefore means "at least one component
+        # was served unflagged", NOT "nothing was removed".
+        prov = json.loads(Path(result["sidecar"]).read_text())
+        comp_abort = prov.get("component_abort")
+        if comp_abort is None:  # older gps_analysis: scalar abort only
+            assert result["n_removed"] == 0
+        else:
+            assert any(comp_abort), "degraded => at least one component aborted"
+            if all(comp_abort):
+                assert result["n_removed"] == 0, "a TOTAL abort must remove nothing"
 
 
 # ---------------------------------------------------------------------------

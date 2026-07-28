@@ -394,6 +394,11 @@ def write_cleaned_neu(
             name: int(np.count_nonzero(flags[c])) for c, name in enumerate(_COMPONENTS)
         },
         "excess_flag_abort": bool(oprov["outlier_abort"]),
+        # §3.5a: WHICH components aborted, not merely that one did. Without
+        # this a partial abort is indistinguishable in the sidecar from a
+        # total one, though the first still cleans its healthy components.
+        "component_abort": oprov.get("component_abort"),
+        "n_aborted_components": oprov.get("n_aborted_components"),
         "degraded": degraded,
         "degrade_reason": oprov["degrade_reason"],
         "versions": {
