@@ -312,14 +312,36 @@ def report(rows, baseline):
         f"aborted components: {sum(1 for r in rows if r['abort'])}"
     )
     if baseline:
-        btot = sum(
-            int(b["n_flagged"])
-            for k, b in baseline.items()
-            if k in {key(r) for r in rows}
-        )
+        # Compare ONLY over rows present in both.  Summing the full current
+        # run against a baseline with a different row set produces a
+        # meaningless percentage -- e.g. adding two stations to the joined
+        # dataset once read as "+64.8%" when nothing about the detector had
+        # changed.  Rows that exist on only one side are counted, not hidden.
+        cur = {key(r): r for r in rows}
+        shared = cur.keys() & baseline.keys()
+        only_now = sorted(cur.keys() - baseline.keys())
+        only_before = sorted(baseline.keys() - cur.keys())
+        tot = sum(cur[k]["n_flagged"] for k in shared)
+        btot = sum(int(baseline[k]["n_flagged"]) for k in shared)
         print(
-            f"BASELINE      : {btot}   delta: {tot - btot:+d} "
-            f"({100 * (tot - btot) / max(btot, 1):+.1f}%)"
+            f"comparable rows: {len(shared)} of {len(rows)} current / "
+            f"{len(baseline)} baseline"
+        )
+        if only_now:
+            print(
+                f"  only in this run ({len(only_now)}): "
+                + ", ".join("/".join(k) for k in only_now[:6])
+                + (" …" if len(only_now) > 6 else "")
+            )
+        if only_before:
+            print(
+                f"  only in baseline ({len(only_before)}): "
+                + ", ".join("/".join(k) for k in only_before[:6])
+                + (" …" if len(only_before) > 6 else "")
+            )
+        print(
+            f"comparable flagged: now {tot}  baseline {btot}  "
+            f"delta {tot - btot:+d} ({100 * (tot - btot) / max(btot, 1):+.1f}%)"
         )
 
 
