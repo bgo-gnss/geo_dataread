@@ -57,7 +57,7 @@ from typing import Any, cast
 
 import numpy as np
 import numpy.typing as npt
-from gps_analysis import estimate_detrend
+from gps_analysis import OutlierParams, estimate_detrend
 from gps_parser import outlier_catalogs as _oc
 
 from geo_dataread.gps_views import (
@@ -375,6 +375,24 @@ def _finite_mask(
     )
 
 
+def _stage_summary(params: OutlierParams) -> str:
+    """Compact record of which detection stages were enabled (§14).
+
+    S1 (robust fit) and S2 (whitening) are structural and always run, so
+    only the switchable stages appear.  ``"all"`` is the full pipeline.
+    """
+    on = []
+    if getattr(params, "despike", False):
+        on.append("S0")
+    if getattr(params, "enable_global", True):
+        on.append("S3")
+    if getattr(params, "enable_window", True):
+        on.append("S4")
+    if getattr(params, "enable_protection", True):
+        on.append("S5")
+    return "all" if on == ["S3", "S4", "S5"] else "+".join(on) or "none"
+
+
 def station_record_from_arrays(
     sta: str,
     yearf: FloatArray,
@@ -387,6 +405,7 @@ def station_record_from_arrays(
     steps_catalog: str | Path | None = None,
     protect_windows: str | Path | Sequence[tuple[float, float]] | None = None,
     outlier_overrides: str | Path | None = None,
+    outlier_params: OutlierParams | None = None,
     fitted_at: str | None = None,
     refs: Mapping[str, Any] | None = None,
 ) -> dict[str, Any] | None:
@@ -416,6 +435,17 @@ def station_record_from_arrays(
         protect_windows: As :func:`gps_views.resolve_protect_windows`.
         outlier_overrides: Explicit ``outlier_overrides.csv`` path; None =
             deployed default.
+        outlier_params: Explicit :class:`gps_analysis.OutlierParams`; None
+            defers to the station's catalog row, else the spec defaults
+            (the precedence :func:`gps_views.resolve_outlier_detection`
+            already documents).  This is the ONLY route to a stage-isolated
+            detection here (§14): the per-station catalog cannot express
+            it, because ``OUTLIER_OVERRIDE_COLUMNS`` carries no ``enable_*``
+            entries and ``read_outlier_overrides`` rejects unknown columns.
+            Without it an operator workbench wanting S0-only detection
+            would have to bypass this function and call the leaf directly,
+            which is exactly how the workbench and the batch estimator
+            would come to disagree about what a record means.
         fitted_at: Estimation timestamp for the record (None = unstamped,
             deterministic output).
         refs: Extra provenance merged into the record's ``refs``.
@@ -446,7 +476,9 @@ def station_record_from_arrays(
         step_epochs, steps_source = station_step_epochs(sta, steps=steps_catalog)
 
     pwindows, pw_source = resolve_protect_windows(sta, protect_windows)
-    resolved = resolve_outlier_detection(sta, outlier_overrides=outlier_overrides)
+    resolved = resolve_outlier_detection(
+        sta, outlier_params=outlier_params, outlier_overrides=outlier_overrides
+    )
 
     est = estimate_detrend(
         model,
@@ -473,6 +505,10 @@ def station_record_from_arrays(
         "steps_source": steps_source,
         "protect_windows_source": pw_source,
         "n_nonfinite_dropped": n_dropped,
+        # detrend_method records "step_augmented_robust" vs "plain_wls" but
+        # NOT which detection stages ran, so a stage-isolated record and a
+        # full-pipeline one are otherwise indistinguishable.
+        "outlier_stages": _stage_summary(resolved.params),
     }
     if refs:
         record_refs.update(refs)
