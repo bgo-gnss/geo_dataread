@@ -58,6 +58,16 @@ logger = logging.getLogger(__name__)
 FloatArray = npt.NDArray[np.float64]
 BoolArray = npt.NDArray[np.bool_]
 
+PLATE_REMOVED_FRAME = "plate_removed"
+"""The frame tag of a plate-velocity-removed series (design §0.5).
+
+Single source of truth: ``detrend_estimate.FRAME`` stamps it onto every
+record, and the ``ref="detrend"`` read paths pass it to
+:func:`detrend_arrays` so the §2.5 frame guard actually runs.  Before
+2026-07-29 those call sites passed no frame at all, which made the guard
+dead code — a record tagged for any other frame was applied silently.
+"""
+
 VIEWS = ("raw", "cleaned", "detrended")
 """Valid values of the first-class ``view`` toggle."""
 

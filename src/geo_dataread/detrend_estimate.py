@@ -61,6 +61,7 @@ from gps_analysis import OutlierParams, estimate_detrend
 from gps_parser import outlier_catalogs as _oc
 
 from geo_dataread.gps_views import (
+    PLATE_REMOVED_FRAME,
     resolve_outlier_detection,
     resolve_protect_windows,
     station_step_epochs,
@@ -99,7 +100,7 @@ GENERATOR = "gps-estimate-detrend"
 MODEL = "lineperiodic"
 """Trajectory model the estimator fits (production default, design §0.1)."""
 
-FRAME = "plate_removed"
+FRAME = PLATE_REMOVED_FRAME
 """Reference-frame tag of the stored parameters (design §0.5: detrend runs
 AFTER plate-velocity removal; ``getData(ref="plate")`` provides exactly
 that frame in mm)."""

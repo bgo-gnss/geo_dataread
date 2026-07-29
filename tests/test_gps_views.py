@@ -37,7 +37,12 @@ from gps_analysis import (  # noqa: E402
     evaluate_record,
 )
 
-FRAME = "plate:ITRF2008"
+# The REAL convention (detrend_estimate.FRAME; all 33 deployed records carry
+# it). This fixture previously invented "plate:ITRF2008", which no record uses
+# — it could, because the §2.5 frame guard was dead code: the ref="detrend"
+# read paths passed no frame, so nothing ever compared record to series. With
+# the guard live the fixture has to tell the truth.
+FRAME = "plate_removed"
 WINDOW = (2015.0, 2020.0)  # pre-unrest fit window for the SENG fixture
 
 
