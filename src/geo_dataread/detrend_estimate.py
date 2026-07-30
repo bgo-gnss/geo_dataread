@@ -57,7 +57,7 @@ from typing import Any, cast
 
 import numpy as np
 import numpy.typing as npt
-from gps_analysis import OutlierParams, estimate_detrend
+from gps_analysis import OutlierParams, estimate_detrend, slice_window
 from gps_parser import outlier_catalogs as _oc
 
 from geo_dataread.gps_views import (
@@ -79,6 +79,8 @@ __all__ = [
     "default_fit_catalog_path",
     "read_fit_catalog",
     "resolve_fit_settings",
+    "StationEstimate",
+    "station_estimate_from_arrays",
     "station_record_from_arrays",
     "estimate_station",
     "build_document",
@@ -394,6 +396,46 @@ def _stage_summary(params: OutlierParams) -> str:
     return "all" if on == ["S3", "S4", "S5"] else "+".join(on) or "none"
 
 
+@dataclasses.dataclass(frozen=True)
+class StationEstimate:
+    """A station record plus the fit diagnostics the record cannot carry.
+
+    ``to_record`` is deliberately a *parameter* serialization — it stores
+    ``n_rejected`` but not WHICH epochs were rejected, because the inlier
+    mask is (C, N) per station and ``detrend_params.json`` is a
+    fleet-wide document.  A caller that wants to SHOW the rejected epochs
+    (the detrend workbench) therefore needs a second return channel, and
+    it must be this one: any independently-run detector disagrees with
+    the fit by construction — different window, different declared steps,
+    an independently-reached excess-candidate abort — so a grey overlay
+    derived that way would contradict the ``n_rejected`` printed beside it.
+
+    The masks are lifted back to the CALLER's index space, i.e. the
+    length of the ``yearf`` that was passed in.  Two compressions sit
+    between that and ``estimate.inliers``: non-finite epochs are dropped
+    before estimation, then the fit window subsets again.  Lifting here
+    rather than at the call site is what keeps every consumer from
+    re-deriving the same two-step index map.
+
+    Attributes:
+        record: The station record (``to_record`` shape).
+        estimate: The full leaf :class:`~gps_analysis.DetrendEstimate`.
+        outliers: (C, N_input) — True where the fit REJECTED that epoch.
+            False everywhere outside the window and on dropped epochs:
+            those got no verdict, which is not the same as "clean" (see
+            ``in_window``).  Per-component sums equal ``record["n_rejected"]``.
+        in_window: (N_input,) — True for epochs the fit actually judged.
+        finite: (N_input,) — True for epochs that survived the
+            non-finite drop.
+    """
+
+    record: dict[str, Any]
+    estimate: Any
+    outliers: npt.NDArray[np.bool_]
+    in_window: npt.NDArray[np.bool_]
+    finite: npt.NDArray[np.bool_]
+
+
 def station_record_from_arrays(
     sta: str,
     yearf: FloatArray,
@@ -460,13 +502,60 @@ def station_record_from_arrays(
         ValueError: From the leaf on a failed validity gate (names the
             gate) or invalid input — estimation errors are hard.
     """
-    yearf = np.asarray(yearf, dtype=np.float64)
+    result = station_estimate_from_arrays(
+        sta,
+        yearf,
+        data,
+        sigma,
+        settings=settings,
+        model=model,
+        frame=frame,
+        steps_catalog=steps_catalog,
+        protect_windows=protect_windows,
+        outlier_overrides=outlier_overrides,
+        outlier_params=outlier_params,
+        fitted_at=fitted_at,
+        refs=refs,
+    )
+    return None if result is None else result.record
+
+
+def station_estimate_from_arrays(
+    sta: str,
+    yearf: FloatArray,
+    data: FloatArray,
+    sigma: FloatArray,
+    *,
+    settings: StationFitSettings,
+    model: str = MODEL,
+    frame: str = FRAME,
+    steps_catalog: str | Path | None = None,
+    protect_windows: str | Path | Sequence[tuple[float, float]] | None = None,
+    outlier_overrides: str | Path | None = None,
+    outlier_params: OutlierParams | None = None,
+    fitted_at: str | None = None,
+    refs: Mapping[str, Any] | None = None,
+) -> StationEstimate | None:
+    """As :func:`station_record_from_arrays`, keeping the fit diagnostics.
+
+    Same estimation, same arguments, same refusals — the only difference
+    is the return type: a :class:`StationEstimate` carrying the record
+    AND the inlier mask lifted to the caller's index space.
+    :func:`station_record_from_arrays` is a thin wrapper over this, so
+    the two can never fit differently.
+
+    Returns:
+        The :class:`StationEstimate`, or None when the outlier stage
+        aborted (no record is stored — design §0.4).
+    """
+    yearf_in = np.asarray(yearf, dtype=np.float64)
     data = np.asarray(data, dtype=np.float64)
     sigma = np.asarray(sigma, dtype=np.float64)
-    finite = _finite_mask(yearf, data, sigma)
+    finite = _finite_mask(yearf_in, data, sigma)
     n_dropped = int(np.count_nonzero(~finite))
+    yearf = yearf_in
     if n_dropped:
-        yearf = yearf[finite]
+        yearf = yearf_in[finite]
         data = data[:, finite]
         sigma = sigma[:, finite]
 
@@ -513,7 +602,29 @@ def station_record_from_arrays(
     }
     if refs:
         record_refs.update(refs)
-    return est.to_record(fitted_at=fitted_at, refs=record_refs)
+    record = est.to_record(fitted_at=fitted_at, refs=record_refs)
+
+    # --- lift the inlier mask back to the caller's index space -----------
+    # est.inliers is (C, N_window) over the FINITE-filtered, WINDOWED epochs;
+    # the caller holds (C, N_input). Recomputing the window mask with the
+    # leaf's own slice_window on the same (finite-filtered) epochs is exact,
+    # not an approximation: estimate_detrend calls it with the identical
+    # bounds and neither call overrides the shared default `tol`.
+    n_in = int(yearf_in.size)
+    in_win_f = np.asarray(slice_window(yearf, settings.window[0], settings.window[1]))
+    idx_win = np.flatnonzero(finite)[in_win_f]
+    inliers = np.atleast_2d(np.asarray(est.inliers, dtype=bool))
+    outliers = np.zeros((inliers.shape[0], n_in), dtype=bool)
+    outliers[:, idx_win] = ~inliers
+    in_window = np.zeros(n_in, dtype=bool)
+    in_window[idx_win] = True
+    return StationEstimate(
+        record=record,
+        estimate=est,
+        outliers=outliers,
+        in_window=in_window,
+        finite=finite,
+    )
 
 
 def estimate_station(

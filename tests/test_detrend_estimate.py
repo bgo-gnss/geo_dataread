@@ -345,6 +345,96 @@ class TestRoundTrip:
         assert record is None
 
 
+class TestStationEstimateFromArrays:
+    """The mask channel: ``n_rejected`` says how many, this says WHICH.
+
+    Every assertion here is a count-parity or index-placement check,
+    because the failure mode is silent: the mask is lifted across two
+    compressions (non-finite drop, then the fit window) and an off-by-N
+    index map still produces a plausible-looking figure — grey markers on
+    the wrong epochs, with the right total.
+    """
+
+    def _estimate(self, tmp_path: Path, t: Any, y: Any, sigma: Any, **over: Any) -> Any:
+        return de.station_estimate_from_arrays(
+            "DYNG",
+            t,
+            y,
+            sigma,
+            settings=_settings(**over),
+            protect_windows=(),
+            outlier_overrides=_empty_overrides(tmp_path),
+        )
+
+    def test_mask_count_matches_the_records_n_rejected(self, tmp_path: Path) -> None:
+        t, y, sigma = _synthetic_series()
+        y[0, 100] += 40.0  # unambiguous blunders, one per component
+        y[1, 200] -= 35.0
+        res = self._estimate(tmp_path, t, y, sigma)
+        assert res is not None
+        assert res.outliers.shape == (3, t.size)
+        assert list(res.record["n_rejected"]) == [
+            int(v) for v in res.outliers.sum(axis=1)
+        ]
+        assert res.outliers[0, 100] and res.outliers[1, 200]
+
+    def test_record_wrapper_returns_the_same_record(self, tmp_path: Path) -> None:
+        t, y, sigma = _synthetic_series()
+        res = self._estimate(tmp_path, t, y, sigma)
+        record = station_record_from_arrays(
+            "DYNG",
+            t,
+            y,
+            sigma,
+            settings=_settings(),
+            protect_windows=(),
+            outlier_overrides=_empty_overrides(tmp_path),
+        )
+        assert res is not None
+        assert record == res.record
+
+    def test_masks_lift_across_the_window_and_the_nonfinite_drop(
+        self, tmp_path: Path
+    ) -> None:
+        # BOTH compressions at once — the case a single-compression test
+        # cannot distinguish from a wrong index map.
+        t, y, sigma = _synthetic_series(n=1600)
+        holes = np.arange(3, t.size, 97)
+        y[1, holes] = np.nan
+        window = (float(t[400]), float(t[1200]))
+        y[2, 700] += 45.0  # a blunder INSIDE the window
+        y[2, 50] += 45.0  # ... and one OUTSIDE it
+        res = self._estimate(tmp_path, t, y, sigma, window=window)
+        assert res is not None
+
+        assert int(res.in_window.sum()) == res.record["n_epochs"]
+        assert list(res.record["n_rejected"]) == [
+            int(v) for v in res.outliers.sum(axis=1)
+        ]
+        # a verdict may exist ONLY where the fit actually looked
+        assert not res.outliers[:, ~res.in_window].any()
+        assert not res.outliers[:, ~res.finite].any()
+        assert res.finite[res.in_window].all()
+        # placement, not just counts: the in-window blunder is flagged and
+        # the identical out-of-window one is not (it was never judged)
+        assert res.outliers[2, 700]
+        assert not res.outliers[2, 50]
+        judged = t[res.in_window]
+        assert judged.min() >= window[0] - 1e-3
+        assert judged.max() <= window[1] + 1e-3
+
+    def test_aborted_fit_yields_no_estimate(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        @dataclasses.dataclass
+        class _Aborted:
+            outlier_abort: bool = True
+
+        monkeypatch.setattr(de, "estimate_detrend", lambda *a, **k: _Aborted())
+        t, y, sigma = _synthetic_series(n=400)
+        assert self._estimate(tmp_path, t, y, sigma) is None
+
+
 # ---------------------------------------------------------------------------
 # Driver + CLI
 # ---------------------------------------------------------------------------

@@ -47,7 +47,7 @@ geo_dataread/
 │   ├── gps_savetimes.py  # serialise time series to disk (gps-savetimes; --clean also-writes cleaned .NEU)
 │   ├── globk_join.py     # GLOBK multibase segment read + datum-consistent join (10 m de-wrap, min-σ dedup) + mb_STA_TOT.dat writer (format_tot_file/write_joined_series, 3-line-header contract) (typed, mypy-strict)
 │   ├── globk_tot.py      # gps-globk-tot CLI: batch pre/rap → local TOT dir; per-station segment-exclusion catalog (segment_exclusions.csv, deployed via gps_parser outlier_catalogs; --exclusions dev override; reason mandatory) (typed, mypy-strict)
-│   ├── detrend_estimate.py # gps-estimate-detrend CLI: batch estimate stored-detrend params from local TOT (ref=plate) → detrend_params.json (schema v1); per-station fit catalog fit_windows.csv (window + gate overrides, e.g. DYNG max_gap 1.0) via gps_parser resolver; unstamped = byte-reproducible, --stamp for timestamps (typed, mypy-strict)
+│   ├── detrend_estimate.py # gps-estimate-detrend CLI: batch estimate stored-detrend params from local TOT (ref=plate) → detrend_params.json (schema v1); per-station fit catalog fit_windows.csv (window + gate overrides, e.g. DYNG max_gap 1.0) via gps_parser resolver; unstamped = byte-reproducible, --stamp for timestamps; station_estimate_from_arrays returns record + the inlier mask lifted to the caller's index space (station_record_from_arrays wraps it) — the workbench's grey overlay, which no re-run detector could match (typed, mypy-strict)
 │   ├── gas_read.py       # GAS (strainmeter) data
 │   ├── sil_read.py       # SIL seismic data
 │   └── hytro_read.py     # hydrology data
@@ -132,4 +132,4 @@ gps-estimate-detrend ... # entry: geo_dataread.detrend_estimate:main — batch d
 
 ---
 
-*Last reviewed: 2026-07-20 (local-TOT pipeline Stage B: gps-estimate-detrend estimator CLI + fit_windows.csv catalog; segment_exclusions.csv relocated to gps-config-data via gps_parser resolver)*
+*Last reviewed: 2026-07-30 (station_estimate_from_arrays: fit diagnostics channel beside the record; earlier — local-TOT pipeline Stage B: gps-estimate-detrend estimator CLI + fit_windows.csv catalog; segment_exclusions.csv relocated to gps-config-data via gps_parser resolver)*
