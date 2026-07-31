@@ -1,0 +1,82 @@
+<imageFile>
+    <property name="ISCE_VERSION">
+        <value>Release: 2.5.3, svn-, 20210823. Current: svn-.</value>
+    </property>
+    <property name="access_mode">
+        <value>read</value>
+    </property>
+    <property name="byte_order">
+        <value>l</value>
+    </property>
+    <component name="coordinate1">
+        <factorymodule>isceobj.Image</factorymodule>
+        <factoryname>createCoordinate</factoryname>
+        <doc>First coordinate of a 2D image (width).</doc>
+        <property name="delta">
+            <value>0.00106</value>
+        </property>
+        <property name="endingvalue">
+            <value>-16.3002</value>
+        </property>
+        <property name="family">
+            <value>imagecoordinate</value>
+        </property>
+        <property name="name">
+            <value>imagecoordinate_name</value>
+        </property>
+        <property name="size">
+            <value>849</value>
+        </property>
+        <property name="startingvalue">
+            <value>-17.20014</value>
+        </property>
+    </component>
+    <component name="coordinate2">
+        <factorymodule>isceobj.Image</factorymodule>
+        <factoryname>createCoordinate</factoryname>
+        <doc>Second coordinate of a 2D image (length).</doc>
+        <property name="delta">
+            <value>-0.00045</value>
+        </property>
+        <property name="endingvalue">
+            <value>64.94985</value>
+        </property>
+        <property name="family">
+            <value>imagecoordinate</value>
+        </property>
+        <property name="name">
+            <value>imagecoordinate_name</value>
+        </property>
+        <property name="size">
+            <value>445</value>
+        </property>
+        <property name="startingvalue">
+            <value>65.1501</value>
+        </property>
+    </component>
+    <property name="data_type">
+        <value>FLOAT</value>
+    </property>
+    <property name="description">
+        <value>Column/row subset of a real T9 20260706-20260712 product; see
+        scripts/build_insar_fixture.py for provenance.</value>
+    </property>
+    <property name="family">
+        <value>intimage</value>
+    </property>
+    <property name="file_name">
+        <value>filt_topophase.unw.geo</value>
+    </property>
+    <property name="length">
+        <value>445</value>
+    </property>
+    <property name="number_bands">
+        <value>2</value>
+    </property>
+    <property name="scheme">
+        <value>BIL</value>
+    </property>
+    <property name="width">
+        <value>849</value>
+    </property>
+</imageFile>

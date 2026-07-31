@@ -107,6 +107,17 @@ FRAME = PLATE_REMOVED_FRAME
 AFTER plate-velocity removal; ``getData(ref="plate")`` provides exactly
 that frame in mm)."""
 
+UNCERT = 15
+"""Formal-sigma screen [mm] applied at READ time by :func:`gps_read.getData`.
+
+Matches ``getData``'s own default, which is what this estimator used
+implicitly before the knob existed.  It belongs in the record's ``refs``
+because it decides WHICH epochs were fitted without leaving a trace in any
+fitted quantity: two records with identical parameters, windows and steps can
+still have been fitted on different data.  The detrend workbench screens
+harder (10) by default, which is exactly why both sides must be able to say
+so."""
+
 FIT_CATALOG_COLUMNS = (
     "sta",
     "window_start",
@@ -637,6 +648,7 @@ def estimate_station(
     steps_catalog: str | Path | None = None,
     protect_windows: str | Path | None = None,
     outlier_overrides: str | Path | None = None,
+    uncert: int = UNCERT,
     fitted_at: str | None = None,
 ) -> StationResult:
     """Read one station's local plate-removed TOT series and estimate it.
@@ -646,19 +658,23 @@ def estimate_station(
     :func:`station_record_from_arrays`. Failures are captured as an
     ``"error"`` result (the batch continues); an outlier-stage abort is a
     loud ``"skipped"`` result.
+
+    ``uncert`` is the read-time sigma screen (see :data:`UNCERT`); it rides
+    into the record's ``refs`` so a record always says which epochs it could
+    have been fitted on.
     """
     from geo_dataread import gps_read  # deferred: gps_read lazily imports back
 
     try:
         yearf, data, ddata, _offset = gps_read.getData(  # type: ignore[no-untyped-call]
-            sta, ref="plate", Dir=tot_dir, tType="TOT"
+            sta, ref="plate", Dir=tot_dir, tType="TOT", uncert=uncert
         )
     except Exception as exc:  # noqa: BLE001 - per-station isolation, reported
         return StationResult(sta, "error", f"read failed: {exc}")
     if yearf is None or data is None or ddata is None:
         return StationResult(sta, "error", "no data (getData returned empty)")
 
-    refs: dict[str, Any] = {"tot_dir": tot_dir}
+    refs: dict[str, Any] = {"tot_dir": tot_dir, "uncert": uncert}
     try:
         record = station_record_from_arrays(
             sta,
@@ -834,6 +850,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="global largest-gap gate [yr] (catalog rows override per station)",
     )
     parser.add_argument(
+        "--uncert",
+        type=int,
+        default=UNCERT,
+        help=(
+            f"formal-sigma screen [mm] applied at read time (default: "
+            f"{UNCERT}, getData's own). Lower screens harder — it changes "
+            f"which epochs are fitted, so it is recorded in refs. "
+            f"gps-detrend-workbench defaults to 10"
+        ),
+    )
+    parser.add_argument(
         "--stamp",
         action="store_true",
         help=(
@@ -868,6 +895,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             steps_catalog=args.steps,
             protect_windows=args.protect_windows,
             outlier_overrides=args.outlier_overrides,
+            uncert=args.uncert,
             fitted_at=stamp,
         )
         print(f"{sta}: [{result.status}] {result.detail}")

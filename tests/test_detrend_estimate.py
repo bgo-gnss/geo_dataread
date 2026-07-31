@@ -26,6 +26,7 @@ from geo_dataread.detrend_estimate import (
     FitCatalogRow,
     FitDefaults,
     StationFitSettings,
+    UNCERT,
     build_document,
     estimate_station,
     main,
@@ -490,6 +491,42 @@ class TestEstimateStation:
         assert missing.status == "error"
         assert missing.record is None
 
+    def test_uncert_reaches_getdata_and_the_record(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The read-time sigma screen must be expressible AND recorded.
+
+        It decides WHICH epochs were fitted while leaving no trace in any
+        fitted quantity, so two records with identical parameters, window and
+        steps can still have been fitted on different data. Before this knob
+        existed the estimator took getData's default silently while
+        ``gps-detrend-workbench`` used 10, which made batch and workbench
+        records indistinguishable but unequal.
+        """
+        seen: list[int] = []
+        base = _fake_getdata({"DYNG": _synthetic_series()})
+
+        def spy(sta: str, *args: Any, **kwargs: Any) -> Any:
+            seen.append(kwargs["uncert"])
+            return base(sta, *args, **kwargs)
+
+        monkeypatch.setattr(gps_read, "getData", spy)
+        overrides = _empty_overrides(tmp_path)
+        kw = {
+            "settings": _settings(),
+            "protect_windows": tmp_path / "no_protect.csv",
+            "outlier_overrides": overrides,
+        }
+        default = estimate_station("DYNG", **kw)  # type: ignore[arg-type]
+        assert seen == [UNCERT]
+        assert default.record is not None
+        assert default.record["refs"]["uncert"] == UNCERT
+
+        screened = estimate_station("DYNG", uncert=10, **kw)  # type: ignore[arg-type]
+        assert seen == [UNCERT, 10]
+        assert screened.record is not None
+        assert screened.record["refs"]["uncert"] == 10
+
     def test_gate_failure_is_error(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -538,6 +575,21 @@ class TestCli:
         assert set(doc["stations"]) == {"DYNG"}
         assert doc["generator"] == "gps-estimate-detrend"
         assert doc["stations"]["DYNG"]["refs"]["window_source"] == str(_catalog)
+
+    def test_uncert_flag_lands_in_the_document(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """`--uncert` is what makes a workbench record reproducible in batch.
+
+        The workbench prints this exact invocation after a commit, so the flag
+        existing is part of that contract, not a convenience.
+        """
+        _catalog, out, extra = self._cli_env(tmp_path, monkeypatch)
+        assert main(["DYNG", "--uncert", "10", *extra]) == 0
+        assert read_detrend_params(out)["stations"]["DYNG"]["refs"]["uncert"] == 10
+
+        assert main(["DYNG", *extra]) == 0
+        assert read_detrend_params(out)["stations"]["DYNG"]["refs"]["uncert"] == UNCERT
 
     def test_failing_station_sets_exit_code_and_batch_continues(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
