@@ -57,7 +57,7 @@ from typing import Any, cast
 
 import numpy as np
 import numpy.typing as npt
-from gps_analysis import OutlierParams, estimate_detrend, slice_window
+from gps_analysis import OutlierParams, estimate_detrend
 from gps_parser import outlier_catalogs as _oc
 
 from geo_dataread.gps_views import (
@@ -122,13 +122,28 @@ FIT_CATALOG_COLUMNS = (
     "sta",
     "window_start",
     "window_end",
+    "segments",
     "max_gap_years",
     "min_epochs",
     "min_span_years",
     "steps",
     "comment",
 )
-"""Exact ``fit_windows.csv`` column set (any other layout is rejected)."""
+"""Current ``fit_windows.csv`` column set."""
+
+_LEGACY_FIT_CATALOG_COLUMNS = tuple(c for c in FIT_CATALOG_COLUMNS if c != "segments")
+"""The pre-``segments`` column set, still accepted verbatim.
+
+The header check is an exact tuple match on purpose: this catalog changes
+stored science parameters, so an unrecognised layout must be a hard error and
+never a silent partial read.  That makes adding a column a breaking change
+for every deployed file — so the check matches an ALLOWLIST of known layouts
+rather than one tuple.  Strictness is unchanged; only the set of layouts
+called "known" grew.  A missing ``segments`` cell reads as empty = single
+window, which is what every existing row means.
+"""
+
+_FIT_CATALOG_HEADERS = (FIT_CATALOG_COLUMNS, _LEGACY_FIT_CATALOG_COLUMNS)
 
 
 # ---------------------------------------------------------------------------
@@ -150,6 +165,7 @@ class FitCatalogRow:
 
     window_start: float | None = None
     window_end: float | None = None
+    segments: tuple[tuple[float | None, float | None], ...] | None = None
     max_gap_years: float | None = None
     min_epochs: int | None = None
     min_span_years: float | None = None
@@ -175,12 +191,23 @@ class StationFitSettings:
     provenance so a stored fit names its configuration.
     """
 
-    window: tuple[float | None, float | None]
+    segments: tuple[tuple[float | None, float | None], ...]
     min_span_years: float
     min_epochs: int
     max_gap_years: float
     steps: tuple[float, ...] | None
     window_source: str
+
+    @property
+    def window(self) -> tuple[float | None, float | None]:
+        """The HULL of the segments, for readers that want one interval.
+
+        Kept as a property rather than a second field so there is exactly
+        one source of truth: every existing caller that prints or indexes
+        ``settings.window`` keeps working, and none of them can drift out of
+        step with ``segments``.
+        """
+        return (self.segments[0][0], self.segments[-1][1])
 
 
 @dataclasses.dataclass(frozen=True)
@@ -225,6 +252,51 @@ def _parse_optional_float(sta: str, field: str, raw: str) -> float | None:
         raise ValueError(f"station {sta}: {field} {raw!r} is not a number") from None
 
 
+def _parse_segments_cell(
+    sta: str, raw: str
+) -> tuple[tuple[float | None, float | None], ...] | None:
+    """Parse a ``segments`` cell: ``a:b;c:d``, empty bound = open.
+
+    ``;`` already means "list" in this file (the ``steps`` column) and
+    ``:`` separates a segment's bounds — deliberately not ``-``, which
+    would be ambiguous against a negative fractional year the moment
+    anyone tries one.
+
+    The whole segmentation lives in ONE cell rather than one row per
+    segment because this reader is strict by design: a mistyped row in a
+    many-row layout would still parse, yielding *different but valid*
+    science instead of an error, and a bad fit window silently changes
+    stored parameters.  One cell fails loudly or not at all.
+
+    Returns None for an empty cell (= no segmentation, use the window
+    columns), never an empty tuple — the leaf refuses that, and rightly.
+    """
+    if not raw:
+        return None
+    out: list[tuple[float | None, float | None]] = []
+    for token in (tok.strip() for tok in raw.split(";")):
+        if not token:
+            continue
+        if token.count(":") != 1:
+            raise ValueError(
+                f"station {sta}: segment {token!r} must be 'start:end' "
+                f"(either side may be empty for an open bound)"
+            )
+        lo, _, hi = token.partition(":")
+        out.append(
+            (
+                _parse_optional_float(sta, "segment start", lo.strip()),
+                _parse_optional_float(sta, "segment end", hi.strip()),
+            )
+        )
+    if not out:
+        raise ValueError(f"station {sta}: segments cell {raw!r} holds no segment")
+    for j, (lo_v, hi_v) in enumerate(out):
+        if lo_v is not None and hi_v is not None and hi_v <= lo_v:
+            raise ValueError(f"station {sta}: segment {j} end {hi_v} <= start {lo_v}")
+    return tuple(out)
+
+
 def read_fit_catalog(path: str | Path) -> dict[str, FitCatalogRow]:
     """Read a per-station fit catalog (``fit_windows.csv``).
 
@@ -259,10 +331,15 @@ def read_fit_catalog(path: str | Path) -> dict[str, FitCatalogRow]:
         if line.strip() and not line.lstrip().startswith("#")
     ]
     reader = csv.DictReader(lines)
-    if reader.fieldnames is None or tuple(reader.fieldnames) != FIT_CATALOG_COLUMNS:
+    if (
+        reader.fieldnames is None
+        or tuple(reader.fieldnames) not in _FIT_CATALOG_HEADERS
+    ):
         raise ValueError(
             f"{resolved}: fit catalog must have exactly the columns "
-            f"{','.join(FIT_CATALOG_COLUMNS)!r}, got {reader.fieldnames!r}"
+            f"{','.join(FIT_CATALOG_COLUMNS)!r} (or the pre-segments layout "
+            f"{','.join(_LEGACY_FIT_CATALOG_COLUMNS)!r}), "
+            f"got {reader.fieldnames!r}"
         )
     catalog: dict[str, FitCatalogRow] = {}
     for row in reader:
@@ -305,8 +382,17 @@ def read_fit_catalog(path: str | Path) -> dict[str, FitCatalogRow]:
                         if tok
                     )
                 )
+            segments = _parse_segments_cell(sta, str(row.get("segments") or "").strip())
         except ValueError as exc:
             raise ValueError(f"{resolved}: {exc}") from None
+        if segments is not None and (
+            window_start is not None or window_end is not None
+        ):
+            raise ValueError(
+                f"{resolved}: station {sta}: 'segments' and "
+                f"'window_start'/'window_end' both set — one row must say one "
+                f"thing about which epochs are fitted"
+            )
         if (
             window_start is not None
             and window_end is not None
@@ -319,6 +405,7 @@ def read_fit_catalog(path: str | Path) -> dict[str, FitCatalogRow]:
         catalog[sta] = FitCatalogRow(
             window_start=window_start,
             window_end=window_end,
+            segments=segments,
             max_gap_years=max_gap,
             min_epochs=min_epochs,
             min_span_years=min_span,
@@ -344,7 +431,7 @@ def resolve_fit_settings(
     row = (catalog or {}).get(sta)
     if row is None:
         return StationFitSettings(
-            window=(None, None),
+            segments=((None, None),),
             min_span_years=defaults.min_span_years,
             min_epochs=defaults.min_epochs,
             max_gap_years=defaults.max_gap_years,
@@ -353,7 +440,11 @@ def resolve_fit_settings(
         )
     source = catalog_source if catalog_source is not None else "fit_catalog"
     return StationFitSettings(
-        window=(row.window_start, row.window_end),
+        segments=(
+            row.segments
+            if row.segments is not None
+            else ((row.window_start, row.window_end),)
+        ),
         min_span_years=(
             row.min_span_years
             if row.min_span_years is not None
@@ -586,7 +677,7 @@ def station_estimate_from_arrays(
         yearf,
         data,
         sigma,
-        window=settings.window,
+        segments=settings.segments,
         step_epochs=step_epochs if step_epochs.size else None,
         min_span_years=settings.min_span_years,
         min_epochs=settings.min_epochs,
@@ -617,12 +708,14 @@ def station_estimate_from_arrays(
 
     # --- lift the inlier mask back to the caller's index space -----------
     # est.inliers is (C, N_window) over the FINITE-filtered, WINDOWED epochs;
-    # the caller holds (C, N_input). Recomputing the window mask with the
-    # leaf's own slice_window on the same (finite-filtered) epochs is exact,
-    # not an approximation: estimate_detrend calls it with the identical
-    # bounds and neither call overrides the shared default `tol`.
+    # the caller holds (C, N_input). The mask comes from the FIT ITSELF
+    # (`est.window_mask`), not from a second derivation here. The previous
+    # version re-ran slice_window with what ought to be identical bounds and
+    # argued exactness from a convention -- that convention would now have to
+    # hold across a union of segments too, and a convention is exactly the
+    # thing a seam should not depend on.
     n_in = int(yearf_in.size)
-    in_win_f = np.asarray(slice_window(yearf, settings.window[0], settings.window[1]))
+    in_win_f = np.asarray(est.window_mask, dtype=bool)
     idx_win = np.flatnonzero(finite)[in_win_f]
     inliers = np.atleast_2d(np.asarray(est.inliers, dtype=bool))
     outliers = np.zeros((inliers.shape[0], n_in), dtype=bool)

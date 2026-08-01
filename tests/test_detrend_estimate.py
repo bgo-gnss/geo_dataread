@@ -76,14 +76,23 @@ def _synthetic_series(
 
 
 def _settings(**overrides: Any) -> StationFitSettings:
+    """Build settings, accepting ``window=`` as sugar for one segment.
+
+    The dataclass field is ``segments`` and ``window`` is a derived
+    property (the hull), so a caller cannot set it — but "one window" is
+    what almost every test here means, and spelling it as a 1-tuple at
+    every call site would obscure that.
+    """
     base = dict(
-        window=(None, None),
+        segments=((None, None),),
         min_span_years=2.0,
         min_epochs=365,
         max_gap_years=0.5,
         steps=(),  # explicit: no steps, never consult the deployed steps.csv
         window_source="defaults",
     )
+    if "window" in overrides:
+        base["segments"] = (tuple(overrides.pop("window")),)
     base.update(overrides)
     return StationFitSettings(**base)
 
@@ -618,3 +627,132 @@ class TestCli:
         doc = json.loads(out.read_text())
         assert doc["generated_at"] is not None
         assert doc["stations"]["DYNG"]["fitted_at"] == doc["generated_at"]
+
+
+# ---------------------------------------------------------------------------
+# Segments: a union fit domain, expressed in one catalog cell
+# ---------------------------------------------------------------------------
+
+_SEG_HEADER = (
+    "sta,window_start,window_end,segments,max_gap_years,min_epochs,"
+    "min_span_years,steps,comment\n"
+)
+
+
+class TestSegmentsColumn:
+    """The 9-column layout, and the 8-column one it must not break."""
+
+    def test_legacy_header_still_reads(self, tmp_path: Path) -> None:
+        """The 37 deployed rows predate this column and must keep working.
+
+        The header check is an exact tuple match by design — a bad fit
+        catalog silently changes stored science — so adding a column had to
+        become an ALLOWLIST rather than a looser check.
+        """
+        path = tmp_path / "legacy.csv"
+        path.write_text(
+            "sta,window_start,window_end,max_gap_years,min_epochs,"
+            "min_span_years,steps,comment\nDYNG,,,1.0,,,,gaps\n"
+        )
+        row = read_fit_catalog(path)["DYNG"]
+        assert row.segments is None, "absent column means single window"
+        assert row.max_gap_years == 1.0
+
+    def test_segments_cell_parses(self, tmp_path: Path) -> None:
+        path = tmp_path / "seg.csv"
+        path.write_text(
+            _SEG_HEADER + "self,,,2002.1:2008.35;2008.7:2019.5,1.5,,,2008.40847,Olfus\n"
+        )
+        row = read_fit_catalog(path)["SELF"]
+        assert row.segments == ((2002.1, 2008.35), (2008.7, 2019.5))
+        assert row.steps == (2008.40847,)
+
+    def test_open_bounds_are_expressible(self, tmp_path: Path) -> None:
+        """An empty side means open, as the window columns already do."""
+        path = tmp_path / "seg.csv"
+        path.write_text(_SEG_HEADER + "SELF,,,:2008.35;2008.7:,1.5,,,,\n")
+        assert read_fit_catalog(path)["SELF"].segments == (
+            (None, 2008.35),
+            (2008.7, None),
+        )
+
+    def test_segments_and_window_columns_together_are_refused(
+        self, tmp_path: Path
+    ) -> None:
+        """One row must say ONE thing about which epochs are fitted."""
+        path = tmp_path / "seg.csv"
+        path.write_text(
+            _SEG_HEADER + "SELF,2002.0,,2002.1:2008.35;2008.7:2019.5,,,,,\n"
+        )
+        with pytest.raises(ValueError, match="both set"):
+            read_fit_catalog(path)
+
+    @pytest.mark.parametrize(
+        "cell, match",
+        [
+            ("2002.1-2008.35", "start:end"),
+            ("2008.35:2002.1", "end 2002.1 <= start 2008.35"),
+            ("2002.1:x", "not a number"),
+        ],
+    )
+    def test_malformed_cells_are_hard_errors(
+        self, tmp_path: Path, cell: str, match: str
+    ) -> None:
+        """Strict, like the rest of this reader: never a silent partial read."""
+        path = tmp_path / "seg.csv"
+        path.write_text(_SEG_HEADER + f"SELF,,,{cell},,,,,\n")
+        with pytest.raises(ValueError, match=match):
+            read_fit_catalog(path)
+
+    def test_settings_carry_segments_and_derive_the_hull(self, tmp_path: Path) -> None:
+        path = tmp_path / "seg.csv"
+        path.write_text(_SEG_HEADER + "SELF,,,2002.1:2008.35;2008.7:2019.5,1.5,,,,\n")
+        settings = resolve_fit_settings(
+            "SELF", read_fit_catalog(path), FitDefaults(), catalog_source=str(path)
+        )
+        assert settings.segments == ((2002.1, 2008.35), (2008.7, 2019.5))
+        # `window` is derived, so it cannot drift out of step with `segments`
+        assert settings.window == (2002.1, 2019.5)
+
+    def test_a_station_without_a_row_is_one_open_segment(self) -> None:
+        settings = resolve_fit_settings("NONE", None, FitDefaults())
+        assert settings.segments == ((None, None),)
+        assert settings.window == (None, None)
+
+
+class TestSegmentedEstimation:
+    """End to end: the mask the caller lifts is the mask the fit used."""
+
+    def test_in_window_comes_from_the_leaf_not_a_second_derivation(
+        self, tmp_path: Path
+    ) -> None:
+        """The seam's contract, asserted rather than argued.
+
+        ``station_estimate_from_arrays`` used to re-derive the window mask
+        with its own ``slice_window`` call and argue exactness from "both
+        sides pass identical bounds and neither overrides tol". Under a
+        union of segments that convention would have to hold across J
+        intervals. It now lifts ``est.window_mask`` — the mask the fit
+        itself used — so there is nothing left to keep in sync.
+        """
+        t, y, sigma = _synthetic_series(n=2600, t0=2002.0)
+        settings = _settings(
+            segments=((2002.1, 2005.0), (2006.0, 2009.0)), max_gap_years=1.5
+        )
+        est = de.station_estimate_from_arrays(
+            "TEST",
+            t,
+            y,
+            sigma,
+            settings=settings,
+            outlier_overrides=str(_empty_overrides(tmp_path)),
+        )
+        assert est is not None
+        in_window = np.asarray(est.in_window, dtype=bool)
+        assert in_window.sum() == est.estimate.window_mask.sum()
+        # the excised stretch got no verdict, and that is what the workbench
+        # renders as "outside the window"
+        excised = (t > 2005.0 + 1e-3) & (t < 2006.0 - 1e-3)
+        assert not in_window[excised].any()
+        assert est.record["segments"] == [[2002.1, 2005.0], [2006.0, 2009.0]]
+        assert len(est.record["window"]) == 2
