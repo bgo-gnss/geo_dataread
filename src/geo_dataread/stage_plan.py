@@ -51,7 +51,11 @@ so a re-estimated donor propagates to everyone borrowing from it.  This matches
 from __future__ import annotations
 
 import dataclasses
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    import numpy as np
 
 __all__ = [
     "DonorRef",
@@ -60,8 +64,10 @@ __all__ = [
     "StageRef",
     "StageSpec",
     "build_stage_plan",
+    "donor_group_values",
     "parse_hold_spec",
     "parse_stage_spec",
+    "resolve_stage_plan",
     "stage_plan_from_config",
     "stage_plan_to_config",
 ]
@@ -460,3 +466,131 @@ def stage_plan_from_config(entries: Iterable[Mapping[str, object]]) -> StagePlan
             for group, value in hold_raw.items():
                 hold_specs.append(f"{name}:{group}={value}")
     return build_stage_plan(stage_specs, hold_specs)
+
+
+# ---------------------------------------------------------------------------
+# Resolution: pointers -> values, against the donor's CURRENT record
+# ---------------------------------------------------------------------------
+
+
+def donor_group_values(
+    record: Mapping[str, object],
+    group: str,
+    *,
+    component: int,
+    donor: str,
+) -> "np.ndarray":
+    """Slice one term group's coefficients out of a donor's stored record.
+
+    The record is self-contained and in the absolute-t parameterization, so a
+    donor's coefficients evaluate on any station's series — that is what makes
+    borrowing well-defined at all (design §0.6/§2.6).
+
+    Group membership comes from
+    :func:`gps_analysis.staged.group_parameter_mask`, NOT from a local list of
+    parameter names: "secular" must keep exactly one definition across the
+    estimator, ``select_terms`` and this borrow path.
+
+    Args:
+        record: The donor's stored detrend record.
+        group: Term-group name.
+        component: Component index into ``record["components"]``.
+        donor: Station code, for error messages only.
+
+    Returns:
+        The group's coefficients, shape ``(k,)``.
+
+    Raises:
+        ValueError: If the donor's model has no such group, or its record is
+            malformed.  Never returns an empty vector — a silent empty borrow
+            would hold a group at nothing and look like a successful fit.
+    """
+    import numpy as np
+    from gps_analysis.staged import group_parameter_mask
+
+    model = record.get("model")
+    if not isinstance(model, str):
+        raise ValueError(f"donor {donor!r}: record has no model code")
+    comps = record.get("components")
+    if not isinstance(comps, Sequence) or component >= len(comps):
+        raise ValueError(
+            f"donor {donor!r}: record has no component {component} "
+            f"(has {len(comps) if isinstance(comps, Sequence) else 0})"
+        )
+    entry = comps[component]
+    if not isinstance(entry, Mapping):
+        raise ValueError(f"donor {donor!r}: component {component} is malformed")
+    params = np.asarray(entry.get("params"), dtype=float)
+
+    mask = group_parameter_mask(model, group)
+    if mask.size != params.size:
+        raise ValueError(
+            f"donor {donor!r}: model {model!r} has {mask.size} parameters but "
+            f"the record stores {params.size} for component {component}"
+        )
+    if not mask.any():
+        raise ValueError(
+            f"donor {donor!r}: model {model!r} has no {group!r} term, so there "
+            f"is nothing to borrow"
+        )
+    return params[mask]
+
+
+def resolve_stage_plan(
+    plan: StagePlan,
+    *,
+    lookup_donor: "Callable[[str], Mapping[str, object]]",
+    component: int,
+) -> tuple[object, ...]:
+    """Turn a :class:`StagePlan` into ``gps_analysis.Stage`` objects.
+
+    This is where the pointer semantics are actually paid for:
+    :class:`DonorRef` is resolved by calling ``lookup_donor`` **now**, so the
+    values used are the donor's current ones.  Re-estimating a donor therefore
+    propagates to every station borrowing from it, instead of leaving stale
+    numbers frozen in each borrower's record.  A donor with no record raises
+    here rather than silently degrading.
+
+    ``HeldExplicit`` is constructed without a covariance, so the borrowed
+    group is treated as exactly known and the stage's result is flagged
+    conditional — the honest reading, since the donor's uncertainty describes
+    the DONOR's series, not this station's.
+
+    Args:
+        plan: The parsed plan.
+        lookup_donor: Station code → that station's current record.
+        component: Which component's coefficients to borrow.
+
+    Returns:
+        Stages ready for :func:`gps_analysis.estimate_staged`.
+    """
+    from gps_analysis.staged import HeldExplicit, HeldFromStage, Stage
+
+    stages: list[object] = []
+    for spec in plan.stages:
+        held: dict[str, object] = {}
+        for group, ref in spec.held.items():
+            if isinstance(ref, StageRef):
+                held[group] = HeldFromStage(ref.stage)
+                continue
+            record = lookup_donor(ref.station)
+            values = donor_group_values(
+                record, group, component=component, donor=ref.station
+            )
+            fitted_at = record.get("fitted_at")
+            held[group] = HeldExplicit(
+                values=values,
+                # Provenance names the donor AND when its record was fitted,
+                # so a stored borrow can be checked against a re-estimated
+                # donor rather than merely asserted.
+                source=f"donor:{ref.station}@{fitted_at}",
+            )
+        stages.append(
+            Stage(
+                name=spec.name,
+                free=spec.free,
+                held=held,  # type: ignore[arg-type]
+                segments=spec.segments,
+            )
+        )
+    return tuple(stages)

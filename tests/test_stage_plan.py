@@ -238,3 +238,110 @@ class TestConfigRoundTrip:
             stage_plan_from_config([{"free": ["secular"]}])
         with pytest.raises(ValueError, match="needs 'name' and 'free'"):
             stage_plan_from_config([{"name": "a"}])
+
+
+class TestDonorResolution:
+    """Donor holds are POINTERS: re-estimating a donor must propagate."""
+
+    @staticmethod
+    def _record(params: list[float], fitted_at: str = "2026-01-01") -> dict:
+        return {
+            "model": "lineperiodic",
+            "fitted_at": fitted_at,
+            "components": [{"params": params}],
+        }
+
+    def test_slices_the_right_group(self) -> None:
+        from geo_dataread.stage_plan import donor_group_values
+
+        rec = self._record([10.0, 2.0, 1.0, -1.0, 0.5, -0.5])
+        assert list(donor_group_values(rec, "secular", component=0, donor="OLAC")) == [
+            10.0,
+            2.0,
+        ]
+        assert list(donor_group_values(rec, "periodic", component=0, donor="OLAC")) == [
+            1.0,
+            -1.0,
+            0.5,
+            -0.5,
+        ]
+
+    def test_reestimated_donor_propagates(self) -> None:
+        # THE test for the pointer decision. The plan is unchanged; only the
+        # donor's record changes. A copy-semantics implementation would keep
+        # serving the old numbers here.
+        from geo_dataread.stage_plan import resolve_stage_plan
+
+        plan = build_stage_plan(["fit:periodic"], ["secular=donor:OLAC"])
+        store = {"OLAC": self._record([10.0, 2.0, 0, 0, 0, 0], "2026-01-01")}
+
+        before = resolve_stage_plan(plan, lookup_donor=lambda s: store[s], component=0)
+        assert list(before[0].held["secular"].values) == [10.0, 2.0]
+
+        store["OLAC"] = self._record([11.0, 2.5, 0, 0, 0, 0], "2026-07-01")
+        after = resolve_stage_plan(plan, lookup_donor=lambda s: store[s], component=0)
+        assert list(after[0].held["secular"].values) == [11.0, 2.5]
+
+    def test_provenance_names_donor_and_vintage(self) -> None:
+        # A stored borrow can then be CHECKED against a re-estimated donor
+        # rather than merely asserted.
+        from geo_dataread.stage_plan import resolve_stage_plan
+
+        plan = build_stage_plan(["fit:periodic"], ["secular=donor:OLAC"])
+        out = resolve_stage_plan(
+            plan,
+            lookup_donor=lambda s: self._record([1, 2, 0, 0, 0, 0], "2026-07-01"),
+            component=0,
+        )
+        assert out[0].held["secular"].source == "donor:OLAC@2026-07-01"
+
+    def test_stage_refs_need_no_lookup(self) -> None:
+        from gps_analysis.staged import HeldFromStage
+
+        from geo_dataread.stage_plan import resolve_stage_plan
+
+        plan = build_stage_plan(
+            ["clean:secular,periodic", "long:secular"],
+            ["long:periodic=stage:clean"],
+        )
+
+        def _boom(sta: str) -> dict:
+            raise AssertionError(f"should not look up {sta}")
+
+        out = resolve_stage_plan(plan, lookup_donor=_boom, component=0)
+        assert out[1].held["periodic"] == HeldFromStage("clean")
+
+    def test_missing_donor_is_loud(self) -> None:
+        from geo_dataread.stage_plan import resolve_stage_plan
+
+        plan = build_stage_plan(["fit:periodic"], ["secular=donor:NOPE"])
+        with pytest.raises(KeyError):
+            resolve_stage_plan(plan, lookup_donor=lambda s: {}[s], component=0)
+
+    def test_group_absent_from_donor_model_is_refused(self) -> None:
+        # An empty borrow would hold a group at nothing and still look like a
+        # successful fit.
+        from geo_dataread.stage_plan import donor_group_values
+
+        rec = {"model": "linear", "components": [{"params": [1.0, 2.0]}]}
+        with pytest.raises(ValueError, match="no 'periodic' term"):
+            donor_group_values(rec, "periodic", component=0, donor="OLAC")
+
+    def test_malformed_donor_records(self) -> None:
+        from geo_dataread.stage_plan import donor_group_values
+
+        with pytest.raises(ValueError, match="no model code"):
+            donor_group_values(
+                {"components": [{"params": [1.0]}]}, "secular", component=0, donor="X"
+            )
+        with pytest.raises(ValueError, match="no component 3"):
+            donor_group_values(
+                self._record([1, 2, 0, 0, 0, 0]), "secular", component=3, donor="X"
+            )
+        with pytest.raises(ValueError, match="but the record stores"):
+            donor_group_values(
+                {"model": "lineperiodic", "components": [{"params": [1.0, 2.0]}]},
+                "secular",
+                component=0,
+                donor="X",
+            )
