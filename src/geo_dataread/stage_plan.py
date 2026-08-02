@@ -410,12 +410,19 @@ def stage_plan_to_config(plan: StagePlan) -> list[dict[str, object]]:
 
     Donor holds render as ``donor: STA`` — the pointer, never the donor's
     numbers, so a re-estimated donor propagates.
+
+    The key names match :meth:`gps_analysis.StagedEstimate.to_record_fragment`
+    exactly (``name`` / ``free`` / ``held`` / ``segments``, holds spelled
+    ``stage:NAME`` / ``donor:STA``).  That is not a coincidence worth losing:
+    it means a STORED RECORD's ``stage_plan`` is itself valid input to
+    :func:`stage_plan_from_config`, so "what was judged is what got stored"
+    is checkable by parsing the record back, not merely asserted.
     """
     out: list[dict[str, object]] = []
     for st in plan.stages:
         entry: dict[str, object] = {"name": st.name, "free": list(st.free)}
         if st.held:
-            entry["hold"] = {g: _spell(r) for g, r in st.held.items()}
+            entry["held"] = {g: _spell(r) for g, r in st.held.items()}
         if st.segments is not None:
             entry["segments"] = [list(seg) for seg in st.segments]
         out.append(entry)
@@ -461,11 +468,11 @@ def stage_plan_from_config(entries: Iterable[Mapping[str, object]]) -> StagePlan
             spec += "@" + ";".join(tokens)
         stage_specs.append(spec)
 
-        hold_raw = raw.get("hold")
+        hold_raw = raw.get("held")
         if hold_raw is not None:
             if not isinstance(hold_raw, Mapping):
                 raise ValueError(
-                    f"stage_plan entry {name!r}: 'hold' must be a mapping of "
+                    f"stage_plan entry {name!r}: 'held' must be a mapping of "
                     f"GROUP to 'stage:NAME' or 'donor:STA', got {hold_raw!r}"
                 )
             for group, value in hold_raw.items():

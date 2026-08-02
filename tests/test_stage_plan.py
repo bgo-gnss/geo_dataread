@@ -231,7 +231,7 @@ class TestConfigRoundTrip:
         cfg = stage_plan_to_config(
             build_stage_plan(["fit:periodic"], ["secular=donor:OLAC"])
         )
-        assert cfg[0]["hold"] == {"secular": "donor:OLAC"}
+        assert cfg[0]["held"] == {"secular": "donor:OLAC"}
 
     def test_config_rejects_incomplete_entries(self) -> None:
         with pytest.raises(ValueError, match="needs 'name' and 'free'"):
@@ -487,3 +487,52 @@ class TestAnalysisYamlPersistence:
         )
         assert got["JONC"].donors == ("OLAC",)
         assert got["SELF"].stages[0].segments == ((None, 2008.35), (2008.7, None))
+
+
+class TestRecordIsValidConfig:
+    """A stored record's stage_plan parses back into the plan that made it.
+
+    ``StagedEstimate.to_record_fragment`` and :func:`stage_plan_to_config`
+    emit the SAME keys and the same ``stage:``/``donor:`` hold spellings.
+    That makes "what you judged is what got stored" checkable by parsing the
+    record, rather than asserted in a docstring.
+    """
+
+    def test_staged_record_fragment_parses_as_a_plan(self) -> None:
+        import numpy as np
+        from gps_analysis import HeldFromStage, Stage, estimate_staged
+
+        from geo_dataread.stage_plan import stage_plan_from_config
+
+        rng = np.random.default_rng(0)
+        t = np.linspace(2000, 2020, 900)
+        y = 5 + 2 * (t - 2000) + 3 * np.cos(2 * np.pi * t) + rng.normal(0, 0.5, t.size)
+
+        cli = ["clean:secular,periodic@2001.6:2012.0", "long:secular"]
+        holds = ["long:periodic=stage:clean"]
+        declared = build_stage_plan(cli, holds)
+
+        est = estimate_staged(
+            "lineperiodic",
+            t,
+            y,
+            plan=[
+                Stage("clean", ("secular", "periodic"), segments=[(2001.6, 2012.0)]),
+                Stage("long", ("secular",), held={"periodic": HeldFromStage("clean")}),
+            ],
+        )
+        # The record round-trips into exactly the plan the operator declared.
+        assert (
+            stage_plan_from_config(est.to_record_fragment()["stage_plan"]) == declared
+        )
+
+    def test_null_segments_in_a_record_mean_inherit(self) -> None:
+        # to_record_fragment writes `"segments": null` explicitly where the
+        # config writer omits the key; both must read back as "inherit", not
+        # as the full span.
+        from geo_dataread.stage_plan import stage_plan_from_config
+
+        plan = stage_plan_from_config(
+            [{"name": "long", "free": ["secular"], "segments": None}]
+        )
+        assert plan.stages[0].segments is None
