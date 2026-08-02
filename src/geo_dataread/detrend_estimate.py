@@ -687,12 +687,12 @@ def _restage(
     step_epochs = np.asarray(est.step_epochs, dtype=float).ravel()
     fit_model = with_steps(base_func, step_epochs) if step_epochs.size else base_func
 
-    # Guard the group vocabulary BEFORE fitting. gps_analysis currently has
-    # two of them: terms.GROUP_ORDER is (secular, periodic, step, transient),
-    # but estimate_staged partitions with detrend._term_keep_mask, which knows
-    # only secular (INCLUDING step amplitudes) and periodic. So a plan naming
-    # "step" or "transient" would produce an empty mask and be a silent no-op
-    # -- the exact failure the stage grammar's refusals exist to prevent.
+    # Guard the group vocabulary BEFORE fitting. Naming a group this MODEL
+    # has no parameters for (e.g. "step" on a station with no declared steps,
+    # or "transient" before a transient term is added) would produce an empty
+    # mask and be a silent no-op -- the failure the stage grammar's refusals
+    # exist to prevent. Group NAMES are validated by group_parameter_mask
+    # itself against terms.GROUP_ORDER; this checks they are POPULATED here.
     from gps_analysis.staged import group_parameter_mask
 
     named = {g for st in plan.stages for g in st.free} | {
@@ -700,17 +700,15 @@ def _restage(
     }
     empty = sorted(g for g in named if not group_parameter_mask(fit_model, g).any())
     if empty:
+        from gps_analysis import GROUP_ORDER
+
         populated = sorted(
-            g
-            for g in ("secular", "periodic")
-            if group_parameter_mask(fit_model, g).any()
+            g for g in GROUP_ORDER if group_parameter_mask(fit_model, g).any()
         )
         raise ValueError(
             f"stage plan names term group(s) {empty} which this model has no "
             f"parameters for, so holding or freeing them would do nothing. "
-            f"Addressable groups for {est.model!r}: {populated}. Note that "
-            f"'secular' INCLUDES step amplitudes here (detrend design 5.3), "
-            f"so steps cannot yet be staged separately from the rate."
+            f"Populated groups for this station's model: {populated}."
         )
 
     fits = []
