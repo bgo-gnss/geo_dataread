@@ -57,6 +57,7 @@ from typing import TYPE_CHECKING, cast
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     import numpy as np
+    from gps_analysis.staged import Stage
 
 __all__ = [
     "DonorRef",
@@ -553,7 +554,7 @@ def resolve_stage_plan(
     *,
     lookup_donor: "Callable[[str], Mapping[str, object]]",
     component: int,
-) -> tuple[object, ...]:
+) -> "tuple[Stage, ...]":
     """Turn a :class:`StagePlan` into ``gps_analysis.Stage`` objects.
 
     This is where the pointer semantics are actually paid for:
@@ -578,7 +579,7 @@ def resolve_stage_plan(
     """
     from gps_analysis.staged import HeldExplicit, HeldFromStage, Stage
 
-    stages: list[object] = []
+    stages: list[Stage] = []
     for spec in plan.stages:
         held: dict[str, object] = {}
         for group, ref in spec.held.items():

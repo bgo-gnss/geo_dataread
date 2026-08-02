@@ -57,7 +57,7 @@ from typing import Any, cast
 
 import numpy as np
 import numpy.typing as npt
-from gps_analysis import OutlierParams, estimate_detrend
+from gps_analysis import OutlierParams, estimate_detrend, evaluate_record
 from gps_parser import outlier_catalogs as _oc
 
 from geo_dataread.gps_views import (
@@ -553,6 +553,8 @@ def station_record_from_arrays(
     outlier_params: OutlierParams | None = None,
     fitted_at: str | None = None,
     refs: Mapping[str, Any] | None = None,
+    stage_plan: Any | None = None,
+    lookup_donor: Any | None = None,
 ) -> dict[str, Any] | None:
     """Estimate one station's stored-detrend record from ready arrays.
 
@@ -618,8 +620,161 @@ def station_record_from_arrays(
         outlier_params=outlier_params,
         fitted_at=fitted_at,
         refs=refs,
+        stage_plan=stage_plan,
+        lookup_donor=lookup_donor,
     )
     return None if result is None else result.record
+
+
+def _stage_domain_mask(t: FloatArray, result: Any, settings: StationFitSettings) -> Any:
+    """Boolean mask of the epochs one executed stage actually fitted."""
+    from gps_analysis.baseline import slice_windows
+
+    segs = getattr(result, "segments", None) or settings.segments
+    try:
+        return np.asarray(slice_windows(t, segs), dtype=bool)
+    except Exception:
+        return np.ones(t.size, dtype=bool)
+
+
+def _restage(
+    est: Any,
+    yearf: FloatArray,
+    data: FloatArray,
+    sigma: FloatArray,
+    settings: StationFitSettings,
+    plan: Any,
+    lookup_donor: Any,
+) -> tuple[Any, dict[str, Any]]:
+    """Re-fit an already-detected estimate under a staged plan.
+
+    Composition, per the operator decision of 2026-08-02: **detection runs
+    ONCE over the whole fit window** exactly as the single-stage path does,
+    and the staged fit then sees only the surviving epochs.  One verdict per
+    epoch, so the grey markers on a figure mean one thing and a staged record
+    stays comparable with a single-stage one.
+
+    Consequence worth knowing before writing a plan: detection — and hence
+    this whole path — is bounded by the station's fit window, so **stages
+    SUBDIVIDE that window rather than reach outside it.**  For the Askja
+    manoeuvre that is the right shape: let the window be the long span and
+    give the first stage an explicit narrow ``@`` sub-window.
+
+    The detection result is reused, never recomputed: only ``fits`` and
+    ``rms`` are replaced, so every other field of the estimate (inliers,
+    window_mask, span, step epochs, method) still describes the same
+    detection pass and ``to_record`` needs no parallel implementation.
+    """
+    import dataclasses as _dc
+
+    from gps_analysis import estimate_staged, with_steps
+    from gps_analysis.detrend import _resolve_model
+    from gps_analysis.fitting import _resolve_linear_design
+
+    from geo_dataread.stage_plan import resolve_stage_plan
+
+    finite = np.isfinite(yearf)
+    t_win = yearf[finite][np.asarray(est.window_mask, dtype=bool)]
+    inliers = np.atleast_2d(np.asarray(est.inliers, dtype=bool))
+    y_win = np.atleast_2d(data)[:, finite][:, np.asarray(est.window_mask, dtype=bool)]
+    s_win = np.atleast_2d(sigma)[:, finite][:, np.asarray(est.window_mask, dtype=bool)]
+
+    # The staged fit must use the SAME model the detection pass fitted,
+    # including its step augmentation. Passing est.model alone would silently
+    # drop every declared step -- caught on SELF, whose 2008 step made the
+    # staged param_names disagree with the record's.
+    base_func, _ = _resolve_model(est.model)
+    step_epochs = np.asarray(est.step_epochs, dtype=float).ravel()
+    fit_model = with_steps(base_func, step_epochs) if step_epochs.size else base_func
+
+    # Guard the group vocabulary BEFORE fitting. gps_analysis currently has
+    # two of them: terms.GROUP_ORDER is (secular, periodic, step, transient),
+    # but estimate_staged partitions with detrend._term_keep_mask, which knows
+    # only secular (INCLUDING step amplitudes) and periodic. So a plan naming
+    # "step" or "transient" would produce an empty mask and be a silent no-op
+    # -- the exact failure the stage grammar's refusals exist to prevent.
+    from gps_analysis.staged import group_parameter_mask
+
+    named = {g for st in plan.stages for g in st.free} | {
+        g for st in plan.stages for g in st.held
+    }
+    empty = sorted(g for g in named if not group_parameter_mask(fit_model, g).any())
+    if empty:
+        populated = sorted(
+            g
+            for g in ("secular", "periodic")
+            if group_parameter_mask(fit_model, g).any()
+        )
+        raise ValueError(
+            f"stage plan names term group(s) {empty} which this model has no "
+            f"parameters for, so holding or freeing them would do nothing. "
+            f"Addressable groups for {est.model!r}: {populated}. Note that "
+            f"'secular' INCLUDES step amplitudes here (detrend design 5.3), "
+            f"so steps cannot yet be staged separately from the rate."
+        )
+
+    fits = []
+    rms: list[float] = []
+    fragment: dict[str, Any] = {}
+    for c in range(inliers.shape[0]):
+        keep = inliers[c]
+        # Resolved PER COMPONENT: a donor hold borrows that component's
+        # coefficients, so one resolution for all three would borrow north's
+        # numbers into east and up.
+        stages = resolve_stage_plan(plan, lookup_donor=lookup_donor, component=c)
+        staged = estimate_staged(
+            fit_model,
+            t_win[keep],
+            y_win[c][keep],
+            s_win[c][keep],
+            plan=stages,
+            segments=settings.segments,
+        )
+        cov = np.asarray(staged.fits[0].covariance, dtype=float)
+        if not np.all(np.isfinite(cov)):
+            # A stage whose design is rank-deficient yields inf/NaN covariance
+            # (_wls_solve's documented convention) and would otherwise be
+            # COMMITTED as a record with no usable uncertainties. Diagnose the
+            # usual cause: a column that is identically zero inside a stage's
+            # own domain -- e.g. a step epoch lying outside it, which is easy
+            # to write by accident because "secular" here includes the step
+            # amplitudes.
+            culprits = []
+            for r in staged.stages:
+                dom = t_win[keep]
+                sub = _stage_domain_mask(dom, r, settings)
+                design = _resolve_linear_design(fit_model)
+                if design is None:
+                    break
+                cols = np.asarray(design.build(dom[sub]), dtype=float)
+                for j, nm in enumerate(staged.param_names):
+                    if r.free_mask[j] and not np.any(cols[:, j] != 0.0):
+                        culprits.append(
+                            f"{nm!r} is identically zero in stage {r.name!r}"
+                        )
+            detail = "; ".join(culprits) or "rank-deficient stage design"
+            raise ValueError(
+                f"staged fit produced a non-finite covariance for component "
+                f"{c}: {detail}. A stage can only estimate parameters its own "
+                f"domain constrains -- narrow the plan, or free that group in "
+                f"a stage whose window contains the relevant epochs. Refusing "
+                f"rather than storing a record with unusable uncertainties."
+            )
+        fits.append(_dc.replace(staged.fits[0], component=est.fits[c].component))
+        resid = y_win[c][keep] - evaluate_record(
+            {
+                "record_version": 1,
+                "model": est.model,
+                "param_names": list(staged.param_names),
+                "step_epochs": [float(v) for v in step_epochs],
+                "components": [staged.fits[0].to_record()],
+            },
+            t_win[keep],
+        )
+        rms.append(float(np.sqrt(np.mean(np.asarray(resid, dtype=float) ** 2))))
+        if not fragment:
+            fragment = dict(staged.to_record_fragment())
+    return _dc.replace(est, fits=tuple(fits), rms=tuple(rms)), fragment
 
 
 def station_estimate_from_arrays(
@@ -637,6 +792,8 @@ def station_estimate_from_arrays(
     outlier_params: OutlierParams | None = None,
     fitted_at: str | None = None,
     refs: Mapping[str, Any] | None = None,
+    stage_plan: Any | None = None,
+    lookup_donor: Any | None = None,
 ) -> StationEstimate | None:
     """As :func:`station_record_from_arrays`, keeping the fit diagnostics.
 
@@ -691,6 +848,12 @@ def station_estimate_from_arrays(
     if est.outlier_abort:
         return None
 
+    stage_fragment: dict[str, Any] | None = None
+    if stage_plan is not None:
+        est, stage_fragment = _restage(
+            est, yearf, data, sigma, settings, stage_plan, lookup_donor
+        )
+
     record_refs: dict[str, Any] = {
         "window_source": settings.window_source,
         "data": "local TOT",
@@ -705,6 +868,8 @@ def station_estimate_from_arrays(
     if refs:
         record_refs.update(refs)
     record = est.to_record(fitted_at=fitted_at, refs=record_refs)
+    if stage_fragment is not None:
+        record.update(stage_fragment)
 
     # --- lift the inlier mask back to the caller's index space -----------
     # est.inliers is (C, N_window) over the FINITE-filtered, WINDOWED epochs;
