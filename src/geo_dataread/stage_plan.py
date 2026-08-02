@@ -52,7 +52,8 @@ from __future__ import annotations
 
 import dataclasses
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from typing import TYPE_CHECKING
+from pathlib import Path
+from typing import TYPE_CHECKING, cast
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     import numpy as np
@@ -63,13 +64,17 @@ __all__ = [
     "StagePlan",
     "StageRef",
     "StageSpec",
+    "STAGE_PLAN_KEYS",
     "build_stage_plan",
+    "default_analysis_yaml_path",
     "donor_group_values",
+    "read_stage_plans",
     "parse_hold_spec",
     "parse_stage_spec",
     "resolve_stage_plan",
     "stage_plan_from_config",
     "stage_plan_to_config",
+    "write_stage_plan",
 ]
 
 #: How a held group's value is spelled on the command line and in config.
@@ -594,3 +599,120 @@ def resolve_stage_plan(
             )
         )
     return tuple(stages)
+
+
+# ---------------------------------------------------------------------------
+# Persistence: analysis.yaml
+# ---------------------------------------------------------------------------
+
+#: Where stage plans live in ``analysis.yaml``.
+STAGE_PLAN_KEYS = ("detrend", "estimation", "stage_plans")
+
+
+def default_analysis_yaml_path() -> "Path | None":
+    """Resolve the deployed ``analysis.yaml`` via the shared gpsconfig lookup.
+
+    Same mechanism as :func:`geo_dataread.detrend_estimate.default_fit_catalog_path`
+    (``postprocess.cfg`` ``[FILES]`` first, then ``<gpsconfig dir>/``), so the
+    stage-plan surface is deployed and overridden exactly like every other
+    analysis-lane catalog.
+    """
+    from gps_parser import outlier_catalogs as oc
+
+    return cast("Path | None", oc.catalog_path("analysis", "analysis.yaml"))
+
+
+def read_stage_plans(path: "str | Path") -> dict[str, StagePlan]:
+    """Read every station's stage plan from ``analysis.yaml``.
+
+    Home is ``detrend.estimation.stage_plans`` — beside the existing
+    per-station ``fit_windows`` and ``use_sta`` maps, which are the same kind
+    of thing (an operator's per-station estimation override).  Deliberately
+    NOT a ``fit_windows.csv`` cell: that reader is strict by design and its
+    one-cell ``segments`` encoding exists because an extra ROW would parse
+    into different-but-valid science.  A stage plan is structurally richer
+    than a segment list, and nesting it into a CSV cell would trade that
+    strictness for unreadability.
+
+    A missing file, a missing block or an empty mapping all mean "no station
+    has a stage plan" and return ``{}`` — a stage plan is an optional
+    enhancement, exactly like the fit catalog.
+
+    Raises:
+        ValueError: if the block exists but is malformed, naming the station.
+            A stage plan that silently fails to load would quietly revert a
+            station to single-stage estimation and store different science.
+    """
+    import yaml
+
+    p = Path(path)
+    if not p.exists():
+        return {}
+    doc = yaml.safe_load(p.read_text()) or {}
+    node: object = doc
+    for key in STAGE_PLAN_KEYS:
+        if not isinstance(node, Mapping):
+            return {}
+        node = node.get(key)
+        if node is None:
+            return {}
+    if not isinstance(node, Mapping):
+        raise ValueError(
+            f"{p}: {'.'.join(STAGE_PLAN_KEYS)} must be a mapping of station "
+            f"to stage list, got {node!r}"
+        )
+    out: dict[str, StagePlan] = {}
+    for sta, entries in node.items():
+        if not isinstance(entries, (list, tuple)):
+            raise ValueError(
+                f"{p}: stage_plans[{sta!r}] must be a list of stages, got {entries!r}"
+            )
+        try:
+            out[str(sta)] = stage_plan_from_config(entries)
+        except ValueError as exc:
+            raise ValueError(f"{p}: stage_plans[{sta!r}]: {exc}") from None
+    return out
+
+
+def write_stage_plan(path: "str | Path", station: str, plan: StagePlan | None) -> None:
+    """Merge ONE station's stage plan into ``analysis.yaml``, preserving the rest.
+
+    Mirrors the workbench's ``--commit`` contract for ``detrend_params.json``:
+    a merge-write of one station, never a rewrite of the document, so an
+    operator curating one station cannot drop another's configuration.
+
+    ``plan=None`` removes the station's entry (and the enclosing blocks if
+    they become empty), which is how a staged station is returned to ordinary
+    single-stage estimation without hand-editing YAML.
+    """
+    import yaml
+
+    p = Path(path)
+    doc = (yaml.safe_load(p.read_text()) if p.exists() else None) or {}
+    if not isinstance(doc, dict):
+        raise ValueError(f"{p}: top level must be a mapping, got {type(doc).__name__}")
+
+    node: dict[str, object] = doc
+    for key in STAGE_PLAN_KEYS[:-1]:
+        child = node.get(key)
+        if child is None:
+            child = {}
+            node[key] = child
+        if not isinstance(child, dict):
+            raise ValueError(f"{p}: {key!r} must be a mapping, got {child!r}")
+        node = child
+
+    leaf = node.get(STAGE_PLAN_KEYS[-1])
+    if not isinstance(leaf, dict):
+        leaf = {}
+    if plan is None:
+        leaf.pop(station, None)
+    else:
+        leaf[station] = stage_plan_to_config(plan)
+
+    if leaf:
+        node[STAGE_PLAN_KEYS[-1]] = leaf
+    else:
+        node.pop(STAGE_PLAN_KEYS[-1], None)
+
+    p.write_text(yaml.safe_dump(doc, sort_keys=False, allow_unicode=True))

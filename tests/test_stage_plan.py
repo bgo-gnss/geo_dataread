@@ -345,3 +345,145 @@ class TestDonorResolution:
                 component=0,
                 donor="X",
             )
+
+
+class TestAnalysisYamlPersistence:
+    """Stage plans live in analysis.yaml beside fit_windows and use_sta."""
+
+    @staticmethod
+    def _write(tmp_path, doc: dict):
+        import yaml
+
+        p = tmp_path / "analysis.yaml"
+        p.write_text(yaml.safe_dump(doc, sort_keys=False))
+        return p
+
+    def test_absent_file_block_or_map_all_mean_none(self, tmp_path) -> None:
+        from geo_dataread.stage_plan import read_stage_plans
+
+        assert read_stage_plans(tmp_path / "nope.yaml") == {}
+        assert read_stage_plans(self._write(tmp_path, {})) == {}
+        assert read_stage_plans(self._write(tmp_path, {"detrend": {}})) == {}
+        assert (
+            read_stage_plans(
+                self._write(tmp_path, {"detrend": {"estimation": {"stage_plans": {}}}})
+            )
+            == {}
+        )
+
+    def test_reads_a_plan(self, tmp_path) -> None:
+        from geo_dataread.stage_plan import read_stage_plans
+
+        plan = build_stage_plan(
+            ["clean:secular,periodic@2001.6:2019.5", "long:secular"],
+            ["long:periodic=stage:clean"],
+        )
+        p = self._write(
+            tmp_path,
+            {
+                "detrend": {
+                    "estimation": {"stage_plans": {"OLAC": stage_plan_to_config(plan)}}
+                }
+            },
+        )
+        assert read_stage_plans(p) == {"OLAC": plan}
+
+    def test_malformed_plan_names_the_station(self, tmp_path) -> None:
+        # A stage plan that silently failed to load would quietly revert the
+        # station to single-stage estimation and store different science.
+        from geo_dataread.stage_plan import read_stage_plans
+
+        p = self._write(
+            tmp_path,
+            {"detrend": {"estimation": {"stage_plans": {"OLAC": [{"name": "a"}]}}}},
+        )
+        with pytest.raises(ValueError, match="OLAC"):
+            read_stage_plans(p)
+
+        p = self._write(
+            tmp_path, {"detrend": {"estimation": {"stage_plans": {"OLAC": "nope"}}}}
+        )
+        with pytest.raises(ValueError, match="must be a list of stages"):
+            read_stage_plans(p)
+
+    def test_write_preserves_everything_else(self, tmp_path) -> None:
+        # The --commit contract: merge ONE station, never rewrite the doc.
+        import yaml
+
+        from geo_dataread.stage_plan import read_stage_plans, write_stage_plan
+
+        p = self._write(
+            tmp_path,
+            {
+                "version": 0,
+                "outliers": {"window_n_sigma": 4.0},
+                "detrend": {
+                    "default_model": "lineperiodic",
+                    "estimation": {
+                        "min_epochs": 365,
+                        "use_sta": {"JONC": "OLAC"},
+                        "stage_plans": {"KASC": [{"name": "f", "free": ["secular"]}]},
+                    },
+                },
+            },
+        )
+        plan = build_stage_plan(["clean:secular,periodic"], [])
+        write_stage_plan(p, "OLAC", plan)
+
+        doc = yaml.safe_load(p.read_text())
+        assert doc["version"] == 0
+        assert doc["outliers"] == {"window_n_sigma": 4.0}
+        assert doc["detrend"]["default_model"] == "lineperiodic"
+        assert doc["detrend"]["estimation"]["min_epochs"] == 365
+        assert doc["detrend"]["estimation"]["use_sta"] == {"JONC": "OLAC"}
+        # the other station's plan survives
+        assert set(read_stage_plans(p)) == {"KASC", "OLAC"}
+        assert read_stage_plans(p)["OLAC"] == plan
+
+    def test_write_into_a_file_without_the_blocks(self, tmp_path) -> None:
+        from geo_dataread.stage_plan import read_stage_plans, write_stage_plan
+
+        p = self._write(tmp_path, {"version": 0})
+        plan = build_stage_plan(["fit:secular"])
+        write_stage_plan(p, "SELF", plan)
+        assert read_stage_plans(p) == {"SELF": plan}
+
+    def test_removal_returns_a_station_to_single_stage(self, tmp_path) -> None:
+        import yaml
+
+        from geo_dataread.stage_plan import read_stage_plans, write_stage_plan
+
+        p = self._write(tmp_path, {"version": 0})
+        write_stage_plan(p, "SELF", build_stage_plan(["fit:secular"]))
+        write_stage_plan(p, "OLAC", build_stage_plan(["fit:periodic"]))
+        write_stage_plan(p, "SELF", None)
+        assert set(read_stage_plans(p)) == {"OLAC"}
+
+        write_stage_plan(p, "OLAC", None)
+        assert read_stage_plans(p) == {}
+        # the emptied block is cleaned up rather than left as a stub
+        assert (
+            "stage_plans" not in yaml.safe_load(p.read_text())["detrend"]["estimation"]
+        )
+
+    def test_write_round_trips_through_the_file(self, tmp_path) -> None:
+        from geo_dataread.stage_plan import read_stage_plans, write_stage_plan
+
+        p = self._write(tmp_path, {})
+        for sta, stages, holds in [
+            (
+                "OLAC",
+                ["clean:secular,periodic@2001.6:2019.5", "long:secular"],
+                ["long:periodic=stage:clean"],
+            ),
+            ("JONC", ["fit:periodic"], ["secular=donor:OLAC"]),
+            ("SELF", ["a:secular@:2008.35;2008.7:"], []),
+        ]:
+            write_stage_plan(p, sta, build_stage_plan(stages, holds))
+        got = read_stage_plans(p)
+        assert got["OLAC"] == build_stage_plan(
+            ["clean:secular,periodic@2001.6:2019.5", "long:secular"],
+            ["long:periodic=stage:clean"],
+        )
+        assert got["JONC"].donors == ("OLAC",)
+        assert got["SELF"].stages[0].segments == ((None, 2008.35), (2008.7, None))
