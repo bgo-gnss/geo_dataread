@@ -664,6 +664,34 @@ def _restage(
     ``rms`` are replaced, so every other field of the estimate (inliers,
     window_mask, span, step epochs, method) still describes the same
     detection pass and ``to_record`` needs no parallel implementation.
+
+    **Measured safe** (2026-08-03, SELF/RHOF/VMEY/HOFN/AKUR): judging the
+    epochs against the single-stage fit while storing the staged one moves
+    stored rates by at most 0.0009 mm/yr (0.22 sigma) and step amplitudes by
+    at most 0.05 mm -- 1-2x the Huber-vs-WLS reference mismatch the unstaged
+    path already carries, since the detector judges against its own robust
+    fit rather than the clean WLS one.
+
+    ⚠ **Do not add an iteration loop here** (detect -> stage -> re-detect)
+    without a cycle guard. Measured: 2-4 rounds to a fixed point on four
+    stations, but AKUR does NOT converge -- a period-2 limit cycle in which
+    one borderline east epoch flips in and out forever. Science impact is
+    nil, which is precisely why it would survive review and waste a day in
+    production.
+
+    ⚠ **Restaging does not rescue an aborted station, and it was tried.**
+    The tempting fix -- on abort, re-detect against the staged trajectory --
+    was implemented and REVERTED on 2026-08-03 because it cannot work: the
+    staged trajectory sits within ~0.005 mm/yr of the joint fit (that is why
+    verdict drift is only 0.02-0.4 %), so it is the same model with a
+    differently-estimated seasonal, not a better model of the flank signal.
+    Measured on NYLA with per-station params, floors and protect windows:
+    candidate fractions [0.089, 0.116, 0.004] against the staged trajectory
+    versus [0.079, 0.092, 0.004] against the single-stage one -- still
+    aborting, staged residual rms 42/65/9 mm, because a straight line cannot
+    follow that deformation. The abort is a MODEL-ADEQUACY problem, not a
+    reference-model problem; the fix is a term that can follow the signal (a
+    transient), not a different judge.
     """
     import dataclasses as _dc
 
