@@ -555,6 +555,7 @@ def station_record_from_arrays(
     refs: Mapping[str, Any] | None = None,
     stage_plan: Any | None = None,
     lookup_donor: Any | None = None,
+    terms: Sequence[str] | None = None,
 ) -> dict[str, Any] | None:
     """Estimate one station's stored-detrend record from ready arrays.
 
@@ -622,6 +623,7 @@ def station_record_from_arrays(
         refs=refs,
         stage_plan=stage_plan,
         lookup_donor=lookup_donor,
+        terms=terms,
     )
     return None if result is None else result.record
 
@@ -820,6 +822,7 @@ def station_estimate_from_arrays(
     refs: Mapping[str, Any] | None = None,
     stage_plan: Any | None = None,
     lookup_donor: Any | None = None,
+    terms: Sequence[str] | None = None,
 ) -> StationEstimate | None:
     """As :func:`station_record_from_arrays`, keeping the fit diagnostics.
 
@@ -855,13 +858,27 @@ def station_estimate_from_arrays(
         sta, outlier_params=outlier_params, outlier_overrides=outlier_overrides
     )
 
+    fit_model: Any = model
+    if terms:
+        # A --term transient cannot be expressed by a registry code plus step
+        # epochs, so the model becomes a composed TrajectoryModel. Its
+        # as_modelfunc() is a drop-in, and the resulting record carries the
+        # term spec (record version 2) so it can be read back.
+        from geo_dataread.term_spec import build_trajectory_model
+
+        traj = build_trajectory_model(
+            model, [float(v) for v in np.asarray(step_epochs).ravel()], terms
+        )
+        if traj is not None:
+            fit_model = traj.as_modelfunc()
+
     est = estimate_detrend(
-        model,
+        fit_model,
         yearf,
         data,
         sigma,
         segments=settings.segments,
-        step_epochs=step_epochs if step_epochs.size else None,
+        step_epochs=(None if terms else (step_epochs if step_epochs.size else None)),
         min_span_years=settings.min_span_years,
         min_epochs=settings.min_epochs,
         max_gap_years=settings.max_gap_years,
