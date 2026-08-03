@@ -713,9 +713,20 @@ def _restage(
     # including its step augmentation. Passing est.model alone would silently
     # drop every declared step -- caught on SELF, whose 2008 step made the
     # staged param_names disagree with the record's.
-    base_func, _ = _resolve_model(est.model)
     step_epochs = np.asarray(est.step_epochs, dtype=float).ravel()
-    fit_model = with_steps(base_func, step_epochs) if step_epochs.size else base_func
+    if est.term_spec is not None:
+        # A --term model is not a registry code (its name is
+        # "polynomial+seasonal+log_transient"), so rebuild it from the spec
+        # the estimate carries. Resolving the NAME here is what broke
+        # --term together with --stage.
+        from gps_analysis import TrajectoryModel
+
+        fit_model = TrajectoryModel.from_spec(est.term_spec).as_modelfunc()
+    else:
+        base_func, _ = _resolve_model(est.model)
+        fit_model = (
+            with_steps(base_func, step_epochs) if step_epochs.size else base_func
+        )
 
     # Guard the group vocabulary BEFORE fitting. Naming a group this MODEL
     # has no parameters for (e.g. "step" on a station with no declared steps,
@@ -793,6 +804,7 @@ def _restage(
             {
                 "record_version": 1,
                 "model": est.model,
+                **({} if est.term_spec is None else {"terms": est.term_spec}),
                 "param_names": list(staged.param_names),
                 "step_epochs": [float(v) for v in step_epochs],
                 "components": [staged.fits[0].to_record()],

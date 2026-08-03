@@ -120,3 +120,51 @@ class TestTransientFixesAnAbort:
         frac_term = float(np.atleast_2d(d_term.candidates)[0].mean())
         assert frac_term < frac_plain
         assert not d_term.excess_flag_abort
+
+
+class TestTermComposesWithStages:
+    """--term and --stage together: the composed model is not a registry code."""
+
+    def test_restage_rebuilds_a_composed_model_from_its_spec(self) -> None:
+        # Regression: _restage resolved the model by NAME, and a --term
+        # model is called "polynomial+seasonal+log_transient", so the two
+        # flags together failed with "unknown model".
+        import numpy as np
+
+        from geo_dataread.stage_plan import build_stage_plan
+        from geo_dataread.detrend_estimate import (
+            FitDefaults,
+            resolve_fit_settings,
+            station_estimate_from_arrays,
+        )
+
+        rng = np.random.default_rng(0)
+        t = np.linspace(2006.0, 2026.0, 2400)
+        dt = np.clip(t - 2018.0, 0.0, None)
+        base = 2 * (t - 2006) + 3 * np.cos(2 * np.pi * t) + 40 * np.log1p(dt / 2.0)
+        y = np.vstack([base + rng.normal(0, 2.0, t.size) for _ in range(3)])
+        s = np.full_like(y, 2.0)
+
+        settings = resolve_fit_settings("TEST", None, FitDefaults(max_gap_years=3.0))
+        plan = build_stage_plan(
+            ["clean:secular,periodic@2006.0:2018.0", "long:secular,transient"],
+            ["long:periodic=stage:clean"],
+        )
+
+        est = station_estimate_from_arrays(
+            "TEST",
+            t,
+            y,
+            s,
+            settings=settings,
+            terms=["log@2018.0,tau=2.0"],
+            stage_plan=plan,
+            lookup_donor=None,
+        )
+        assert est is not None
+        rec = est.record
+        assert rec["record_version"] == 2
+        assert [x["kind"] for x in rec["terms"]][-1] == "log_transient"
+        # the staged plan really ran
+        assert "stage_plan" in rec
+        assert [s_["name"] for s_ in rec["stage_plan"]] == ["clean", "long"]
