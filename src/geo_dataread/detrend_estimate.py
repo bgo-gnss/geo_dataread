@@ -721,12 +721,15 @@ def _restage(
         # --term together with --stage.
         from gps_analysis import TrajectoryModel
 
-        fit_model = TrajectoryModel.from_spec(est.term_spec).as_modelfunc()
+        base_func = TrajectoryModel.from_spec(est.term_spec).as_modelfunc()
     else:
         base_func, _ = _resolve_model(est.model)
-        fit_model = (
-            with_steps(base_func, step_epochs) if step_epochs.size else base_func
-        )
+    # Step augmentation is shared by both branches: est.step_epochs holds the
+    # SCREENED steps the detection pass actually fitted, and the term spec no
+    # longer carries them. Augmenting only the registry branch would drop
+    # every step from a staged --term fit -- the SELF failure that the
+    # comment above records, in its other half.
+    fit_model = with_steps(base_func, step_epochs) if step_epochs.size else base_func
 
     # Guard the group vocabulary BEFORE fitting. Naming a group this MODEL
     # has no parameters for (e.g. "step" on a station with no declared steps,
@@ -872,15 +875,15 @@ def station_estimate_from_arrays(
 
     fit_model: Any = model
     if terms:
-        # A --term transient cannot be expressed by a registry code plus step
-        # epochs, so the model becomes a composed TrajectoryModel. Its
-        # as_modelfunc() is a drop-in, and the resulting record carries the
-        # term spec (record version 2) so it can be read back.
+        # A --term transient cannot be expressed by a registry code, so the
+        # model becomes a composed TrajectoryModel and the record carries its
+        # term spec (version 2) to read it back. Steps are NOT composed in:
+        # they go on step_epochs below, exactly as on the registry path, so
+        # estimate_detrend's window filter and its non-separability refusal
+        # apply to both. Baking them in here bypassed both guards.
         from geo_dataread.term_spec import build_trajectory_model
 
-        traj = build_trajectory_model(
-            model, [float(v) for v in np.asarray(step_epochs).ravel()], terms
-        )
+        traj = build_trajectory_model(model, terms)
         if traj is not None:
             fit_model = traj.as_modelfunc()
 
@@ -890,7 +893,7 @@ def station_estimate_from_arrays(
         data,
         sigma,
         segments=settings.segments,
-        step_epochs=(None if terms else (step_epochs if step_epochs.size else None)),
+        step_epochs=(step_epochs if step_epochs.size else None),
         min_span_years=settings.min_span_years,
         min_epochs=settings.min_epochs,
         max_gap_years=settings.max_gap_years,

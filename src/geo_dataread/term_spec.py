@@ -133,20 +133,31 @@ def parse_term_spec(spec: str) -> dict[str, Any]:
 
 def build_trajectory_model(
     model: str,
-    step_epochs: Sequence[float],
     term_specs: Sequence[str] | None,
 ) -> Any:
-    """Compose a registry model, its steps and any ``--term`` transients.
+    """Compose a registry model with any ``--term`` transients.
 
     Returns a ``gps_analysis.TrajectoryModel``, whose ``as_modelfunc()`` is a
     drop-in for the registry callable ``estimate_detrend`` normally receives.
-    Canonical ordering (polynomial → seasonal → step → transient) is the
-    model's own, which is what keeps ``param_names[1] == "rate"`` true and
-    therefore ``velocity._RATE_INDEX`` correct.
+    Canonical ordering (polynomial → seasonal → transient) is the model's
+    own, which is what keeps ``param_names[1] == "rate"`` true and therefore
+    ``velocity._RATE_INDEX`` correct.
+
+    **Steps are deliberately NOT composed in here**, and this used to be the
+    bug rather than the design. Baking them in meant passing
+    ``step_epochs=None`` to ``estimate_detrend``, which silently disabled the
+    two protections that live on that argument: the filter dropping steps
+    outside the fit window, and the refusal of two steps with no fitted epoch
+    between them. A station with a declared step OUTSIDE its window then got
+    an all-ones step column, collinear with the intercept, and stored a
+    trajectory metres away from the truth on nothing louder than an
+    ``OptimizeWarning``. Steps now travel as ``step_epochs`` on both paths,
+    so there is ONE screen and ONE augmentation site
+    (``fitting.with_steps``), and the ``--term`` path cannot drift from the
+    registry path again.
 
     Args:
         model: Registry code the station is fitted with.
-        step_epochs: Declared step epochs.
         term_specs: Raw ``--term`` values; None or empty returns None, so a
             caller with no transients keeps the ordinary registry path and
             its byte-identical version-1 record.
@@ -165,6 +176,5 @@ def build_trajectory_model(
             f"known: {sorted(_MODEL_TERMS)}"
         )
     specs: list[dict[str, Any]] = [dict(d) for d in _MODEL_TERMS[model]]
-    specs += [{"kind": "step", "epoch": float(e)} for e in step_epochs]
     specs += [parse_term_spec(s) for s in term_specs]
     return TrajectoryModel.from_spec(specs)
