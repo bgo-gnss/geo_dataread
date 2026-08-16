@@ -804,9 +804,18 @@ def _restage(
                 f"rather than storing a record with unusable uncertainties."
             )
         fits.append(_dc.replace(staged.fits[0], component=est.fits[c].component))
+        # record_version is CONTENT-determined here exactly as it is in
+        # `to_record`: a hardcoded 1 beside a conditional `terms` key was a
+        # record whose version contradicted its own shape, and the reader
+        # (which dispatches on the terms key) read it anyway. It now refuses,
+        # so `--stage` together with `--term` reached this line and raised.
+        from gps_analysis.detrend import RECORD_VERSION, RECORD_VERSION_TERMS
+
         resid = y_win[c][keep] - evaluate_record(
             {
-                "record_version": 1,
+                "record_version": (
+                    RECORD_VERSION if est.term_spec is None else RECORD_VERSION_TERMS
+                ),
                 "model": est.model,
                 **({} if est.term_spec is None else {"terms": est.term_spec}),
                 "param_names": list(staged.param_names),

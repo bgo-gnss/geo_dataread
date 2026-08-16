@@ -927,3 +927,52 @@ class TestRateIsReportedByName:
     ) -> None:
         detail = self._run(tmp_path, monkeypatch, "lineperiodic")
         assert "north rate 4.35 mm/yr" in detail  # RATE[0]=4.33 + fit noise
+
+
+class TestStagedAndTermTogether:
+    """`--stage` with `--term` — the combination neither suite covered.
+
+    `_restage` evaluates its residual through `evaluate_record` on a record
+    dict it builds inline, and that dict hardcoded ``record_version: 1``
+    while adding a ``terms`` key whenever the model carried a transient: a
+    record whose version contradicted its own shape. It went unnoticed
+    because the reader dispatched on the terms key and ignored the version.
+    Once `trajectory_from_record` began enforcing the two against each other
+    (gps_analysis), this raised — and no test in either package exercised
+    staged estimation together with a transient, which is why the coupling
+    needs pinning here rather than on the reader.
+    """
+
+    def _run(self, tmp_path: Path, *, terms: list[str] | None) -> Any:
+        from geo_dataread.stage_plan import build_stage_plan
+
+        free = "periodic,transient" if terms else "periodic"
+        plan = build_stage_plan(
+            ["clean:secular@2020.2:2021.5", f"fit:{free}"],
+            ["fit:secular=stage:clean"],
+        )
+        t, y, sigma = _synthetic_series()
+        return de.station_estimate_from_arrays(
+            "DYNG",
+            t,
+            y,
+            sigma,
+            settings=_settings(),
+            outlier_overrides=str(_empty_overrides(tmp_path)),
+            terms=terms,
+            stage_plan=plan,
+        )
+
+    def test_a_staged_transient_fit_completes(self, tmp_path: Path) -> None:
+        est = self._run(tmp_path, terms=["log@2020.5,tau=1.0"])
+        assert est is not None
+        assert "log_amp_1" in est.record["param_names"]
+        assert est.record["record_version"] == 2
+        assert [s["name"] for s in est.record["stage_plan"]] == ["clean", "fit"]
+
+    def test_staged_without_a_transient_stays_v1(self, tmp_path: Path) -> None:
+        """The other half: version follows CONTENT, so no terms means v1."""
+        est = self._run(tmp_path, terms=None)
+        assert est is not None
+        assert "terms" not in est.record
+        assert est.record["record_version"] == 1
