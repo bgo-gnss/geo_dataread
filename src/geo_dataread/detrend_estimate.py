@@ -48,6 +48,7 @@ import argparse
 import csv
 import dataclasses
 import json
+import sys
 import warnings
 from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
@@ -966,6 +967,8 @@ def estimate_station(
     outlier_overrides: str | Path | None = None,
     uncert: int = UNCERT,
     fitted_at: str | None = None,
+    stage_plan: Any | None = None,
+    lookup_donor: Any | None = None,
 ) -> StationResult:
     """Read one station's local plate-removed TOT series and estimate it.
 
@@ -978,6 +981,13 @@ def estimate_station(
     ``uncert`` is the read-time sigma screen (see :data:`UNCERT`); it rides
     into the record's ``refs`` so a record always says which epochs it could
     have been fitted on.
+
+    ``stage_plan`` is this station's :class:`~geo_dataread.stage_plan.StagePlan`
+    (``None`` = ordinary single-stage estimation) and ``lookup_donor`` resolves
+    donor holds. Both are pass-through; the batch CLI reads the plans from
+    ``analysis.yaml``, which is the whole point of storing them there — a plan
+    the batch did not read would let a re-run silently revert a curated
+    station to single-stage science.
     """
     from geo_dataread import gps_read  # deferred: gps_read lazily imports back
 
@@ -1005,6 +1015,8 @@ def estimate_station(
             outlier_overrides=outlier_overrides,
             fitted_at=fitted_at,
             refs=refs,
+            stage_plan=stage_plan,
+            lookup_donor=lookup_donor,
         )
     except ValueError as exc:
         return StationResult(sta, "error", str(exc))
@@ -1095,6 +1107,65 @@ def _load_catalog(
     return read_fit_catalog(resolved), str(resolved)
 
 
+def _load_stage_plans(explicit: Path | None) -> tuple[dict[str, Any], str | None]:
+    """Resolve + read ``analysis.yaml``'s stage plans (explicit > deployed).
+
+    Same explicit-must-exist contract as :func:`_load_catalog`, but **no
+    warning when the deployed file is absent**: a missing fit catalog changes
+    every station's fit, whereas having no stage plan is the ordinary case —
+    almost every station is single-stage. A malformed block is already a hard
+    error inside :func:`~geo_dataread.stage_plan.read_stage_plans`, for the
+    reason that matters here: a plan that failed to load quietly would revert
+    a curated station to single-stage and store different science.
+    """
+    from geo_dataread.stage_plan import default_analysis_yaml_path, read_stage_plans
+
+    if explicit is not None:
+        if not explicit.is_file():
+            raise FileNotFoundError(f"--analysis-yaml: no such file: {explicit}")
+        return dict(read_stage_plans(explicit)), str(explicit)
+    resolved = default_analysis_yaml_path()
+    if resolved is None or not resolved.is_file():
+        return {}, None
+    return dict(read_stage_plans(resolved)), str(resolved)
+
+
+def _deployed_donor_lookup(params_path: Path | None) -> Any:
+    """Build the ``lookup_donor`` a donor hold is resolved against.
+
+    Reads the **deployed** ``detrend_params.json``, not this run's ``--out``.
+    That is a deliberate choice and not an oversight: resolving against the
+    document being written would make the science depend on ``argv`` order —
+    a station borrowing from one estimated later in the same batch would get
+    the deployed value, one borrowing from an earlier station would get the
+    fresh one. Reading the deployed doc throughout gives every borrower the
+    same answer, and it is the document ``gps-detrend-workbench`` resolves
+    donors against, so batch and workbench agree.
+
+    A donor with no record raises ``ValueError`` so
+    :func:`estimate_station` reports it as that station's error and the batch
+    continues.
+    """
+
+    def lookup(code: str) -> dict[str, Any]:
+        from geo_dataread.gps_views import (
+            default_params_path,
+            read_detrend_params,
+            station_detrend_record,
+        )
+
+        doc = read_detrend_params(params_path or default_params_path())
+        rec, _src = station_detrend_record(doc, code)
+        if rec is None:
+            raise ValueError(
+                f"donor {code} has no stored record; estimate and commit "
+                f"{code} before borrowing from it"
+            )
+        return dict(rec)
+
+    return lookup
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """CLI entry point: batch-estimate detrend parameters -> JSON document."""
     parser = argparse.ArgumentParser(
@@ -1145,6 +1216,26 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="outlier_overrides.csv dev override (default: deployed catalog)",
     )
     parser.add_argument(
+        "--analysis-yaml",
+        type=Path,
+        default=None,
+        help=(
+            "analysis.yaml holding per-station stage plans "
+            "(detrend.estimation.stage_plans) dev override; default: the "
+            "deployed file via gps_parser. This is what gps-detrend-workbench "
+            "--commit writes, so a staged station re-estimates staged"
+        ),
+    )
+    parser.add_argument(
+        "--donor-params",
+        type=Path,
+        default=None,
+        help=(
+            "detrend_params.json a 'donor:' hold borrows from (default: the "
+            "deployed document, NOT this run's --out)"
+        ),
+    )
+    parser.add_argument(
         "--model", default=MODEL, help=f"trajectory model (default: {MODEL})"
     )
     parser.add_argument(
@@ -1187,6 +1278,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     catalog, catalog_source = _load_catalog(args.fit_catalog)
+    try:
+        stage_plans, plans_source = _load_stage_plans(args.analysis_yaml)
+    except (FileNotFoundError, ValueError) as exc:
+        # A stage-plan file that is named-but-unreadable stops the batch, the
+        # same way a corrupt fit catalog does: proceeding would write records
+        # that silently differ from the curated ones.
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    if stage_plans:
+        print(f"stage plans: {len(stage_plans)} station(s) from {plans_source}")
+    donor_lookup = _deployed_donor_lookup(args.donor_params)
     defaults = FitDefaults(
         min_span_years=args.min_span_years,
         min_epochs=args.min_epochs,
@@ -1213,6 +1315,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             outlier_overrides=args.outlier_overrides,
             uncert=args.uncert,
             fitted_at=stamp,
+            stage_plan=stage_plans.get(sta),
+            lookup_donor=donor_lookup,
         )
         print(f"{sta}: [{result.status}] {result.detail}")
         if result.status == "error":

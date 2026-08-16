@@ -560,6 +560,11 @@ class TestCli:
         catalog = tmp_path / "fit_windows.csv"
         catalog.write_text(SEED_FIT_CSV)
         out = tmp_path / "detrend_params.json"
+        # An EMPTY analysis.yaml, always passed: without it the batch would
+        # fall back to the deployed one, so whether a station estimates
+        # staged would depend on the operator's own config.
+        empty_yaml = tmp_path / "analysis.yaml"
+        empty_yaml.write_text("{}\n")
         extra = [
             "--fit-catalog",
             str(catalog),
@@ -571,6 +576,8 @@ class TestCli:
             str(tmp_path / "no_protect.csv"),
             "--outlier-overrides",
             str(_empty_overrides(tmp_path)),
+            "--analysis-yaml",
+            str(empty_yaml),
         ]
         return catalog, out, extra
 
@@ -756,3 +763,131 @@ class TestSegmentedEstimation:
         assert not in_window[excised].any()
         assert est.record["segments"] == [[2002.1, 2005.0], [2006.0, 2009.0]]
         assert len(est.record["window"]) == 2
+
+
+class TestStagePlansReachTheBatch:
+    """A committed stage plan must survive a batch re-run.
+
+    ``gps-detrend-workbench --commit`` writes the plan to ``analysis.yaml``
+    precisely so ``gps-estimate-detrend`` will re-fit the station staged.
+    Until this wiring existed, ``read_stage_plans`` had no caller outside its
+    own unit tests: the batch re-estimated every staged station single-stage
+    and overwrote the curated record with different science, silently. The
+    reader was covered; the fact that nothing called it was not — which is
+    why these tests sit at the CLI level and not on the reader.
+    """
+
+    def _plan_yaml(self, tmp_path: Path, stages: list[str], holds: list[str]) -> Path:
+        import yaml
+
+        from geo_dataread.stage_plan import build_stage_plan, stage_plan_to_config
+
+        path = tmp_path / "analysis.yaml"
+        path.write_text(
+            yaml.safe_dump(
+                {
+                    "detrend": {
+                        "estimation": {
+                            "stage_plans": {
+                                "DYNG": stage_plan_to_config(
+                                    build_stage_plan(stages, holds)
+                                )
+                            }
+                        }
+                    }
+                }
+            )
+        )
+        return path
+
+    def _env(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> tuple[Path, list[str]]:
+        catalog, out, extra = TestCli()._cli_env(tmp_path, monkeypatch)
+        del catalog
+        return out, extra
+
+    def _swap_yaml(self, extra: list[str], path: Path) -> list[str]:
+        i = extra.index("--analysis-yaml")
+        return [*extra[: i + 1], str(path), *extra[i + 2 :]]
+
+    def test_committed_plan_is_read_and_lands_in_the_record(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        out, extra = self._env(tmp_path, monkeypatch)
+        plan = self._plan_yaml(
+            tmp_path,
+            ["clean:secular@2020.2:2021.0", "fit:periodic"],
+            ["fit:secular=stage:clean"],
+        )
+        assert main(["DYNG", *self._swap_yaml(extra, plan)]) == 0
+        record = read_detrend_params(out)["stations"]["DYNG"]
+        assert [s["name"] for s in record["stage_plan"]] == ["clean", "fit"]
+        # the plan was honoured, not merely stored: the second stage held
+        # secular at what the first fitted and estimated only the periodic
+        assert record["stages"][0]["free"] == ["offset", "rate"]
+        assert record["stages"][1]["held_sources"] == {"secular": "stage:clean"}
+        assert all(n.startswith(("cos_", "sin_")) for n in record["stages"][1]["free"])
+
+    def test_no_plan_means_no_fragment(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The negative half: an unstaged station stays unstaged.
+
+        Without this, a bug that staged EVERY station would pass the test
+        above and change 37 deployed records.
+        """
+        out, extra = self._env(tmp_path, monkeypatch)
+        assert main(["DYNG", *extra]) == 0
+        assert "stage_plan" not in read_detrend_params(out)["stations"]["DYNG"]
+
+    def test_plan_naming_a_group_the_model_lacks_is_a_loud_station_error(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Wiring converts a silent revert into a named failure.
+
+        A plan committed under one ``--model`` and re-run under the batch's
+        global default cannot be honoured, because the group it names may not
+        exist. That is the improvement: before, the plan was ignored and a
+        plausible-looking single-stage record was written in its place.
+        """
+        out, extra = self._env(tmp_path, monkeypatch)
+        plan = self._plan_yaml(tmp_path, ["only:periodic"], [])
+        rc = main(["DYNG", "--model", "linear", *self._swap_yaml(extra, plan)])
+        assert rc == 1
+        assert "DYNG" not in read_detrend_params(out)["stations"]
+
+    def test_named_but_missing_analysis_yaml_stops_the_batch(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _out, extra = self._env(tmp_path, monkeypatch)
+        rc = main(["DYNG", *self._swap_yaml(extra, tmp_path / "nope.yaml")])
+        assert rc == 2
+
+    def test_donor_hold_resolves_against_the_deployed_document(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Not this run's ``--out`` — that would make science argv-ordered.
+
+        A station borrowing from one estimated LATER in the same batch would
+        otherwise see the deployed value while a station borrowing from an
+        earlier one saw the fresh value.
+        """
+        out, extra = self._env(tmp_path, monkeypatch)
+        assert main(["DYNG", *extra]) == 0
+        donor_doc = tmp_path / "donor.json"
+        doc = read_detrend_params(out)
+        doc["stations"]["OLAC"] = doc["stations"]["DYNG"]
+        donor_doc.write_text(json.dumps(doc))
+
+        plan = self._plan_yaml(tmp_path, ["fit:periodic"], ["secular=donor:OLAC"])
+        args = [*self._swap_yaml(extra, plan), "--donor-params", str(donor_doc)]
+        assert main(["DYNG", *args]) == 0
+        record = read_detrend_params(out)["stations"]["DYNG"]
+        assert "donor:OLAC" in record["stages"][0]["held_sources"]["secular"]
+
+        # and a donor with no record is that station's error, not a crash
+        empty_doc = tmp_path / "empty.json"
+        empty_doc.write_text(json.dumps({**doc, "stations": {}}))
+        args = [*self._swap_yaml(extra, plan), "--donor-params", str(empty_doc)]
+        assert main(["DYNG", *args]) == 1
