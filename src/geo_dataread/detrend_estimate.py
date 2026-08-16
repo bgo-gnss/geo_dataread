@@ -1027,10 +1027,20 @@ def estimate_station(
             "outlier stage aborted (excess-candidate rule) — parameters NOT "
             "stored; review the station before re-running",
         )
-    rate = record["components"][0]["params"][1]
+    # The rate is found by NAME, not at slot 1. Slot 1 is the rate only for a
+    # model carrying a polynomial; under `--model periodic` it is sin_annual,
+    # and this line used to print a seasonal amplitude [mm] as "north rate
+    # ... mm/yr" — plausible units, plausible magnitude, wrong quantity.
+    names = list(record.get("param_names", []))
+    idx = names.index("rate") if "rate" in names else None
+    rate_note = (
+        f"north rate {record['components'][0]['params'][idx]:.2f} mm/yr"
+        if idx is not None
+        else f"no secular rate (model {record['model']!r})"
+    )
     detail = (
         f"window {record['window'][0]:.3f}-{record['window'][1]:.3f}, "
-        f"{record['n_epochs']} epochs, north rate {rate:.2f} mm/yr, "
+        f"{record['n_epochs']} epochs, {rate_note}, "
         f"method {record['detrend_method']}"
     )
     return StationResult(sta, "estimated", detail, record=record)

@@ -891,3 +891,39 @@ class TestStagePlansReachTheBatch:
         empty_doc.write_text(json.dumps({**doc, "stations": {}}))
         args = [*self._swap_yaml(extra, plan), "--donor-params", str(empty_doc)]
         assert main(["DYNG", *args]) == 1
+
+
+class TestRateIsReportedByName:
+    """The batch's per-station line must not call slot 1 "north rate".
+
+    Slot 1 is the secular rate only for a model carrying a polynomial. Under
+    ``--model periodic`` it is ``sin_annual``, and the line printed a seasonal
+    amplitude [mm] as "north rate -0.65 mm/yr" — plausible units, plausible
+    magnitude, wrong quantity, on the only summary an operator watching a
+    batch actually reads.
+    """
+
+    def _run(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, model: str) -> str:
+        monkeypatch.setattr(
+            gps_read, "getData", _fake_getdata({"DYNG": _synthetic_series()})
+        )
+        return estimate_station(
+            "DYNG",
+            model=model,
+            settings=_settings(),
+            protect_windows=tmp_path / "no_protect.csv",
+            outlier_overrides=_empty_overrides(tmp_path),
+        ).detail
+
+    def test_a_model_without_a_rate_says_so(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        detail = self._run(tmp_path, monkeypatch, "periodic")
+        assert "no secular rate (model 'periodic')" in detail
+        assert "mm/yr" not in detail
+
+    def test_a_model_with_a_rate_still_reports_it(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        detail = self._run(tmp_path, monkeypatch, "lineperiodic")
+        assert "north rate 4.35 mm/yr" in detail  # RATE[0]=4.33 + fit noise
