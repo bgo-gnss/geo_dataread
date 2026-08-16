@@ -121,6 +121,8 @@ gps-savetimes ...     # entry: geo_dataread.gps_savetimes:main
 gps-displacemnts ...  # entry: geo_dataread.gps_displ:main   (sic — typo preserved verbatim from pyproject.toml)
 gps-globk-tot ...     # entry: geo_dataread.globk_tot:main — batch GLOBK pre/rap segments → local mb_STA_TOT.dat{1,2,3} (deployed segment_exclusions.csv; --exclusions dev override)
 gps-estimate-detrend ... # entry: geo_dataread.detrend_estimate:main — batch detrend-parameter estimation over local TOT → detrend_params.json (fit_windows.csv per-station windows/gates)
+                         #   --analysis-yaml: per-station STAGE PLANS (detrend.estimation.stage_plans), what gps-detrend-workbench --commit writes
+                         #   --donor-params:  document a 'donor:' hold borrows from (default: the DEPLOYED one, never this run's --out)
 ```
 
 ## Cross-References
@@ -132,4 +134,4 @@ gps-estimate-detrend ... # entry: geo_dataread.detrend_estimate:main — batch d
 
 ---
 
-*Last reviewed: 2026-07-31 (--uncert on the batch estimator, recorded in refs; earlier — station_estimate_from_arrays: fit diagnostics channel beside the record; earlier — local-TOT pipeline Stage B: gps-estimate-detrend estimator CLI + fit_windows.csv catalog; segment_exclusions.csv relocated to gps-config-data via gps_parser resolver)*
+*Last reviewed: 2026-08-16 (the batch now READS the stage plans it stores: `--analysis-yaml` + `estimate_station(stage_plan=, lookup_donor=)`. Until then `read_stage_plans` had no caller outside its own tests, so a re-run silently re-fitted a curated station single-stage — SELF 2.859 vs 2.931 mm/yr north. Donor holds resolve against the DEPLOYED detrend_params.json, not `--out`, or the science would depend on argv order. A plan naming a group the batch's `--model` lacks is now a loud per-station error, which is the improvement; per-station model/terms config is the next gap. Also: the per-station line finds the rate BY NAME — under `--model periodic` slot 1 is `sin_annual` and it printed a seasonal amplitude [mm] as "north rate ... mm/yr"; earlier — --uncert on the batch estimator, recorded in refs; earlier — station_estimate_from_arrays: fit diagnostics channel beside the record; earlier — local-TOT pipeline Stage B: gps-estimate-detrend estimator CLI + fit_windows.csv catalog; segment_exclusions.csv relocated to gps-config-data via gps_parser resolver)*
