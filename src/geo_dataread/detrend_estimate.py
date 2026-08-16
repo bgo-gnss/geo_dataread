@@ -978,6 +978,7 @@ def estimate_station(
     fitted_at: str | None = None,
     stage_plan: Any | None = None,
     lookup_donor: Any | None = None,
+    terms: Sequence[str] | None = None,
 ) -> StationResult:
     """Read one station's local plate-removed TOT series and estimate it.
 
@@ -990,6 +991,11 @@ def estimate_station(
     ``uncert`` is the read-time sigma screen (see :data:`UNCERT`); it rides
     into the record's ``refs`` so a record always says which epochs it could
     have been fitted on.
+
+    ``terms`` are this station's ``--term`` transient specs, from
+    ``analysis.yaml``'s ``detrend.estimation.models`` block. There is no
+    global ``--term`` flag on the batch and there should not be: a transient
+    is declared at an EPOCH, and one epoch is not a fleet-wide quantity.
 
     ``stage_plan`` is this station's :class:`~geo_dataread.stage_plan.StagePlan`
     (``None`` = ordinary single-stage estimation) and ``lookup_donor`` resolves
@@ -1026,6 +1032,7 @@ def estimate_station(
             refs=refs,
             stage_plan=stage_plan,
             lookup_donor=lookup_donor,
+            terms=terms,
         )
     except ValueError as exc:
         return StationResult(sta, "error", str(exc))
@@ -1149,6 +1156,28 @@ def _load_stage_plans(explicit: Path | None) -> tuple[dict[str, Any], str | None
     return dict(read_stage_plans(resolved)), str(resolved)
 
 
+def _load_station_models(explicit: Path | None) -> tuple[dict[str, Any], str | None]:
+    """Resolve + read ``analysis.yaml``'s per-station model/terms overrides.
+
+    Same contract as :func:`_load_stage_plans`, and the same file, so one
+    ``--analysis-yaml`` carries both blocks: a station is curated as a whole
+    (this model, these transients, this stage plan) and splitting that across
+    two paths would let half of it be found.
+    """
+    from geo_dataread.analysis_yaml import read_station_models
+
+    if explicit is not None:
+        if not explicit.is_file():
+            raise FileNotFoundError(f"--analysis-yaml: no such file: {explicit}")
+        return dict(read_station_models(explicit)), str(explicit)
+    from geo_dataread.stage_plan import default_analysis_yaml_path
+
+    resolved = default_analysis_yaml_path()
+    if resolved is None or not resolved.is_file():
+        return {}, None
+    return dict(read_station_models(resolved)), str(resolved)
+
+
 def _deployed_donor_lookup(params_path: Path | None) -> Any:
     """Build the ``lookup_donor`` a donor hold is resolved against.
 
@@ -1255,7 +1284,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         ),
     )
     parser.add_argument(
-        "--model", default=MODEL, help=f"trajectory model (default: {MODEL})"
+        "--model",
+        default=None,
+        help=(
+            f"trajectory model for stations with NO per-station entry "
+            f"(default: {MODEL}). Default is None rather than {MODEL!r} so "
+            f"'not passed' is distinguishable from 'passed the default': an "
+            f"explicit --model overrides a curated per-station model, and the "
+            f"run says which stations that happened to"
+        ),
     )
     parser.add_argument(
         "--min-span-years",
@@ -1307,6 +1344,28 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 2
     if stage_plans:
         print(f"stage plans: {len(stage_plans)} station(s) from {plans_source}")
+    try:
+        station_models, _models_source = _load_station_models(args.analysis_yaml)
+    except (FileNotFoundError, ValueError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    requested = {s.upper() for s in args.stations}
+    curated = {s: m for s, m in station_models.items() if s in requested}
+    if curated:
+        print(f"station models: {len(curated)} of {len(requested)} curated")
+    # CLI beats config -- the house precedence everywhere in this ecosystem
+    # (`_override_settings`: an unset flag defers to the catalog). But it must
+    # not be SILENT: an explicit --model discarding a curated per-station one
+    # is the same shape as the stage plans nobody read, so name the stations.
+    overridden = sorted(s for s, m in curated.items() if m.model is not None)
+    if args.model is not None and overridden:
+        print(
+            f"warning: --model {args.model} overrides the stored model of "
+            f"{len(overridden)} curated station(s): {', '.join(overridden)}. "
+            f"Their stored --term transients still apply. Drop --model to use "
+            f"what was committed.",
+            file=sys.stderr,
+        )
     donor_lookup = _deployed_donor_lookup(args.donor_params)
     defaults = FitDefaults(
         min_span_years=args.min_span_years,
@@ -1324,11 +1383,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         settings = resolve_fit_settings(
             sta, catalog, defaults, catalog_source=catalog_source
         )
+        entry = station_models.get(sta)
         result = estimate_station(
             sta,
             settings=settings,
             tot_dir=args.tot_dir,
-            model=args.model,
+            model=(
+                args.model
+                or (entry.model if entry is not None and entry.model else MODEL)
+            ),
+            terms=(list(entry.terms) if entry is not None and entry.terms else None),
             steps_catalog=args.steps,
             protect_windows=args.protect_windows,
             outlier_overrides=args.outlier_overrides,

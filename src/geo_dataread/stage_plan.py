@@ -651,24 +651,10 @@ def read_stage_plans(path: "str | Path") -> dict[str, StagePlan]:
             A stage plan that silently fails to load would quietly revert a
             station to single-stage estimation and store different science.
     """
-    import yaml
+    from geo_dataread.analysis_yaml import read_station_block
 
     p = Path(path)
-    if not p.exists():
-        return {}
-    doc = yaml.safe_load(p.read_text()) or {}
-    node: object = doc
-    for key in STAGE_PLAN_KEYS:
-        if not isinstance(node, Mapping):
-            return {}
-        node = node.get(key)
-        if node is None:
-            return {}
-    if not isinstance(node, Mapping):
-        raise ValueError(
-            f"{p}: {'.'.join(STAGE_PLAN_KEYS)} must be a mapping of station "
-            f"to stage list, got {node!r}"
-        )
+    node = read_station_block(p, STAGE_PLAN_KEYS, expected="stage list")
     out: dict[str, StagePlan] = {}
     for sta, entries in node.items():
         if not isinstance(entries, (list, tuple)):
@@ -693,34 +679,11 @@ def write_stage_plan(path: "str | Path", station: str, plan: StagePlan | None) -
     they become empty), which is how a staged station is returned to ordinary
     single-stage estimation without hand-editing YAML.
     """
-    import yaml
+    from geo_dataread.analysis_yaml import merge_write_station
 
-    p = Path(path)
-    doc = (yaml.safe_load(p.read_text()) if p.exists() else None) or {}
-    if not isinstance(doc, dict):
-        raise ValueError(f"{p}: top level must be a mapping, got {type(doc).__name__}")
-
-    node: dict[str, object] = doc
-    for key in STAGE_PLAN_KEYS[:-1]:
-        child = node.get(key)
-        if child is None:
-            child = {}
-            node[key] = child
-        if not isinstance(child, dict):
-            raise ValueError(f"{p}: {key!r} must be a mapping, got {child!r}")
-        node = child
-
-    leaf = node.get(STAGE_PLAN_KEYS[-1])
-    if not isinstance(leaf, dict):
-        leaf = {}
-    if plan is None:
-        leaf.pop(station, None)
-    else:
-        leaf[station] = stage_plan_to_config(plan)
-
-    if leaf:
-        node[STAGE_PLAN_KEYS[-1]] = leaf
-    else:
-        node.pop(STAGE_PLAN_KEYS[-1], None)
-
-    p.write_text(yaml.safe_dump(doc, sort_keys=False, allow_unicode=True))
+    merge_write_station(
+        path,
+        STAGE_PLAN_KEYS,
+        station,
+        None if plan is None else stage_plan_to_config(plan),
+    )

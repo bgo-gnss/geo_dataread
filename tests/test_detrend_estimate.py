@@ -976,3 +976,109 @@ class TestStagedAndTermTogether:
         assert est is not None
         assert "terms" not in est.record
         assert est.record["record_version"] == 1
+
+
+class TestPerStationModelsReachTheBatch:
+    """The batch has ONE global --model and no --term; stations are curated.
+
+    Reading the stage plans (e6dd887) turned "silently re-fit single-stage"
+    into a loud per-station error, but a station curated under
+    ``--model periodic`` still could not RE-ESTIMATE: the plan names a group
+    the global model has no terms for. This block is what makes it estimate.
+    """
+
+    def _yaml(self, tmp_path: Path, models: dict[str, Any]) -> Path:
+        import yaml
+
+        path = tmp_path / "analysis.yaml"
+        path.write_text(yaml.safe_dump({"detrend": {"estimation": {"models": models}}}))
+        return path
+
+    def _env(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> tuple[Path, list[str]]:
+        _catalog, out, extra = TestCli()._cli_env(tmp_path, monkeypatch)
+        return out, extra
+
+    def _swap(self, extra: list[str], path: Path) -> list[str]:
+        i = extra.index("--analysis-yaml")
+        return [*extra[: i + 1], str(path), *extra[i + 2 :]]
+
+    def test_a_stored_model_is_used_without_any_flag(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        out, extra = self._env(tmp_path, monkeypatch)
+        cfg = self._yaml(tmp_path, {"DYNG": {"model": "periodic"}})
+        assert main(["DYNG", *self._swap(extra, cfg)]) == 0
+        record = read_detrend_params(out)["stations"]["DYNG"]
+        assert record["model"] == "periodic"
+        assert "rate" not in record["param_names"]
+
+    def test_stored_terms_produce_a_v2_record(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """`--term` transients are the reason record_version 2 exists."""
+        out, extra = self._env(tmp_path, monkeypatch)
+        cfg = self._yaml(tmp_path, {"DYNG": {"terms": ["log@2021.0,tau=1.0"]}})
+        assert main(["DYNG", *self._swap(extra, cfg)]) == 0
+        record = read_detrend_params(out)["stations"]["DYNG"]
+        assert record["record_version"] == 2
+        assert "log_amp_1" in record["param_names"]
+        assert {t["kind"] for t in record["terms"]} == {
+            "polynomial",
+            "seasonal",
+            "log_transient",
+        }
+
+    def test_a_station_with_no_entry_is_untouched(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The 37 deployed stations have no entry — nothing may move."""
+        out, extra = self._env(tmp_path, monkeypatch)
+        cfg = self._yaml(tmp_path, {"OTHR": {"model": "periodic"}})
+        assert main(["DYNG", *self._swap(extra, cfg)]) == 0
+        record = read_detrend_params(out)["stations"]["DYNG"]
+        assert record["model"] == de.MODEL
+        assert record["record_version"] == 1
+
+    def test_an_explicit_model_wins_but_says_so(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: Any
+    ) -> None:
+        """CLI beats config — the house precedence — but never silently.
+
+        `_override_settings` establishes that an unset flag defers to the
+        catalog, so an explicit one must win. An explicit --model discarding
+        a curated per-station model without a word would be the stage-plan
+        failure again, one config block over.
+        """
+        out, extra = self._env(tmp_path, monkeypatch)
+        cfg = self._yaml(tmp_path, {"DYNG": {"model": "periodic"}})
+        assert main(["DYNG", "--model", "linear", *self._swap(extra, cfg)]) == 0
+        assert read_detrend_params(out)["stations"]["DYNG"]["model"] == "linear"
+        err = capsys.readouterr().err
+        assert "overrides the stored model" in err and "DYNG" in err
+
+    def test_stored_terms_survive_an_explicit_model(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """--model overrides the MODEL; it says nothing about transients.
+
+        There is no global --term to override them with, and there should not
+        be: a transient is declared at an EPOCH, which is not a fleet-wide
+        quantity.
+        """
+        out, extra = self._env(tmp_path, monkeypatch)
+        cfg = self._yaml(
+            tmp_path, {"DYNG": {"model": "periodic", "terms": ["log@2021.0,tau=1.0"]}}
+        )
+        assert main(["DYNG", "--model", "linear", *self._swap(extra, cfg)]) == 0
+        record = read_detrend_params(out)["stations"]["DYNG"]
+        assert record["param_names"][:2] == ["offset", "rate"]  # linear won
+        assert "log_amp_1" in record["param_names"]  # the transient stayed
+
+    def test_a_malformed_block_stops_the_batch(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _out, extra = self._env(tmp_path, monkeypatch)
+        cfg = self._yaml(tmp_path, {"DYNG": {"terms": ["log@2021.0"]}})
+        assert main(["DYNG", *self._swap(extra, cfg)]) == 2
