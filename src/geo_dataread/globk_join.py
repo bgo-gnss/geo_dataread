@@ -359,17 +359,29 @@ def estimate_segment_offset(
             return float(np.median(finite)), len(seg_idx), True
 
     # gap: boundary pair from the first finite segment value and the last
-    # accumulated epoch strictly before it.
+    # accumulated epoch strictly before it that HAS a finite value.
+    #
+    # Requiring the partner to be finite is not defensive tidiness: the
+    # accumulated series is the min-sigma dedup of everything joined so far,
+    # and the winning row at an epoch can carry a MASKED value (`********`
+    # parses to NaN) while still having the smaller sigma. Taking the latest
+    # earlier epoch unconditionally then made the offset NaN, which reached
+    # `wrap_correction` and died in `round()` as a bare "cannot convert float
+    # NaN to integer" -- no station, no segment, no epoch, and it aborted the
+    # whole batch rather than the one axis. Measured on okada's DGAR East and
+    # Up: boundary partner 1998.03972 is NaN, first finite segment epoch
+    # 1998.04246. The overlap branch above already restricts to finite diffs;
+    # this is the same rule for the fallback.
     seg_finite = np.nonzero(np.isfinite(segment.values))[0]
     if seg_finite.size == 0:
         raise GlobkJoinError(f"{segment.path}: no finite values to estimate datum")
     first_i = int(seg_finite[0])
     first_epoch = float(segment.epochs[first_i])
-    earlier = np.nonzero(acc_epochs < first_epoch)[0]
+    earlier = np.nonzero((acc_epochs < first_epoch) & np.isfinite(acc_values))[0]
     if earlier.size == 0:
         raise GlobkJoinError(
-            f"{segment.path}: no overlap and no accumulated epoch before "
-            f"{first_epoch:.5f}; cannot estimate datum offset"
+            f"{segment.path}: no overlap and no accumulated epoch with a finite "
+            f"value before {first_epoch:.5f}; cannot estimate datum offset"
         )
     raw = float(segment.values[first_i] - acc_values[int(earlier[-1])])
     return raw, 0, False
@@ -389,7 +401,20 @@ def wrap_correction(
     Numerical notes: ``round`` is banker's rounding, irrelevant here since
     valid inputs are ≪ q/2 away from the lattice; the |Δ̂ − c| ≤ r_max
     guard in :func:`join_segments` rejects ambiguous offsets.
+
+    Raises:
+        GlobkJoinError: on a non-finite Δ̂. ``round()`` would otherwise raise
+            a bare ``ValueError: cannot convert float NaN to integer`` naming
+            nothing, which is how a single bad boundary pair aborted a
+            379-station batch instead of failing one axis. Callers upstream
+            should not produce NaN; this makes it impossible for one to do so
+            silently.
     """
+    if not np.isfinite(raw_offset_m):
+        raise GlobkJoinError(
+            f"non-finite raw datum offset ({raw_offset_m}); cannot snap to the "
+            f"{wrap_quantum_m} m wrap lattice"
+        )
     return wrap_quantum_m * round(raw_offset_m / wrap_quantum_m)
 
 
