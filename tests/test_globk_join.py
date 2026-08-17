@@ -562,3 +562,75 @@ class TestTotWriter:
         out = write_joined_series(joined, tmp_path / "mb_SENG_TOT.dat1")
         assert out == tmp_path / "mb_SENG_TOT.dat1"
         assert out.read_text() == format_tot_file(joined)
+
+
+class TestBoundaryPartnerMustBeFinite:
+    """The gap fallback must skip masked accumulated values.
+
+    The accumulated series is the min-σ dedup of everything joined so far, and
+    the winning row at an epoch can carry a MASKED value (`********` → NaN)
+    while still having the smaller σ. Taking the latest earlier epoch
+    unconditionally made the raw offset NaN, which reached `wrap_correction`
+    and died in `round()` as a bare "cannot convert float NaN to integer" —
+    naming no station, no segment and no epoch, and aborting a whole
+    379-station batch rather than one axis. Found on okada (DGAR East/Up:
+    boundary partner 1998.03972 masked, first finite segment epoch
+    1998.04246).
+    """
+
+    @staticmethod
+    def _seg(tmp_path, name, epochs, values, sigmas):
+        p = tmp_path / name
+        sta, seg, ax = name.split("_")[1], name.split("_")[2].split(".")[0], name[-1]
+        comp = {"1": "N", "2": "E", "3": "U"}[ax]
+        lines = [
+            "Globk Analysis GGVer 10.71.021 Wed Sep 28 13:04:52 EDT 2022",
+            f"{sta}_{seg} to {comp} Solution  1 +   -809257.688 m",
+            " ",
+        ]
+        for t, v, s in zip(epochs, values, sigmas, strict=True):
+            vs = "********" if v is None else f"{v:.5f}"
+            ss = "********" if s is None else f"{s:.5f}"
+            lines.append(f" {t:.5f} {vs:>12s} {ss}")
+        p.write_text("\n".join(lines) + "\n")
+        return read_mb_segment(p)
+
+    def test_a_masked_boundary_partner_is_skipped_not_used(self, tmp_path) -> None:
+        # accumulated: last epoch before the gap is MASKED, the one before is not
+        acc = self._seg(
+            tmp_path,
+            "mb_TEST_1PS.dat1",
+            [2000.0, 2000.1, 2000.2],
+            [1.0, 2.0, None],
+            [0.001, 0.001, 0.001],
+        )
+        # the next segment starts after the gap, 10 m off datum
+        nxt = self._seg(
+            tmp_path,
+            "mb_TEST_2PS.dat1",
+            [2000.5, 2000.6],
+            [12.0, 12.1],
+            [0.001, 0.001],
+        )
+        raw, n_overlap, have_overlap = estimate_segment_offset(
+            acc.epochs, acc.values, nxt
+        )
+        assert n_overlap == 0 and have_overlap is False
+        assert np.isfinite(raw), "a masked partner must not produce a NaN offset"
+        # 12.0 measured against the last FINITE accumulated value (2.0), not NaN
+        assert raw == pytest.approx(10.0)
+        assert wrap_correction(raw) == pytest.approx(10.0)
+
+    def test_all_earlier_values_masked_is_a_named_error(self, tmp_path) -> None:
+        acc = self._seg(
+            tmp_path, "mb_TEST_1PS.dat1", [2000.0, 2000.1], [None, None], [0.001, 0.001]
+        )
+        nxt = self._seg(tmp_path, "mb_TEST_2PS.dat1", [2000.5], [12.0], [0.001])
+        with pytest.raises(GlobkJoinError, match="no accumulated epoch with a finite"):
+            estimate_segment_offset(acc.epochs, acc.values, nxt)
+
+    def test_wrap_correction_refuses_a_non_finite_offset(self) -> None:
+        """Defence in depth: a named error, never `round()`'s bare ValueError."""
+        for bad in (float("nan"), float("inf"), float("-inf")):
+            with pytest.raises(GlobkJoinError, match="non-finite raw datum offset"):
+                wrap_correction(bad)
