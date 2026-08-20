@@ -1,0 +1,538 @@
+"""The staged-estimation grammar: happy paths, and the refusals that matter.
+
+Most of these tests pin REFUSALS rather than results.  Each refused spelling
+is one that would otherwise change stored science silently — a renamed stage
+flipping a borrow into a self-reference, flag order deciding which stage a hold
+binds to, or ``@`` meaning either "inherit" or "the full span".
+"""
+
+from __future__ import annotations
+
+import pytest
+
+from geo_dataread.stage_plan import (
+    DonorRef,
+    StagePlan,
+    StageRef,
+    build_stage_plan,
+    parse_hold_spec,
+    parse_stage_spec,
+    stage_plan_from_config,
+    stage_plan_to_config,
+)
+
+
+class TestParseStageSpec:
+    def test_groups_and_window(self) -> None:
+        st = parse_stage_spec("clean:secular,periodic@2016.6:2019.0")
+        assert st.name == "clean"
+        assert st.free == ("secular", "periodic")
+        assert st.segments == ((2016.6, 2019.0),)
+
+    def test_omitting_at_inherits(self) -> None:
+        # No '@' at all: segments is None, which estimate_staged reads as
+        # "inherit the caller's domain".
+        assert parse_stage_spec("long:secular").segments is None
+
+    def test_colon_only_is_the_full_span(self) -> None:
+        # '@:' is BOTH bounds open — distinct from inheriting, and the
+        # distinction bites whenever the caller passed --segment.
+        assert parse_stage_spec("long:secular@:").segments == ((None, None),)
+
+    def test_bare_at_is_refused(self) -> None:
+        # The plan's own example wrote '--stage long:secular@'. It is ambiguous
+        # between the two cases above, so it is rejected rather than guessed.
+        with pytest.raises(ValueError, match="bare trailing '@' is ambiguous"):
+            parse_stage_spec("long:secular@")
+
+    def test_open_bounds_and_multiple_segments(self) -> None:
+        st = parse_stage_spec("s:secular@:2008.35;2008.7:")
+        assert st.segments == ((None, 2008.35), (2008.7, None))
+
+    @pytest.mark.parametrize(
+        "spec, match",
+        [
+            ("noseparator", "the ':' after the stage name is required"),
+            (":secular", "empty stage name"),
+            ("s:", "declares no free term group"),
+            ("s:secular,secular", "repeats group"),
+            ("s:secular@2019:2016", r"end 2016.0 <= start 2019.0"),
+            ("s:secular@notayear:2019", "not a fractional year"),
+            ("s:secular@2016", "must be 'START:END'"),
+        ],
+    )
+    def test_rejections(self, spec: str, match: str) -> None:
+        with pytest.raises(ValueError, match=match):
+            parse_stage_spec(spec)
+
+
+class TestParseHoldSpec:
+    def test_stage_and_donor_kinds(self) -> None:
+        assert parse_hold_spec("periodic=stage:clean") == (
+            None,
+            "periodic",
+            StageRef("clean"),
+        )
+        assert parse_hold_spec("secular=donor:OLAC") == (
+            None,
+            "secular",
+            DonorRef("OLAC"),
+        )
+
+    def test_explicit_stage_binding(self) -> None:
+        assert parse_hold_spec("long:periodic=stage:clean") == (
+            "long",
+            "periodic",
+            StageRef("clean"),
+        )
+
+    def test_bare_value_is_refused_and_names_both_spellings(self) -> None:
+        # THE refusal. 'clean' could be a stage name or a station code, and the
+        # two produce different record provenance, so renaming a stage must
+        # never silently turn a self-reference into a borrow.
+        with pytest.raises(ValueError) as exc:
+            parse_hold_spec("periodic=clean")
+        msg = str(exc.value)
+        assert "periodic=stage:" in msg and "periodic=donor:" in msg
+        assert "never inferred" in msg
+
+    @pytest.mark.parametrize(
+        "spec",
+        [
+            "periodic",
+            "=stage:clean",
+            "periodic=",
+            "periodic=bogus:clean",
+            "periodic=stage:",
+            ":periodic=stage:clean",
+            "long:=stage:clean",
+        ],
+    )
+    def test_rejections(self, spec: str) -> None:
+        with pytest.raises(ValueError):
+            parse_hold_spec(spec)
+
+
+class TestBuildStagePlan:
+    def test_the_askja_manoeuvre(self) -> None:
+        # katlafitlong as two stages, straight from the program plan.
+        plan = build_stage_plan(
+            ["clean:secular,periodic@2001.6:2019.5", "long:secular"],
+            ["long:periodic=stage:clean"],
+        )
+        assert plan.names == ("clean", "long")
+        assert plan.stages[0].segments == ((2001.6, 2019.5),)
+        assert plan.stages[1].segments is None
+        assert plan.stages[1].held == {"periodic": StageRef("clean")}
+        assert plan.donors == ()
+
+    def test_borrow_one_liner_needs_no_stage_prefix(self) -> None:
+        # JONC borrows OLAC's secular and fits its own seasonal: the stage
+        # names what it DOES estimate, and the borrowed group is held.
+        plan = build_stage_plan(["fit:periodic"], ["secular=donor:OLAC"])
+        assert plan.stages[0].held == {"secular": DonorRef("OLAC")}
+        assert plan.donors == ("OLAC",)
+
+    def test_unbound_hold_refused_once_ambiguous(self) -> None:
+        # Same hold spelling that is fine with one stage becomes an error with
+        # two, rather than binding to whichever --stage came last.
+        with pytest.raises(ValueError, match="does not say which stage"):
+            build_stage_plan(["a:secular", "b:secular"], ["periodic=stage:a"])
+
+    def test_error_names_the_fix_and_the_reason(self) -> None:
+        with pytest.raises(ValueError) as exc:
+            build_stage_plan(["a:secular", "b:secular"], ["periodic=stage:a"])
+        msg = str(exc.value)
+        assert "--hold STAGE:periodic=stage:a" in msg
+        assert "ORDER" in msg
+
+    def test_hold_must_reference_an_earlier_stage(self) -> None:
+        with pytest.raises(ValueError, match="not earlier than"):
+            build_stage_plan(
+                ["clean:secular", "long:periodic"],
+                ["clean:periodic=stage:long"],
+            )
+
+    def test_hold_cannot_reference_itself(self) -> None:
+        with pytest.raises(ValueError, match="not earlier than"):
+            build_stage_plan(["a:secular"], ["a:periodic=stage:a"])
+
+    def test_stage_ref_must_actually_fit_the_group(self) -> None:
+        with pytest.raises(ValueError, match="does not fit group"):
+            build_stage_plan(
+                ["clean:secular", "long:secular"],
+                ["long:periodic=stage:clean"],
+            )
+
+    def test_group_cannot_be_free_and_held(self) -> None:
+        with pytest.raises(ValueError, match="estimated or held, never both"):
+            build_stage_plan(
+                ["clean:periodic", "long:secular"],
+                ["long:secular=stage:clean"],
+            )
+
+    def test_undeclared_stage_names(self) -> None:
+        with pytest.raises(ValueError, match="not\n?\\s*declared|not declared"):
+            build_stage_plan(["a:secular"], ["a:periodic=stage:nope"])
+        with pytest.raises(ValueError, match="not declared"):
+            build_stage_plan(["a:secular"], ["nope:periodic=stage:a"])
+
+    def test_duplicate_stage_names(self) -> None:
+        with pytest.raises(ValueError, match="duplicate stage name"):
+            build_stage_plan(["a:secular", "a:periodic"])
+
+    def test_hold_without_stage_is_refused_with_a_worked_example(self) -> None:
+        with pytest.raises(ValueError, match="--stage fit:secular"):
+            build_stage_plan([], ["secular=donor:OLAC"])
+
+    def test_group_names_are_not_enumerated(self) -> None:
+        # A group this module has never heard of must pass through untouched,
+        # so the transient terms become addressable with no CLI change.
+        plan = build_stage_plan(
+            ["a:transient,secular", "b:secular"], ["b:transient=stage:a"]
+        )
+        assert plan.stages[0].free == ("transient", "secular")
+        assert plan.stages[1].held == {"transient": StageRef("a")}
+
+    def test_empty_plan_refused(self) -> None:
+        with pytest.raises(ValueError, match="at least one stage"):
+            StagePlan(())
+
+
+class TestConfigRoundTrip:
+    @pytest.mark.parametrize(
+        "stages, holds",
+        [
+            (
+                ["clean:secular,periodic@2001.6:2019.5", "long:secular"],
+                ["long:periodic=stage:clean"],
+            ),
+            (["fit:periodic"], ["secular=donor:OLAC"]),
+            (["a:secular@:2008.35;2008.7:"], []),
+            (["a:secular@:"], []),
+            (["a:transient,secular", "b:secular"], ["b:transient=stage:a"]),
+        ],
+    )
+    def test_plan_to_config_and_back(self, stages: list[str], holds: list[str]) -> None:
+        plan = build_stage_plan(stages, holds)
+        again = stage_plan_from_config(stage_plan_to_config(plan))
+        assert again == plan
+        # and stable on a second pass
+        assert stage_plan_to_config(again) == stage_plan_to_config(plan)
+
+    def test_inherit_survives_the_round_trip(self) -> None:
+        # segments=None must not be rendered as '@:' — that would silently
+        # convert "inherit the caller's domain" into "the full span".
+        cfg = stage_plan_to_config(build_stage_plan(["long:secular"]))
+        assert "segments" not in cfg[0]
+        assert stage_plan_from_config(cfg).stages[0].segments is None
+
+    def test_donor_stored_as_pointer_not_values(self) -> None:
+        cfg = stage_plan_to_config(
+            build_stage_plan(["fit:periodic"], ["secular=donor:OLAC"])
+        )
+        assert cfg[0]["held"] == {"secular": "donor:OLAC"}
+
+    def test_config_rejects_incomplete_entries(self) -> None:
+        with pytest.raises(ValueError, match="needs 'name' and 'free'"):
+            stage_plan_from_config([{"free": ["secular"]}])
+        with pytest.raises(ValueError, match="needs 'name' and 'free'"):
+            stage_plan_from_config([{"name": "a"}])
+
+
+class TestDonorResolution:
+    """Donor holds are POINTERS: re-estimating a donor must propagate."""
+
+    @staticmethod
+    def _record(params: list[float], fitted_at: str = "2026-01-01") -> dict:
+        return {
+            "model": "lineperiodic",
+            "fitted_at": fitted_at,
+            "components": [{"params": params}],
+        }
+
+    def test_slices_the_right_group(self) -> None:
+        from geo_dataread.stage_plan import donor_group_values
+
+        rec = self._record([10.0, 2.0, 1.0, -1.0, 0.5, -0.5])
+        assert list(donor_group_values(rec, "secular", component=0, donor="OLAC")) == [
+            10.0,
+            2.0,
+        ]
+        assert list(donor_group_values(rec, "periodic", component=0, donor="OLAC")) == [
+            1.0,
+            -1.0,
+            0.5,
+            -0.5,
+        ]
+
+    def test_reestimated_donor_propagates(self) -> None:
+        # THE test for the pointer decision. The plan is unchanged; only the
+        # donor's record changes. A copy-semantics implementation would keep
+        # serving the old numbers here.
+        from geo_dataread.stage_plan import resolve_stage_plan
+
+        plan = build_stage_plan(["fit:periodic"], ["secular=donor:OLAC"])
+        store = {"OLAC": self._record([10.0, 2.0, 0, 0, 0, 0], "2026-01-01")}
+
+        before = resolve_stage_plan(plan, lookup_donor=lambda s: store[s], component=0)
+        assert list(before[0].held["secular"].values) == [10.0, 2.0]
+
+        store["OLAC"] = self._record([11.0, 2.5, 0, 0, 0, 0], "2026-07-01")
+        after = resolve_stage_plan(plan, lookup_donor=lambda s: store[s], component=0)
+        assert list(after[0].held["secular"].values) == [11.0, 2.5]
+
+    def test_provenance_names_donor_and_vintage(self) -> None:
+        # A stored borrow can then be CHECKED against a re-estimated donor
+        # rather than merely asserted.
+        from geo_dataread.stage_plan import resolve_stage_plan
+
+        plan = build_stage_plan(["fit:periodic"], ["secular=donor:OLAC"])
+        out = resolve_stage_plan(
+            plan,
+            lookup_donor=lambda s: self._record([1, 2, 0, 0, 0, 0], "2026-07-01"),
+            component=0,
+        )
+        assert out[0].held["secular"].source == "donor:OLAC@2026-07-01"
+
+    def test_stage_refs_need_no_lookup(self) -> None:
+        from gps_analysis.staged import HeldFromStage
+
+        from geo_dataread.stage_plan import resolve_stage_plan
+
+        plan = build_stage_plan(
+            ["clean:secular,periodic", "long:secular"],
+            ["long:periodic=stage:clean"],
+        )
+
+        def _boom(sta: str) -> dict:
+            raise AssertionError(f"should not look up {sta}")
+
+        out = resolve_stage_plan(plan, lookup_donor=_boom, component=0)
+        assert out[1].held["periodic"] == HeldFromStage("clean")
+
+    def test_missing_donor_is_loud(self) -> None:
+        from geo_dataread.stage_plan import resolve_stage_plan
+
+        plan = build_stage_plan(["fit:periodic"], ["secular=donor:NOPE"])
+        with pytest.raises(KeyError):
+            resolve_stage_plan(plan, lookup_donor=lambda s: {}[s], component=0)
+
+    def test_group_absent_from_donor_model_is_refused(self) -> None:
+        # An empty borrow would hold a group at nothing and still look like a
+        # successful fit.
+        from geo_dataread.stage_plan import donor_group_values
+
+        rec = {"model": "linear", "components": [{"params": [1.0, 2.0]}]}
+        with pytest.raises(ValueError, match="no 'periodic' term"):
+            donor_group_values(rec, "periodic", component=0, donor="OLAC")
+
+    def test_malformed_donor_records(self) -> None:
+        from geo_dataread.stage_plan import donor_group_values
+
+        with pytest.raises(ValueError, match="no model code"):
+            donor_group_values(
+                {"components": [{"params": [1.0]}]}, "secular", component=0, donor="X"
+            )
+        with pytest.raises(ValueError, match="no component 3"):
+            donor_group_values(
+                self._record([1, 2, 0, 0, 0, 0]), "secular", component=3, donor="X"
+            )
+        with pytest.raises(ValueError, match="but the record stores"):
+            donor_group_values(
+                {"model": "lineperiodic", "components": [{"params": [1.0, 2.0]}]},
+                "secular",
+                component=0,
+                donor="X",
+            )
+
+
+class TestAnalysisYamlPersistence:
+    """Stage plans live in analysis.yaml beside fit_windows and use_sta."""
+
+    @staticmethod
+    def _write(tmp_path, doc: dict):
+        import yaml
+
+        p = tmp_path / "analysis.yaml"
+        p.write_text(yaml.safe_dump(doc, sort_keys=False))
+        return p
+
+    def test_absent_file_block_or_map_all_mean_none(self, tmp_path) -> None:
+        from geo_dataread.stage_plan import read_stage_plans
+
+        assert read_stage_plans(tmp_path / "nope.yaml") == {}
+        assert read_stage_plans(self._write(tmp_path, {})) == {}
+        assert read_stage_plans(self._write(tmp_path, {"detrend": {}})) == {}
+        assert (
+            read_stage_plans(
+                self._write(tmp_path, {"detrend": {"estimation": {"stage_plans": {}}}})
+            )
+            == {}
+        )
+
+    def test_reads_a_plan(self, tmp_path) -> None:
+        from geo_dataread.stage_plan import read_stage_plans
+
+        plan = build_stage_plan(
+            ["clean:secular,periodic@2001.6:2019.5", "long:secular"],
+            ["long:periodic=stage:clean"],
+        )
+        p = self._write(
+            tmp_path,
+            {
+                "detrend": {
+                    "estimation": {"stage_plans": {"OLAC": stage_plan_to_config(plan)}}
+                }
+            },
+        )
+        assert read_stage_plans(p) == {"OLAC": plan}
+
+    def test_malformed_plan_names_the_station(self, tmp_path) -> None:
+        # A stage plan that silently failed to load would quietly revert the
+        # station to single-stage estimation and store different science.
+        from geo_dataread.stage_plan import read_stage_plans
+
+        p = self._write(
+            tmp_path,
+            {"detrend": {"estimation": {"stage_plans": {"OLAC": [{"name": "a"}]}}}},
+        )
+        with pytest.raises(ValueError, match="OLAC"):
+            read_stage_plans(p)
+
+        p = self._write(
+            tmp_path, {"detrend": {"estimation": {"stage_plans": {"OLAC": "nope"}}}}
+        )
+        with pytest.raises(ValueError, match="must be a list of stages"):
+            read_stage_plans(p)
+
+    def test_write_preserves_everything_else(self, tmp_path) -> None:
+        # The --commit contract: merge ONE station, never rewrite the doc.
+        import yaml
+
+        from geo_dataread.stage_plan import read_stage_plans, write_stage_plan
+
+        p = self._write(
+            tmp_path,
+            {
+                "version": 0,
+                "outliers": {"window_n_sigma": 4.0},
+                "detrend": {
+                    "default_model": "lineperiodic",
+                    "estimation": {
+                        "min_epochs": 365,
+                        "use_sta": {"JONC": "OLAC"},
+                        "stage_plans": {"KASC": [{"name": "f", "free": ["secular"]}]},
+                    },
+                },
+            },
+        )
+        plan = build_stage_plan(["clean:secular,periodic"], [])
+        write_stage_plan(p, "OLAC", plan)
+
+        doc = yaml.safe_load(p.read_text())
+        assert doc["version"] == 0
+        assert doc["outliers"] == {"window_n_sigma": 4.0}
+        assert doc["detrend"]["default_model"] == "lineperiodic"
+        assert doc["detrend"]["estimation"]["min_epochs"] == 365
+        assert doc["detrend"]["estimation"]["use_sta"] == {"JONC": "OLAC"}
+        # the other station's plan survives
+        assert set(read_stage_plans(p)) == {"KASC", "OLAC"}
+        assert read_stage_plans(p)["OLAC"] == plan
+
+    def test_write_into_a_file_without_the_blocks(self, tmp_path) -> None:
+        from geo_dataread.stage_plan import read_stage_plans, write_stage_plan
+
+        p = self._write(tmp_path, {"version": 0})
+        plan = build_stage_plan(["fit:secular"])
+        write_stage_plan(p, "SELF", plan)
+        assert read_stage_plans(p) == {"SELF": plan}
+
+    def test_removal_returns_a_station_to_single_stage(self, tmp_path) -> None:
+        import yaml
+
+        from geo_dataread.stage_plan import read_stage_plans, write_stage_plan
+
+        p = self._write(tmp_path, {"version": 0})
+        write_stage_plan(p, "SELF", build_stage_plan(["fit:secular"]))
+        write_stage_plan(p, "OLAC", build_stage_plan(["fit:periodic"]))
+        write_stage_plan(p, "SELF", None)
+        assert set(read_stage_plans(p)) == {"OLAC"}
+
+        write_stage_plan(p, "OLAC", None)
+        assert read_stage_plans(p) == {}
+        # the emptied block is cleaned up rather than left as a stub
+        assert (
+            "stage_plans" not in yaml.safe_load(p.read_text())["detrend"]["estimation"]
+        )
+
+    def test_write_round_trips_through_the_file(self, tmp_path) -> None:
+        from geo_dataread.stage_plan import read_stage_plans, write_stage_plan
+
+        p = self._write(tmp_path, {})
+        for sta, stages, holds in [
+            (
+                "OLAC",
+                ["clean:secular,periodic@2001.6:2019.5", "long:secular"],
+                ["long:periodic=stage:clean"],
+            ),
+            ("JONC", ["fit:periodic"], ["secular=donor:OLAC"]),
+            ("SELF", ["a:secular@:2008.35;2008.7:"], []),
+        ]:
+            write_stage_plan(p, sta, build_stage_plan(stages, holds))
+        got = read_stage_plans(p)
+        assert got["OLAC"] == build_stage_plan(
+            ["clean:secular,periodic@2001.6:2019.5", "long:secular"],
+            ["long:periodic=stage:clean"],
+        )
+        assert got["JONC"].donors == ("OLAC",)
+        assert got["SELF"].stages[0].segments == ((None, 2008.35), (2008.7, None))
+
+
+class TestRecordIsValidConfig:
+    """A stored record's stage_plan parses back into the plan that made it.
+
+    ``StagedEstimate.to_record_fragment`` and :func:`stage_plan_to_config`
+    emit the SAME keys and the same ``stage:``/``donor:`` hold spellings.
+    That makes "what you judged is what got stored" checkable by parsing the
+    record, rather than asserted in a docstring.
+    """
+
+    def test_staged_record_fragment_parses_as_a_plan(self) -> None:
+        import numpy as np
+        from gps_analysis import HeldFromStage, Stage, estimate_staged
+
+        from geo_dataread.stage_plan import stage_plan_from_config
+
+        rng = np.random.default_rng(0)
+        t = np.linspace(2000, 2020, 900)
+        y = 5 + 2 * (t - 2000) + 3 * np.cos(2 * np.pi * t) + rng.normal(0, 0.5, t.size)
+
+        cli = ["clean:secular,periodic@2001.6:2012.0", "long:secular"]
+        holds = ["long:periodic=stage:clean"]
+        declared = build_stage_plan(cli, holds)
+
+        est = estimate_staged(
+            "lineperiodic",
+            t,
+            y,
+            plan=[
+                Stage("clean", ("secular", "periodic"), segments=[(2001.6, 2012.0)]),
+                Stage("long", ("secular",), held={"periodic": HeldFromStage("clean")}),
+            ],
+        )
+        # The record round-trips into exactly the plan the operator declared.
+        assert (
+            stage_plan_from_config(est.to_record_fragment()["stage_plan"]) == declared
+        )
+
+    def test_null_segments_in_a_record_mean_inherit(self) -> None:
+        # to_record_fragment writes `"segments": null` explicitly where the
+        # config writer omits the key; both must read back as "inherit", not
+        # as the full span.
+        from geo_dataread.stage_plan import stage_plan_from_config
+
+        plan = stage_plan_from_config(
+            [{"name": "long", "free": ["secular"], "segments": None}]
+        )
+        assert plan.stages[0].segments is None

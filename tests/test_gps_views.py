@@ -37,7 +37,12 @@ from gps_analysis import (  # noqa: E402
     evaluate_record,
 )
 
-FRAME = "plate:ITRF2008"
+# The REAL convention (detrend_estimate.FRAME; all 33 deployed records carry
+# it). This fixture previously invented "plate:ITRF2008", which no record uses
+# — it could, because the §2.5 frame guard was dead code: the ref="detrend"
+# read paths passed no frame, so nothing ever compared record to series. With
+# the guard live the fixture has to tell the truth.
+FRAME = "plate_removed"
 WINDOW = (2015.0, 2020.0)  # pre-unrest fit window for the SENG fixture
 
 
@@ -177,6 +182,76 @@ def test_detect_view_outliers_flags_spikes():
     assert prov["n_flagged"] == int(np.count_nonzero(flags))
     # conservative: well under 5% of the series flagged
     assert np.count_nonzero(flags) < 0.05 * y.size
+
+
+def _synthetic_trailing_spike(offset_from_end=2):
+    """Big spike close to the END, with too few epochs after it to judge by.
+
+    The step statistic needs 3 post-samples, so a spike inside the last
+    couple of epochs leaves D indeterminate — the shape the provisional
+    mask exists for (HOFN 2026-07-24, −58.8 mm, 2 d from the end).
+    Returns the spike index too, so a test can assert on that epoch.
+    """
+    t, y, sigma, _ = _synthetic(n_spikes=0)
+    y = y.copy()
+    idx = y.shape[1] - 1 - offset_from_end
+    y[:, idx] += 60.0
+    return t, y, sigma, idx
+
+
+def test_provisional_marks_recent_indeterminate_candidates():
+    t, y, sigma, idx = _synthetic_trailing_spike()
+    flags, prov = gps_views.detect_view_outliers(t, y, sigma)
+    provisional = np.asarray(prov["provisional"])
+    assert provisional.shape == flags.shape
+    assert prov["n_provisional"] == int(np.count_nonzero(provisional))
+    assert provisional[:, idx].any(), "trailing unrulable spike must be provisional"
+    # disjoint by construction: a protected candidate is never flagged
+    assert not (flags & provisional).any()
+
+
+def test_provisional_never_changes_the_flags():
+    """The invariant that makes the mask safe to add: it removes nothing."""
+    t, y, sigma, _ = _synthetic_trailing_spike()
+    with_mask, _ = gps_views.detect_view_outliers(t, y, sigma)
+    without, prov = gps_views.detect_view_outliers(t, y, sigma, provisional_days=0.0)
+    np.testing.assert_array_equal(with_mask, without)
+    assert prov["n_provisional"] == 0
+
+
+def test_provisional_recency_bound_excludes_older_clusters():
+    """Indeterminate but not recent is old news, not pending.
+
+    The spike sits 2 days from the end, so a 1-day window must exclude it
+    while the default 14-day window includes it.  Without the bound the
+    mask would be dominated by gap-adjacent points deep in the series
+    (measured on RHOF: 323 / 3400 / 3400 days from the end) instead of the
+    recent ones it is meant to surface.
+    """
+    t, y, sigma, idx = _synthetic_trailing_spike(offset_from_end=2)
+    _f, wide = gps_views.detect_view_outliers(t, y, sigma, provisional_days=14.0)
+    _f, narrow = gps_views.detect_view_outliers(t, y, sigma, provisional_days=1.0)
+    assert np.asarray(wide["provisional"])[:, idx].any()
+    assert narrow["n_provisional"] == 0
+
+
+def test_provisional_degrades_on_a_reduced_detection(monkeypatch):
+    """A detection object without the fields must not raise -- it is a hint."""
+    import types
+
+    t, y, sigma, _ = _synthetic_trailing_spike()
+    real = gps_views.detect_outliers
+
+    def reduced(*args, **kwargs):
+        full = real(*args, **kwargs)
+        return types.SimpleNamespace(
+            flags=full.flags, excess_flag_abort=full.excess_flag_abort
+        )
+
+    monkeypatch.setattr(gps_views, "detect_outliers", reduced)
+    flags, prov = gps_views.detect_view_outliers(t, y, sigma)
+    assert prov["n_provisional"] == 0
+    assert flags.shape == y.shape  # cleaning itself unaffected
 
 
 def test_detect_view_outliers_degrades_on_failure():

@@ -47,7 +47,7 @@ geo_dataread/
 │   ├── gps_savetimes.py  # serialise time series to disk (gps-savetimes; --clean also-writes cleaned .NEU)
 │   ├── globk_join.py     # GLOBK multibase segment read + datum-consistent join (10 m de-wrap, min-σ dedup) + mb_STA_TOT.dat writer (format_tot_file/write_joined_series, 3-line-header contract) (typed, mypy-strict)
 │   ├── globk_tot.py      # gps-globk-tot CLI: batch pre/rap → local TOT dir; per-station segment-exclusion catalog (segment_exclusions.csv, deployed via gps_parser outlier_catalogs; --exclusions dev override; reason mandatory) (typed, mypy-strict)
-│   ├── detrend_estimate.py # gps-estimate-detrend CLI: batch estimate stored-detrend params from local TOT (ref=plate) → detrend_params.json (schema v1); per-station fit catalog fit_windows.csv (window + gate overrides, e.g. DYNG max_gap 1.0) via gps_parser resolver; unstamped = byte-reproducible, --stamp for timestamps (typed, mypy-strict)
+│   ├── detrend_estimate.py # gps-estimate-detrend CLI: batch estimate stored-detrend params from local TOT (ref=plate) → detrend_params.json (schema v1); per-station fit catalog fit_windows.csv (window + gate overrides, e.g. DYNG max_gap 1.0) via gps_parser resolver; unstamped = byte-reproducible, --stamp for timestamps; --uncert is the read-time sigma screen (default 15 = getData's own, workbench uses 10) and rides into refs, because it changes WHICH epochs were fitted without touching any fitted quantity; station_estimate_from_arrays returns record + the inlier mask lifted to the caller's index space (station_record_from_arrays wraps it) — the workbench's grey overlay, which no re-run detector could match (typed, mypy-strict)
 │   ├── gas_read.py       # GAS (strainmeter) data
 │   ├── sil_read.py       # SIL seismic data
 │   └── hytro_read.py     # hydrology data
@@ -81,6 +81,20 @@ mechanism is SUPERSEDED (kept as shims for `read_gps_data` until design §8
 step 5). Lint/type scope: ruff excludes + mypy per-module ignores cover the
 legacy aux readers only — new code must pass `mypy --strict` (pyproject).
 
+**Provisional epochs (2026-07-27).** `detect_view_outliers` provenance also
+carries `provisional` (mask shaped like `flags`) + `n_provisional`: recent
+candidates the detector could NOT rule on because the step evidence is
+indeterminate (`D` NaN — no usable post-flank), so a blunder and the onset of
+real deformation are indistinguishable until data follows. Disjoint from
+`flags` and purely DIAGNOSTIC — the series is unchanged, a caller ignoring the
+key behaves exactly as before, and a reduced detection object degrades to an
+empty mask rather than raising (§0.4). The `provisional_days` bound (default
+`PROVISIONAL_DAYS = 14`) is load-bearing: indeterminate clusters also occur at
+mid-series gaps wider than `step_flank_max_reach_days` and would otherwise
+dominate the mask (RHOF: 3 clusters, at 323 / 3400 / 3400 days from the end).
+These verdicts are UNSTABLE by nature — they resolve as epochs arrive.
+`gps_plot` renders them gold; the epoch stays IN the series.
+
 ## Dependencies
 
 - **In** (declared in `pyproject.toml`):
@@ -107,6 +121,8 @@ gps-savetimes ...     # entry: geo_dataread.gps_savetimes:main
 gps-displacemnts ...  # entry: geo_dataread.gps_displ:main   (sic — typo preserved verbatim from pyproject.toml)
 gps-globk-tot ...     # entry: geo_dataread.globk_tot:main — batch GLOBK pre/rap segments → local mb_STA_TOT.dat{1,2,3} (deployed segment_exclusions.csv; --exclusions dev override)
 gps-estimate-detrend ... # entry: geo_dataread.detrend_estimate:main — batch detrend-parameter estimation over local TOT → detrend_params.json (fit_windows.csv per-station windows/gates)
+                         #   --analysis-yaml: per-station STAGE PLANS (detrend.estimation.stage_plans), what gps-detrend-workbench --commit writes
+                         #   --donor-params:  document a 'donor:' hold borrows from (default: the DEPLOYED one, never this run's --out)
 ```
 
 ## Cross-References
@@ -118,4 +134,4 @@ gps-estimate-detrend ... # entry: geo_dataread.detrend_estimate:main — batch d
 
 ---
 
-*Last reviewed: 2026-07-20 (local-TOT pipeline Stage B: gps-estimate-detrend estimator CLI + fit_windows.csv catalog; segment_exclusions.csv relocated to gps-config-data via gps_parser resolver)*
+*Last reviewed: 2026-08-16 (the batch now READS the stage plans it stores: `--analysis-yaml` + `estimate_station(stage_plan=, lookup_donor=)`. Until then `read_stage_plans` had no caller outside its own tests, so a re-run silently re-fitted a curated station single-stage — SELF 2.859 vs 2.931 mm/yr north. Donor holds resolve against the DEPLOYED detrend_params.json, not `--out`, or the science would depend on argv order. A plan naming a group the batch's `--model` lacks is now a loud per-station error, which is the improvement; per-station model/terms config is the next gap. Also: the per-station line finds the rate BY NAME — under `--model periodic` slot 1 is `sin_annual` and it printed a seasonal amplitude [mm] as "north rate ... mm/yr"; earlier — --uncert on the batch estimator, recorded in refs; earlier — station_estimate_from_arrays: fit diagnostics channel beside the record; earlier — local-TOT pipeline Stage B: gps-estimate-detrend estimator CLI + fit_windows.csv catalog; segment_exclusions.csv relocated to gps-config-data via gps_parser resolver)*

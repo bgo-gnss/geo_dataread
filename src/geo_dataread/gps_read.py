@@ -1340,7 +1340,12 @@ def gamittoNEU(
         from geo_dataread import gps_views  # deferred: avoids import cycle
 
         data = _remove_plate_velocity(sta, yearf, data, reference=reference)
-        data, _detrend_prov = gps_views.detrend_arrays(sta, yearf, data, data_unit="m")
+        # frame= is not cosmetic: without it detrend_arrays skips the
+        # frame guard entirely, and a record tagged for another frame is
+        # applied silently. Both call sites detrend AFTER plate removal.
+        data, _detrend_prov = gps_views.detrend_arrays(
+            sta, yearf, data, data_unit="m", frame=gps_views.PLATE_REMOVED_FRAME
+        )
 
     # convert to mm
     if mm:
@@ -1705,7 +1710,9 @@ def getData(
 
         # shared helper — data already in mm after iprep, so scale=1000
         data = _remove_plate_velocity(sta, yearf, data, scale=1000)
-        data, _detrend_prov = gps_views.detrend_arrays(sta, yearf, data)
+        data, _detrend_prov = gps_views.detrend_arrays(
+            sta, yearf, data, frame=gps_views.PLATE_REMOVED_FRAME
+        )
 
     elif ref == "itrf2008":
         pass

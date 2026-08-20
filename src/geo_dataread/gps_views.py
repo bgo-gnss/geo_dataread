@@ -35,6 +35,7 @@ callers are migrated (design §8 step 5).
 
 import dataclasses
 import json
+import math
 import logging
 import warnings
 from collections.abc import Mapping, Sequence
@@ -56,6 +57,16 @@ logger = logging.getLogger(__name__)
 
 FloatArray = npt.NDArray[np.float64]
 BoolArray = npt.NDArray[np.bool_]
+
+PLATE_REMOVED_FRAME = "plate_removed"
+"""The frame tag of a plate-velocity-removed series (design §0.5).
+
+Single source of truth: ``detrend_estimate.FRAME`` stamps it onto every
+record, and the ``ref="detrend"`` read paths pass it to
+:func:`detrend_arrays` so the §2.5 frame guard actually runs.  Before
+2026-07-29 those call sites passed no frame at all, which made the guard
+dead code — a record tagged for any other frame was applied silently.
+"""
 
 VIEWS = ("raw", "cleaned", "detrended")
 """Valid values of the first-class ``view`` toggle."""
@@ -780,6 +791,66 @@ def resolve_outlier_detection(
 # ---------------------------------------------------------------------------
 
 
+#: Default recency bound of the provisional mask [days].  Generous next to
+#: the ~3 trailing epochs the step statistic genuinely cannot rule on (it
+#: needs 3 post-samples), because the trajectory fit and robust scale also
+#: re-estimate as epochs arrive: a verdict within a couple of weeks of the
+#: end can still change without any flank being involved.
+PROVISIONAL_DAYS: float = 14.0
+
+_DAYS_PER_YEAR: float = 365.25
+
+
+def _provisional_mask(
+    detection: Any,
+    t: npt.NDArray[np.float64],
+    finite: BoolArray,
+    shape: tuple[int, ...],
+    *,
+    provisional_days: float,
+) -> BoolArray:
+    """Recent candidates protected on INDETERMINATE step evidence.
+
+    ``detection.suspected_events`` carries the per-cluster step-evidence
+    statistic, and ``NaN`` there is precisely "no usable post-flank, so a
+    step could not be ruled out" — the leaf already computes and reports
+    it, nothing new is derived here.  Cluster indices address the FINITE
+    subset detection ran on, so they are mapped back through ``finite``;
+    the span is intersected with the cluster's candidates so that
+    non-candidate epochs inside a cluster's bounds are not marked.
+
+    The mask is DIAGNOSTIC, so a detection object without the fields it
+    needs yields an empty mask rather than an exception — the same
+    graceful-degrade rule the rest of this path follows (design §0.4).
+    A caller may legitimately supply a reduced detection result, and no
+    plot or write should fail over an annotation.
+    """
+    provisional = np.zeros(shape, dtype=np.bool_)
+    if provisional_days <= 0.0:
+        return provisional
+    events = getattr(detection, "suspected_events", None)
+    raw_candidates = getattr(detection, "candidates", None)
+    if not events or raw_candidates is None:
+        return provisional
+    t_fin = t[finite]
+    if t_fin.size == 0:
+        return provisional
+
+    cutoff = float(t_fin[-1]) - provisional_days / _DAYS_PER_YEAR
+    index = np.flatnonzero(finite)
+    candidates = np.atleast_2d(raw_candidates)
+    for event in events:
+        if not math.isnan(event.step_evidence):
+            continue  # a MEASURED step, not an unrulable one
+        if float(event.t_start) < cutoff:
+            continue  # old news: a mid-series gap, not the series end
+        span = np.zeros(t_fin.size, dtype=np.bool_)
+        span[event.i_start : event.i_end + 1] = True
+        span &= candidates[event.component]
+        provisional[event.component, index[span]] = True
+    return provisional
+
+
 def detect_view_outliers(
     yearf: npt.ArrayLike,
     data: npt.ArrayLike,
@@ -789,6 +860,7 @@ def detect_view_outliers(
     step_epochs: npt.ArrayLike | None = None,
     protect_windows: tuple[tuple[float, float], ...] = (),
     min_outlier: npt.ArrayLike | None = None,
+    provisional_days: float = PROVISIONAL_DAYS,
 ) -> tuple[BoolArray, dict[str, Any]]:
     """Outlier flags for a series view, with graceful degrade.
 
@@ -808,12 +880,33 @@ def detect_view_outliers(
         step_epochs: Known step epochs [yr] to augment the model with.
         protect_windows: Intervals [yr] where flagging is disabled.
         min_outlier: Outlier magnitude floor(s) [caller's unit].
+        provisional_days: Recency bound of the PROVISIONAL mask [d]; 0
+            disables it.  See the mask's definition below.
 
     Returns:
         ``(flags, provenance)`` — flags shaped like ``data`` (True =
         outlier; MASK only, nothing is removed) and a provenance dict
         with ``outlier_abort`` / ``degraded`` / ``degrade_reason`` /
-        ``n_flagged``.
+        ``n_flagged`` / ``provisional`` / ``n_provisional``.
+
+    **The provisional mask.**  ``provenance["provisional"]`` is shaped
+    like ``flags`` and marks epochs the identifiers flagged but that were
+    protected because the step evidence was INDETERMINATE (``D`` NaN — no
+    usable post-flank), *and* which lie within ``provisional_days`` of the
+    last epoch.  These are the epochs the detector genuinely cannot rule
+    on yet: a blunder and the onset of real deformation look identical
+    until data follows them.
+
+    It is disjoint from ``flags`` by construction (a protected candidate
+    is not flagged) and is DIAGNOSTIC — the series is unchanged, so a
+    caller that ignores it behaves exactly as before.  The recency bound
+    is what makes it useful: indeterminate clusters also occur at
+    mid-series gaps wider than ``step_flank_max_reach_days``, which are
+    old news and would otherwise dominate the mask (measured: RHOF has 3
+    indeterminate clusters, at 323 / 3400 / 3400 days from the end).
+
+    Verdicts inside the window are UNSTABLE by nature — they resolve as
+    epochs accumulate, and the trajectory fit re-estimates too.
     """
     t = np.asarray(yearf, dtype=np.float64)
     y = np.asarray(data, dtype=np.float64)
@@ -829,6 +922,8 @@ def detect_view_outliers(
         "degraded": False,
         "degrade_reason": None,
         "n_flagged": 0,
+        "provisional": np.zeros(y.shape, dtype=np.bool_),
+        "n_provisional": 0,
     }
 
     finite = np.isfinite(t) & np.all(np.isfinite(y2d), axis=0)
@@ -851,18 +946,47 @@ def detect_view_outliers(
         _degrade(prov, f"outlier detection failed ({exc}); serving unflagged data")
         return flags, prov
 
-    if detection.excess_flag_abort:
+    # §3.5a: the abort is per component. Read it with the module's degrade
+    # idiom so an older gps_analysis (scalar abort only) still works and this
+    # slice stays independently mergeable.
+    comp_abort = np.atleast_1d(
+        np.asarray(
+            getattr(detection, "component_abort", None)
+            if getattr(detection, "component_abort", None) is not None
+            and np.size(getattr(detection, "component_abort")) > 0
+            else np.full(y2d.shape[0], bool(detection.excess_flag_abort)),
+            dtype=np.bool_,
+        )
+    )
+    prov["component_abort"] = comp_abort.tolist()
+    prov["n_aborted_components"] = int(comp_abort.sum())
+
+    if comp_abort.any():
         prov["outlier_abort"] = True
+        which = ", ".join(
+            _COMPONENTS[i] if i < len(_COMPONENTS) else str(i)
+            for i in np.flatnonzero(comp_abort)
+        )
+        # ONE warning, as before — a second warnings.warn on this path would
+        # fail the filterwarnings=["error"] suites downstream.
         _degrade(
             prov,
-            "outlier detection aborted (excess-candidate rule); serving unflagged data",
+            f"outlier detection aborted (excess-candidate rule) for: {which}; "
+            "serving those components unflagged",
         )
-        return flags, prov
+        if comp_abort.all():
+            return flags, prov
 
     full = np.zeros(y2d.shape, dtype=np.bool_)
     full[:, finite] = np.atleast_2d(detection.flags)
     flags = full[0] if y.ndim == 1 else full
     prov["n_flagged"] = int(np.count_nonzero(flags))
+
+    provisional = _provisional_mask(
+        detection, t, finite, y2d.shape, provisional_days=provisional_days
+    )
+    prov["provisional"] = provisional[0] if y.ndim == 1 else provisional
+    prov["n_provisional"] = int(np.count_nonzero(provisional))
     return flags, prov
 
 

@@ -26,6 +26,7 @@ from geo_dataread.detrend_estimate import (
     FitCatalogRow,
     FitDefaults,
     StationFitSettings,
+    UNCERT,
     build_document,
     estimate_station,
     main,
@@ -75,14 +76,23 @@ def _synthetic_series(
 
 
 def _settings(**overrides: Any) -> StationFitSettings:
+    """Build settings, accepting ``window=`` as sugar for one segment.
+
+    The dataclass field is ``segments`` and ``window`` is a derived
+    property (the hull), so a caller cannot set it — but "one window" is
+    what almost every test here means, and spelling it as a 1-tuple at
+    every call site would obscure that.
+    """
     base = dict(
-        window=(None, None),
+        segments=((None, None),),
         min_span_years=2.0,
         min_epochs=365,
         max_gap_years=0.5,
         steps=(),  # explicit: no steps, never consult the deployed steps.csv
         window_source="defaults",
     )
+    if "window" in overrides:
+        base["segments"] = (tuple(overrides.pop("window")),)
     base.update(overrides)
     return StationFitSettings(**base)
 
@@ -345,6 +355,96 @@ class TestRoundTrip:
         assert record is None
 
 
+class TestStationEstimateFromArrays:
+    """The mask channel: ``n_rejected`` says how many, this says WHICH.
+
+    Every assertion here is a count-parity or index-placement check,
+    because the failure mode is silent: the mask is lifted across two
+    compressions (non-finite drop, then the fit window) and an off-by-N
+    index map still produces a plausible-looking figure — grey markers on
+    the wrong epochs, with the right total.
+    """
+
+    def _estimate(self, tmp_path: Path, t: Any, y: Any, sigma: Any, **over: Any) -> Any:
+        return de.station_estimate_from_arrays(
+            "DYNG",
+            t,
+            y,
+            sigma,
+            settings=_settings(**over),
+            protect_windows=(),
+            outlier_overrides=_empty_overrides(tmp_path),
+        )
+
+    def test_mask_count_matches_the_records_n_rejected(self, tmp_path: Path) -> None:
+        t, y, sigma = _synthetic_series()
+        y[0, 100] += 40.0  # unambiguous blunders, one per component
+        y[1, 200] -= 35.0
+        res = self._estimate(tmp_path, t, y, sigma)
+        assert res is not None
+        assert res.outliers.shape == (3, t.size)
+        assert list(res.record["n_rejected"]) == [
+            int(v) for v in res.outliers.sum(axis=1)
+        ]
+        assert res.outliers[0, 100] and res.outliers[1, 200]
+
+    def test_record_wrapper_returns_the_same_record(self, tmp_path: Path) -> None:
+        t, y, sigma = _synthetic_series()
+        res = self._estimate(tmp_path, t, y, sigma)
+        record = station_record_from_arrays(
+            "DYNG",
+            t,
+            y,
+            sigma,
+            settings=_settings(),
+            protect_windows=(),
+            outlier_overrides=_empty_overrides(tmp_path),
+        )
+        assert res is not None
+        assert record == res.record
+
+    def test_masks_lift_across_the_window_and_the_nonfinite_drop(
+        self, tmp_path: Path
+    ) -> None:
+        # BOTH compressions at once — the case a single-compression test
+        # cannot distinguish from a wrong index map.
+        t, y, sigma = _synthetic_series(n=1600)
+        holes = np.arange(3, t.size, 97)
+        y[1, holes] = np.nan
+        window = (float(t[400]), float(t[1200]))
+        y[2, 700] += 45.0  # a blunder INSIDE the window
+        y[2, 50] += 45.0  # ... and one OUTSIDE it
+        res = self._estimate(tmp_path, t, y, sigma, window=window)
+        assert res is not None
+
+        assert int(res.in_window.sum()) == res.record["n_epochs"]
+        assert list(res.record["n_rejected"]) == [
+            int(v) for v in res.outliers.sum(axis=1)
+        ]
+        # a verdict may exist ONLY where the fit actually looked
+        assert not res.outliers[:, ~res.in_window].any()
+        assert not res.outliers[:, ~res.finite].any()
+        assert res.finite[res.in_window].all()
+        # placement, not just counts: the in-window blunder is flagged and
+        # the identical out-of-window one is not (it was never judged)
+        assert res.outliers[2, 700]
+        assert not res.outliers[2, 50]
+        judged = t[res.in_window]
+        assert judged.min() >= window[0] - 1e-3
+        assert judged.max() <= window[1] + 1e-3
+
+    def test_aborted_fit_yields_no_estimate(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        @dataclasses.dataclass
+        class _Aborted:
+            outlier_abort: bool = True
+
+        monkeypatch.setattr(de, "estimate_detrend", lambda *a, **k: _Aborted())
+        t, y, sigma = _synthetic_series(n=400)
+        assert self._estimate(tmp_path, t, y, sigma) is None
+
+
 # ---------------------------------------------------------------------------
 # Driver + CLI
 # ---------------------------------------------------------------------------
@@ -400,6 +500,42 @@ class TestEstimateStation:
         assert missing.status == "error"
         assert missing.record is None
 
+    def test_uncert_reaches_getdata_and_the_record(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The read-time sigma screen must be expressible AND recorded.
+
+        It decides WHICH epochs were fitted while leaving no trace in any
+        fitted quantity, so two records with identical parameters, window and
+        steps can still have been fitted on different data. Before this knob
+        existed the estimator took getData's default silently while
+        ``gps-detrend-workbench`` used 10, which made batch and workbench
+        records indistinguishable but unequal.
+        """
+        seen: list[int] = []
+        base = _fake_getdata({"DYNG": _synthetic_series()})
+
+        def spy(sta: str, *args: Any, **kwargs: Any) -> Any:
+            seen.append(kwargs["uncert"])
+            return base(sta, *args, **kwargs)
+
+        monkeypatch.setattr(gps_read, "getData", spy)
+        overrides = _empty_overrides(tmp_path)
+        kw = {
+            "settings": _settings(),
+            "protect_windows": tmp_path / "no_protect.csv",
+            "outlier_overrides": overrides,
+        }
+        default = estimate_station("DYNG", **kw)  # type: ignore[arg-type]
+        assert seen == [UNCERT]
+        assert default.record is not None
+        assert default.record["refs"]["uncert"] == UNCERT
+
+        screened = estimate_station("DYNG", uncert=10, **kw)  # type: ignore[arg-type]
+        assert seen == [UNCERT, 10]
+        assert screened.record is not None
+        assert screened.record["refs"]["uncert"] == 10
+
     def test_gate_failure_is_error(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -424,6 +560,11 @@ class TestCli:
         catalog = tmp_path / "fit_windows.csv"
         catalog.write_text(SEED_FIT_CSV)
         out = tmp_path / "detrend_params.json"
+        # An EMPTY analysis.yaml, always passed: without it the batch would
+        # fall back to the deployed one, so whether a station estimates
+        # staged would depend on the operator's own config.
+        empty_yaml = tmp_path / "analysis.yaml"
+        empty_yaml.write_text("{}\n")
         extra = [
             "--fit-catalog",
             str(catalog),
@@ -435,6 +576,8 @@ class TestCli:
             str(tmp_path / "no_protect.csv"),
             "--outlier-overrides",
             str(_empty_overrides(tmp_path)),
+            "--analysis-yaml",
+            str(empty_yaml),
         ]
         return catalog, out, extra
 
@@ -448,6 +591,21 @@ class TestCli:
         assert set(doc["stations"]) == {"DYNG"}
         assert doc["generator"] == "gps-estimate-detrend"
         assert doc["stations"]["DYNG"]["refs"]["window_source"] == str(_catalog)
+
+    def test_uncert_flag_lands_in_the_document(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """`--uncert` is what makes a workbench record reproducible in batch.
+
+        The workbench prints this exact invocation after a commit, so the flag
+        existing is part of that contract, not a convenience.
+        """
+        _catalog, out, extra = self._cli_env(tmp_path, monkeypatch)
+        assert main(["DYNG", "--uncert", "10", *extra]) == 0
+        assert read_detrend_params(out)["stations"]["DYNG"]["refs"]["uncert"] == 10
+
+        assert main(["DYNG", *extra]) == 0
+        assert read_detrend_params(out)["stations"]["DYNG"]["refs"]["uncert"] == UNCERT
 
     def test_failing_station_sets_exit_code_and_batch_continues(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -476,3 +634,451 @@ class TestCli:
         doc = json.loads(out.read_text())
         assert doc["generated_at"] is not None
         assert doc["stations"]["DYNG"]["fitted_at"] == doc["generated_at"]
+
+
+# ---------------------------------------------------------------------------
+# Segments: a union fit domain, expressed in one catalog cell
+# ---------------------------------------------------------------------------
+
+_SEG_HEADER = (
+    "sta,window_start,window_end,segments,max_gap_years,min_epochs,"
+    "min_span_years,steps,comment\n"
+)
+
+
+class TestSegmentsColumn:
+    """The 9-column layout, and the 8-column one it must not break."""
+
+    def test_legacy_header_still_reads(self, tmp_path: Path) -> None:
+        """The 37 deployed rows predate this column and must keep working.
+
+        The header check is an exact tuple match by design — a bad fit
+        catalog silently changes stored science — so adding a column had to
+        become an ALLOWLIST rather than a looser check.
+        """
+        path = tmp_path / "legacy.csv"
+        path.write_text(
+            "sta,window_start,window_end,max_gap_years,min_epochs,"
+            "min_span_years,steps,comment\nDYNG,,,1.0,,,,gaps\n"
+        )
+        row = read_fit_catalog(path)["DYNG"]
+        assert row.segments is None, "absent column means single window"
+        assert row.max_gap_years == 1.0
+
+    def test_segments_cell_parses(self, tmp_path: Path) -> None:
+        path = tmp_path / "seg.csv"
+        path.write_text(
+            _SEG_HEADER + "self,,,2002.1:2008.35;2008.7:2019.5,1.5,,,2008.40847,Olfus\n"
+        )
+        row = read_fit_catalog(path)["SELF"]
+        assert row.segments == ((2002.1, 2008.35), (2008.7, 2019.5))
+        assert row.steps == (2008.40847,)
+
+    def test_open_bounds_are_expressible(self, tmp_path: Path) -> None:
+        """An empty side means open, as the window columns already do."""
+        path = tmp_path / "seg.csv"
+        path.write_text(_SEG_HEADER + "SELF,,,:2008.35;2008.7:,1.5,,,,\n")
+        assert read_fit_catalog(path)["SELF"].segments == (
+            (None, 2008.35),
+            (2008.7, None),
+        )
+
+    def test_segments_and_window_columns_together_are_refused(
+        self, tmp_path: Path
+    ) -> None:
+        """One row must say ONE thing about which epochs are fitted."""
+        path = tmp_path / "seg.csv"
+        path.write_text(
+            _SEG_HEADER + "SELF,2002.0,,2002.1:2008.35;2008.7:2019.5,,,,,\n"
+        )
+        with pytest.raises(ValueError, match="both set"):
+            read_fit_catalog(path)
+
+    @pytest.mark.parametrize(
+        "cell, match",
+        [
+            ("2002.1-2008.35", "start:end"),
+            ("2008.35:2002.1", "end 2002.1 <= start 2008.35"),
+            ("2002.1:x", "not a number"),
+        ],
+    )
+    def test_malformed_cells_are_hard_errors(
+        self, tmp_path: Path, cell: str, match: str
+    ) -> None:
+        """Strict, like the rest of this reader: never a silent partial read."""
+        path = tmp_path / "seg.csv"
+        path.write_text(_SEG_HEADER + f"SELF,,,{cell},,,,,\n")
+        with pytest.raises(ValueError, match=match):
+            read_fit_catalog(path)
+
+    def test_settings_carry_segments_and_derive_the_hull(self, tmp_path: Path) -> None:
+        path = tmp_path / "seg.csv"
+        path.write_text(_SEG_HEADER + "SELF,,,2002.1:2008.35;2008.7:2019.5,1.5,,,,\n")
+        settings = resolve_fit_settings(
+            "SELF", read_fit_catalog(path), FitDefaults(), catalog_source=str(path)
+        )
+        assert settings.segments == ((2002.1, 2008.35), (2008.7, 2019.5))
+        # `window` is derived, so it cannot drift out of step with `segments`
+        assert settings.window == (2002.1, 2019.5)
+
+    def test_a_station_without_a_row_is_one_open_segment(self) -> None:
+        settings = resolve_fit_settings("NONE", None, FitDefaults())
+        assert settings.segments == ((None, None),)
+        assert settings.window == (None, None)
+
+
+class TestSegmentedEstimation:
+    """End to end: the mask the caller lifts is the mask the fit used."""
+
+    def test_in_window_comes_from_the_leaf_not_a_second_derivation(
+        self, tmp_path: Path
+    ) -> None:
+        """The seam's contract, asserted rather than argued.
+
+        ``station_estimate_from_arrays`` used to re-derive the window mask
+        with its own ``slice_window`` call and argue exactness from "both
+        sides pass identical bounds and neither overrides tol". Under a
+        union of segments that convention would have to hold across J
+        intervals. It now lifts ``est.window_mask`` — the mask the fit
+        itself used — so there is nothing left to keep in sync.
+        """
+        t, y, sigma = _synthetic_series(n=2600, t0=2002.0)
+        settings = _settings(
+            segments=((2002.1, 2005.0), (2006.0, 2009.0)), max_gap_years=1.5
+        )
+        est = de.station_estimate_from_arrays(
+            "TEST",
+            t,
+            y,
+            sigma,
+            settings=settings,
+            outlier_overrides=str(_empty_overrides(tmp_path)),
+        )
+        assert est is not None
+        in_window = np.asarray(est.in_window, dtype=bool)
+        assert in_window.sum() == est.estimate.window_mask.sum()
+        # the excised stretch got no verdict, and that is what the workbench
+        # renders as "outside the window"
+        excised = (t > 2005.0 + 1e-3) & (t < 2006.0 - 1e-3)
+        assert not in_window[excised].any()
+        assert est.record["segments"] == [[2002.1, 2005.0], [2006.0, 2009.0]]
+        assert len(est.record["window"]) == 2
+
+
+class TestStagePlansReachTheBatch:
+    """A committed stage plan must survive a batch re-run.
+
+    ``gps-detrend-workbench --commit`` writes the plan to ``analysis.yaml``
+    precisely so ``gps-estimate-detrend`` will re-fit the station staged.
+    Until this wiring existed, ``read_stage_plans`` had no caller outside its
+    own unit tests: the batch re-estimated every staged station single-stage
+    and overwrote the curated record with different science, silently. The
+    reader was covered; the fact that nothing called it was not — which is
+    why these tests sit at the CLI level and not on the reader.
+    """
+
+    def _plan_yaml(self, tmp_path: Path, stages: list[str], holds: list[str]) -> Path:
+        import yaml
+
+        from geo_dataread.stage_plan import build_stage_plan, stage_plan_to_config
+
+        path = tmp_path / "analysis.yaml"
+        path.write_text(
+            yaml.safe_dump(
+                {
+                    "detrend": {
+                        "estimation": {
+                            "stage_plans": {
+                                "DYNG": stage_plan_to_config(
+                                    build_stage_plan(stages, holds)
+                                )
+                            }
+                        }
+                    }
+                }
+            )
+        )
+        return path
+
+    def _env(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> tuple[Path, list[str]]:
+        catalog, out, extra = TestCli()._cli_env(tmp_path, monkeypatch)
+        del catalog
+        return out, extra
+
+    def _swap_yaml(self, extra: list[str], path: Path) -> list[str]:
+        i = extra.index("--analysis-yaml")
+        return [*extra[: i + 1], str(path), *extra[i + 2 :]]
+
+    def test_committed_plan_is_read_and_lands_in_the_record(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        out, extra = self._env(tmp_path, monkeypatch)
+        plan = self._plan_yaml(
+            tmp_path,
+            ["clean:secular@2020.2:2021.0", "fit:periodic"],
+            ["fit:secular=stage:clean"],
+        )
+        assert main(["DYNG", *self._swap_yaml(extra, plan)]) == 0
+        record = read_detrend_params(out)["stations"]["DYNG"]
+        assert [s["name"] for s in record["stage_plan"]] == ["clean", "fit"]
+        # the plan was honoured, not merely stored: the second stage held
+        # secular at what the first fitted and estimated only the periodic
+        assert record["stages"][0]["free"] == ["offset", "rate"]
+        assert record["stages"][1]["held_sources"] == {"secular": "stage:clean"}
+        assert all(n.startswith(("cos_", "sin_")) for n in record["stages"][1]["free"])
+
+    def test_no_plan_means_no_fragment(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The negative half: an unstaged station stays unstaged.
+
+        Without this, a bug that staged EVERY station would pass the test
+        above and change 37 deployed records.
+        """
+        out, extra = self._env(tmp_path, monkeypatch)
+        assert main(["DYNG", *extra]) == 0
+        assert "stage_plan" not in read_detrend_params(out)["stations"]["DYNG"]
+
+    def test_plan_naming_a_group_the_model_lacks_is_a_loud_station_error(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Wiring converts a silent revert into a named failure.
+
+        A plan committed under one ``--model`` and re-run under the batch's
+        global default cannot be honoured, because the group it names may not
+        exist. That is the improvement: before, the plan was ignored and a
+        plausible-looking single-stage record was written in its place.
+        """
+        out, extra = self._env(tmp_path, monkeypatch)
+        plan = self._plan_yaml(tmp_path, ["only:periodic"], [])
+        rc = main(["DYNG", "--model", "linear", *self._swap_yaml(extra, plan)])
+        assert rc == 1
+        assert "DYNG" not in read_detrend_params(out)["stations"]
+
+    def test_named_but_missing_analysis_yaml_stops_the_batch(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _out, extra = self._env(tmp_path, monkeypatch)
+        rc = main(["DYNG", *self._swap_yaml(extra, tmp_path / "nope.yaml")])
+        assert rc == 2
+
+    def test_donor_hold_resolves_against_the_deployed_document(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Not this run's ``--out`` — that would make science argv-ordered.
+
+        A station borrowing from one estimated LATER in the same batch would
+        otherwise see the deployed value while a station borrowing from an
+        earlier one saw the fresh value.
+        """
+        out, extra = self._env(tmp_path, monkeypatch)
+        assert main(["DYNG", *extra]) == 0
+        donor_doc = tmp_path / "donor.json"
+        doc = read_detrend_params(out)
+        doc["stations"]["OLAC"] = doc["stations"]["DYNG"]
+        donor_doc.write_text(json.dumps(doc))
+
+        plan = self._plan_yaml(tmp_path, ["fit:periodic"], ["secular=donor:OLAC"])
+        args = [*self._swap_yaml(extra, plan), "--donor-params", str(donor_doc)]
+        assert main(["DYNG", *args]) == 0
+        record = read_detrend_params(out)["stations"]["DYNG"]
+        assert "donor:OLAC" in record["stages"][0]["held_sources"]["secular"]
+
+        # and a donor with no record is that station's error, not a crash
+        empty_doc = tmp_path / "empty.json"
+        empty_doc.write_text(json.dumps({**doc, "stations": {}}))
+        args = [*self._swap_yaml(extra, plan), "--donor-params", str(empty_doc)]
+        assert main(["DYNG", *args]) == 1
+
+
+class TestRateIsReportedByName:
+    """The batch's per-station line must not call slot 1 "north rate".
+
+    Slot 1 is the secular rate only for a model carrying a polynomial. Under
+    ``--model periodic`` it is ``sin_annual``, and the line printed a seasonal
+    amplitude [mm] as "north rate -0.65 mm/yr" — plausible units, plausible
+    magnitude, wrong quantity, on the only summary an operator watching a
+    batch actually reads.
+    """
+
+    def _run(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, model: str) -> str:
+        monkeypatch.setattr(
+            gps_read, "getData", _fake_getdata({"DYNG": _synthetic_series()})
+        )
+        return estimate_station(
+            "DYNG",
+            model=model,
+            settings=_settings(),
+            protect_windows=tmp_path / "no_protect.csv",
+            outlier_overrides=_empty_overrides(tmp_path),
+        ).detail
+
+    def test_a_model_without_a_rate_says_so(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        detail = self._run(tmp_path, monkeypatch, "periodic")
+        assert "no secular rate (model 'periodic')" in detail
+        assert "mm/yr" not in detail
+
+    def test_a_model_with_a_rate_still_reports_it(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        detail = self._run(tmp_path, monkeypatch, "lineperiodic")
+        assert "north rate 4.35 mm/yr" in detail  # RATE[0]=4.33 + fit noise
+
+
+class TestStagedAndTermTogether:
+    """`--stage` with `--term` — the combination neither suite covered.
+
+    `_restage` evaluates its residual through `evaluate_record` on a record
+    dict it builds inline, and that dict hardcoded ``record_version: 1``
+    while adding a ``terms`` key whenever the model carried a transient: a
+    record whose version contradicted its own shape. It went unnoticed
+    because the reader dispatched on the terms key and ignored the version.
+    Once `trajectory_from_record` began enforcing the two against each other
+    (gps_analysis), this raised — and no test in either package exercised
+    staged estimation together with a transient, which is why the coupling
+    needs pinning here rather than on the reader.
+    """
+
+    def _run(self, tmp_path: Path, *, terms: list[str] | None) -> Any:
+        from geo_dataread.stage_plan import build_stage_plan
+
+        free = "periodic,transient" if terms else "periodic"
+        plan = build_stage_plan(
+            ["clean:secular@2020.2:2021.5", f"fit:{free}"],
+            ["fit:secular=stage:clean"],
+        )
+        t, y, sigma = _synthetic_series()
+        return de.station_estimate_from_arrays(
+            "DYNG",
+            t,
+            y,
+            sigma,
+            settings=_settings(),
+            outlier_overrides=str(_empty_overrides(tmp_path)),
+            terms=terms,
+            stage_plan=plan,
+        )
+
+    def test_a_staged_transient_fit_completes(self, tmp_path: Path) -> None:
+        est = self._run(tmp_path, terms=["log@2020.5,tau=1.0"])
+        assert est is not None
+        assert "log_amp_1" in est.record["param_names"]
+        assert est.record["record_version"] == 2
+        assert [s["name"] for s in est.record["stage_plan"]] == ["clean", "fit"]
+
+    def test_staged_without_a_transient_stays_v1(self, tmp_path: Path) -> None:
+        """The other half: version follows CONTENT, so no terms means v1."""
+        est = self._run(tmp_path, terms=None)
+        assert est is not None
+        assert "terms" not in est.record
+        assert est.record["record_version"] == 1
+
+
+class TestPerStationModelsReachTheBatch:
+    """The batch has ONE global --model and no --term; stations are curated.
+
+    Reading the stage plans (e6dd887) turned "silently re-fit single-stage"
+    into a loud per-station error, but a station curated under
+    ``--model periodic`` still could not RE-ESTIMATE: the plan names a group
+    the global model has no terms for. This block is what makes it estimate.
+    """
+
+    def _yaml(self, tmp_path: Path, models: dict[str, Any]) -> Path:
+        import yaml
+
+        path = tmp_path / "analysis.yaml"
+        path.write_text(yaml.safe_dump({"detrend": {"estimation": {"models": models}}}))
+        return path
+
+    def _env(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> tuple[Path, list[str]]:
+        _catalog, out, extra = TestCli()._cli_env(tmp_path, monkeypatch)
+        return out, extra
+
+    def _swap(self, extra: list[str], path: Path) -> list[str]:
+        i = extra.index("--analysis-yaml")
+        return [*extra[: i + 1], str(path), *extra[i + 2 :]]
+
+    def test_a_stored_model_is_used_without_any_flag(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        out, extra = self._env(tmp_path, monkeypatch)
+        cfg = self._yaml(tmp_path, {"DYNG": {"model": "periodic"}})
+        assert main(["DYNG", *self._swap(extra, cfg)]) == 0
+        record = read_detrend_params(out)["stations"]["DYNG"]
+        assert record["model"] == "periodic"
+        assert "rate" not in record["param_names"]
+
+    def test_stored_terms_produce_a_v2_record(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """`--term` transients are the reason record_version 2 exists."""
+        out, extra = self._env(tmp_path, monkeypatch)
+        cfg = self._yaml(tmp_path, {"DYNG": {"terms": ["log@2021.0,tau=1.0"]}})
+        assert main(["DYNG", *self._swap(extra, cfg)]) == 0
+        record = read_detrend_params(out)["stations"]["DYNG"]
+        assert record["record_version"] == 2
+        assert "log_amp_1" in record["param_names"]
+        assert {t["kind"] for t in record["terms"]} == {
+            "polynomial",
+            "seasonal",
+            "log_transient",
+        }
+
+    def test_a_station_with_no_entry_is_untouched(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The 37 deployed stations have no entry — nothing may move."""
+        out, extra = self._env(tmp_path, monkeypatch)
+        cfg = self._yaml(tmp_path, {"OTHR": {"model": "periodic"}})
+        assert main(["DYNG", *self._swap(extra, cfg)]) == 0
+        record = read_detrend_params(out)["stations"]["DYNG"]
+        assert record["model"] == de.MODEL
+        assert record["record_version"] == 1
+
+    def test_an_explicit_model_wins_but_says_so(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: Any
+    ) -> None:
+        """CLI beats config — the house precedence — but never silently.
+
+        `_override_settings` establishes that an unset flag defers to the
+        catalog, so an explicit one must win. An explicit --model discarding
+        a curated per-station model without a word would be the stage-plan
+        failure again, one config block over.
+        """
+        out, extra = self._env(tmp_path, monkeypatch)
+        cfg = self._yaml(tmp_path, {"DYNG": {"model": "periodic"}})
+        assert main(["DYNG", "--model", "linear", *self._swap(extra, cfg)]) == 0
+        assert read_detrend_params(out)["stations"]["DYNG"]["model"] == "linear"
+        err = capsys.readouterr().err
+        assert "overrides the stored model" in err and "DYNG" in err
+
+    def test_stored_terms_survive_an_explicit_model(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """--model overrides the MODEL; it says nothing about transients.
+
+        There is no global --term to override them with, and there should not
+        be: a transient is declared at an EPOCH, which is not a fleet-wide
+        quantity.
+        """
+        out, extra = self._env(tmp_path, monkeypatch)
+        cfg = self._yaml(
+            tmp_path, {"DYNG": {"model": "periodic", "terms": ["log@2021.0,tau=1.0"]}}
+        )
+        assert main(["DYNG", "--model", "linear", *self._swap(extra, cfg)]) == 0
+        record = read_detrend_params(out)["stations"]["DYNG"]
+        assert record["param_names"][:2] == ["offset", "rate"]  # linear won
+        assert "log_amp_1" in record["param_names"]  # the transient stayed
+
+    def test_a_malformed_block_stops_the_batch(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _out, extra = self._env(tmp_path, monkeypatch)
+        cfg = self._yaml(tmp_path, {"DYNG": {"terms": ["log@2021.0"]}})
+        assert main(["DYNG", *self._swap(extra, cfg)]) == 2
