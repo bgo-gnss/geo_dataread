@@ -827,6 +827,17 @@ def _restage(
         rms.append(float(np.sqrt(np.mean(np.asarray(resid, dtype=float) ** 2))))
         if not fragment:
             fragment = dict(staged.to_record_fragment())
+    # The leaf's `groups` block names a donor only as a provenance string; it
+    # never saw the donor's record. Stamp on the vintage + coefficient digest
+    # HERE, where the pointer was resolved — that stamp is what lets a later
+    # batch re-run detect that a re-estimated donor silently changed this
+    # station's record (donor_drift_warnings), instead of the propagation
+    # having no witness at all.
+    groups = fragment.get("groups")
+    if isinstance(groups, dict):
+        from geo_dataread.stage_plan import annotate_donor_groups
+
+        fragment["groups"] = annotate_donor_groups(groups, lookup_donor=lookup_donor)
     return _dc.replace(est, fits=tuple(fits), rms=tuple(rms)), fragment
 
 
@@ -1214,6 +1225,39 @@ def _deployed_donor_lookup(params_path: Path | None) -> Any:
     return lookup
 
 
+def _donor_drift(
+    sta: str, record: dict[str, Any], params_path: Path | None
+) -> list[str]:
+    """Drift warnings for one freshly estimated record, or ``[]``.
+
+    Compares against the station's record in the same deployed document the
+    donor holds were resolved from (:func:`_deployed_donor_lookup`'s choice
+    of document, for the same reason: one document, one answer).  Gated on
+    the new record actually carrying a donor digest BEFORE any read, so the
+    ~190 unstaged stations of a fleet run never touch the deployed document
+    here.  A previous record that is absent or unreadable yields no warnings
+    — there is nothing recorded to have drifted FROM.
+    """
+    groups = record.get("groups")
+    if not isinstance(groups, dict) or not any(
+        isinstance(e, dict) and "donor_digest" in e for e in groups.values()
+    ):
+        return []
+    from geo_dataread.gps_views import (
+        default_params_path,
+        read_detrend_params,
+        station_detrend_record,
+    )
+    from geo_dataread.stage_plan import donor_drift_warnings
+
+    try:
+        doc = read_detrend_params(params_path or default_params_path())
+        previous, _src = station_detrend_record(doc, sta)
+    except (OSError, ValueError):
+        return []
+    return donor_drift_warnings(previous, record, station=sta)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """CLI entry point: batch-estimate detrend parameters -> JSON document."""
     parser = argparse.ArgumentParser(
@@ -1406,6 +1450,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             n_errors += 1
         elif result.record is not None:
             records[sta] = result.record
+            # Donor holds are POINTERS: a re-estimated donor changes this
+            # record with no error anywhere. This warning is the propagation's
+            # only witness — the new value is still used.
+            for msg in _donor_drift(sta, result.record, args.donor_params):
+                print(f"warning: {msg}", file=sys.stderr)
 
     doc = build_document(records, generated_at=stamp)
     args.out.parent.mkdir(parents=True, exist_ok=True)

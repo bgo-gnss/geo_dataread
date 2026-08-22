@@ -839,7 +839,12 @@ class TestStagePlansReachTheBatch:
         """
         out, extra = self._env(tmp_path, monkeypatch)
         assert main(["DYNG", *extra]) == 0
-        assert "stage_plan" not in read_detrend_params(out)["stations"]["DYNG"]
+        record = read_detrend_params(out)["stations"]["DYNG"]
+        assert "stage_plan" not in record
+        # `groups` is staged provenance too: for a single fit the answer
+        # ("everything self, the record's own window") is derivable from keys
+        # the record already has, and a written copy could drift from them.
+        assert "groups" not in record
 
     def test_plan_naming_a_group_the_model_lacks_is_a_loud_station_error(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -891,6 +896,119 @@ class TestStagePlansReachTheBatch:
         empty_doc.write_text(json.dumps({**doc, "stations": {}}))
         args = [*self._swap_yaml(extra, plan), "--donor-params", str(empty_doc)]
         assert main(["DYNG", *args]) == 1
+
+    def test_groups_block_records_per_group_provenance(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The record says which stage/window made each group, per group."""
+        out, extra = self._env(tmp_path, monkeypatch)
+        plan = self._plan_yaml(
+            tmp_path,
+            ["clean:secular@2020.2:2021.0", "fit:periodic"],
+            ["fit:secular=stage:clean"],
+        )
+        assert main(["DYNG", *self._swap_yaml(extra, plan)]) == 0
+        groups = read_detrend_params(out)["stations"]["DYNG"]["groups"]
+        assert groups["secular"] == {
+            "indices": [0, 1],
+            "stage": "clean",
+            "segments": [[2020.2, 2021.0]],
+            "provenance": "self",
+        }
+        assert groups["periodic"]["provenance"] == "self"
+        assert groups["periodic"]["stage"] == "fit"
+
+    def test_a_donor_group_records_what_the_pointer_resolved_to(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Vintage + digest of the borrowed coefficients, stamped at commit.
+
+        Without this stamp the pointer's propagation has no witness: a
+        re-estimated donor would change this station's next record and
+        nothing anywhere would say so.
+        """
+        from geo_dataread.stage_plan import donor_group_digest
+
+        out, extra = self._env(tmp_path, monkeypatch)
+        assert main(["DYNG", *extra]) == 0
+        donor_doc = tmp_path / "donor.json"
+        doc = read_detrend_params(out)
+        doc["stations"]["OLAC"] = dict(doc["stations"]["DYNG"], fitted_at="2026-07-01")
+        donor_doc.write_text(json.dumps(doc))
+
+        plan = self._plan_yaml(tmp_path, ["fit:periodic"], ["secular=donor:OLAC"])
+        args = [*self._swap_yaml(extra, plan), "--donor-params", str(donor_doc)]
+        assert main(["DYNG", *args]) == 0
+        entry = read_detrend_params(out)["stations"]["DYNG"]["groups"]["secular"]
+        assert entry["provenance"] == "donor:OLAC@2026-07-01"
+        assert entry["donor"] == "OLAC"
+        assert entry["donor_fitted_at"] == "2026-07-01"
+        assert entry["donor_record_version"] == 1
+        assert entry["donor_digest"] == donor_group_digest(
+            doc["stations"]["OLAC"], "secular", donor="OLAC"
+        )
+        # the self-fitted group carries no donor keys
+        assert (
+            "donor_digest"
+            not in read_detrend_params(out)["stations"]["DYNG"]["groups"]["periodic"]
+        )
+
+    def test_a_reestimated_donor_warns_and_the_new_value_is_used(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """THE drift test: pointer semantics preserved, but no longer silent.
+
+        Run 1 borrows from the donor and stores the digest. The donor is then
+        re-estimated (perturbed). Run 2 must (a) warn, naming station, donor
+        and both digests, and (b) STILL hold at the donor's new values —
+        detection must not quietly turn the pointer into a frozen copy.
+        """
+        out, extra = self._env(tmp_path, monkeypatch)
+        assert main(["DYNG", *extra]) == 0
+        base_doc = read_detrend_params(out)
+        donor_doc = tmp_path / "donor.json"
+        doc = dict(base_doc, stations=dict(base_doc["stations"]))
+        doc["stations"]["OLAC"] = dict(doc["stations"]["DYNG"], fitted_at="2026-01-01")
+        donor_doc.write_text(json.dumps(doc))
+
+        plan = self._plan_yaml(tmp_path, ["fit:periodic"], ["secular=donor:OLAC"])
+        args = [*self._swap_yaml(extra, plan), "--donor-params", str(donor_doc)]
+        assert main(["DYNG", *args]) == 0
+        # run 1 had no previous DYNG record in the deployed doc: no warning
+        assert "drifted" not in capsys.readouterr().err
+        run1 = read_detrend_params(out)["stations"]["DYNG"]
+        d1 = run1["groups"]["secular"]["donor_digest"]
+
+        # the donor is re-estimated: its rate moves by 1 mm/yr
+        drifted = json.loads(json.dumps(doc))
+        for comp in drifted["stations"]["OLAC"]["components"]:
+            comp["params"][1] += 1.0
+        drifted["stations"]["OLAC"]["fitted_at"] = "2026-08-01"
+        drifted["stations"]["DYNG"] = run1  # the deployed record of run 1
+        donor_doc.write_text(json.dumps(drifted))
+
+        assert main(["DYNG", *args]) == 0
+        err = capsys.readouterr().err
+        run2 = read_detrend_params(out)["stations"]["DYNG"]
+        d2 = run2["groups"]["secular"]["donor_digest"]
+        assert d1 != d2
+        for token in ("DYNG", "OLAC", d1, d2):
+            assert token in err
+        # (b) the NEW donor values are what run 2 held at
+        for c, comp in enumerate(run2["components"]):
+            assert (
+                comp["params"][:2]
+                == drifted["stations"]["OLAC"]["components"][c]["params"][:2]
+            )
+
+        # and once run 2's record is deployed, an unchanged donor is silent
+        drifted["stations"]["DYNG"] = run2
+        donor_doc.write_text(json.dumps(drifted))
+        assert main(["DYNG", *args]) == 0
+        assert "drifted" not in capsys.readouterr().err
 
 
 class TestRateIsReportedByName:

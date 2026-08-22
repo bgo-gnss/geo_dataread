@@ -66,8 +66,11 @@ __all__ = [
     "StageRef",
     "StageSpec",
     "STAGE_PLAN_KEYS",
+    "annotate_donor_groups",
     "build_stage_plan",
     "default_analysis_yaml_path",
+    "donor_drift_warnings",
+    "donor_group_digest",
     "donor_group_values",
     "read_stage_plans",
     "parse_hold_spec",
@@ -547,6 +550,158 @@ def donor_group_values(
             f"is nothing to borrow"
         )
     return params[mask]
+
+
+def donor_group_digest(record: Mapping[str, object], group: str, *, donor: str) -> str:
+    """Short content digest of the coefficients a donor borrow resolves to.
+
+    Covers the group's coefficients of **every** component, because donor
+    holds are resolved per component (:func:`resolve_stage_plan` is called
+    once per component in ``_restage``) — a component-0-only digest would
+    miss a donor whose east seasonal moved while north stayed put.
+
+    The digest is built from ``repr`` of the floats.  Records store
+    full-``repr`` precision and JSON round-trips it bit-identically (the
+    ``to_record`` contract in ``gps_analysis.detrend``), so the digest is
+    stable across write → deploy → read, and ANY coefficient change — however
+    small — changes it.  That is the point: drift detection must not decide
+    what magnitude of change "matters"; the operator does.
+
+    Args:
+        record: The donor's stored detrend record.
+        group: Term-group name (staged vocabulary).
+        donor: Station code, for error messages only.
+
+    Returns:
+        12 hex chars of SHA-256 — enough to compare, short enough to print
+        in a warning.
+
+    Raises:
+        ValueError: Whatever :func:`donor_group_values` raises, plus a
+            record with no components at all — a digest of nothing would
+            compare equal to another digest of nothing and hide the very
+            malformation it should surface.
+    """
+    import hashlib
+
+    comps = record.get("components")
+    n_components = len(comps) if isinstance(comps, Sequence) else 0
+    if n_components == 0:
+        raise ValueError(f"donor {donor!r}: record has no components to digest")
+    parts = [
+        ",".join(
+            repr(float(v))
+            for v in donor_group_values(record, group, component=c, donor=donor)
+        )
+        for c in range(n_components)
+    ]
+    return hashlib.sha256(";".join(parts).encode("ascii")).hexdigest()[:12]
+
+
+def annotate_donor_groups(
+    groups: Mapping[str, Mapping[str, object]],
+    *,
+    lookup_donor: "Callable[[str], Mapping[str, object]]",
+) -> dict[str, dict[str, object]]:
+    """Stamp donor vintage + digest onto the donor-held entries of ``groups``.
+
+    The ``groups`` block is written by
+    :meth:`gps_analysis.StagedEstimate.to_record_fragment`, which sees only
+    the ``HeldExplicit`` this module built — it cannot know the donor's
+    ``record_version``/``fitted_at`` or coefficients beyond one component.
+    This side resolved the pointer, so this side records what it resolved TO:
+    without that, a re-estimated donor changes every borrower's next record
+    with nothing anywhere saying it happened.
+
+    A donor entry is recognised by its provenance spelling
+    ``donor:STA@<fitted_at>`` — written by :func:`resolve_stage_plan` in this
+    same module, so writer and reader of the spelling cannot drift apart.
+    Re-deriving "which groups are donor-held" from the plan instead would
+    mean reimplementing ``estimate_staged``'s ownership rule (last hold
+    wins), i.e. a second place assembling the same decision.
+
+    Args:
+        groups: The fragment's ``groups`` block.
+        lookup_donor: Station code → that station's current record — the
+            same lookup the holds were resolved against moments earlier, so
+            vintage and digest describe the values actually used.
+
+    Returns:
+        A new mapping; non-donor entries are copied unchanged.
+    """
+    out: dict[str, dict[str, object]] = {}
+    for group, entry in groups.items():
+        annotated = dict(entry)
+        provenance = annotated.get("provenance")
+        if isinstance(provenance, str) and provenance.startswith("donor:"):
+            station = provenance[len("donor:") :].partition("@")[0]
+            record = lookup_donor(station)
+            annotated["donor"] = station
+            annotated["donor_fitted_at"] = record.get("fitted_at")
+            annotated["donor_record_version"] = record.get("record_version")
+            annotated["donor_digest"] = donor_group_digest(record, group, donor=station)
+        out[group] = annotated
+    return out
+
+
+def donor_drift_warnings(
+    previous: Mapping[str, object] | None,
+    current: Mapping[str, object],
+    *,
+    station: str,
+) -> list[str]:
+    """Name every donor whose values moved between two of a station's records.
+
+    ``DonorRef`` is a pointer by design — re-estimating a donor propagates to
+    every borrower — and this is the propagation's only witness: compare the
+    ``donor_digest`` the deployed record stored against the one this run just
+    resolved.  A pure comparison of two records; no lookup, no I/O, and no
+    veto — the caller warns and the NEW value is used regardless (pointer
+    semantics preserved).
+
+    A changed ``donor`` station or a group no longer donor-held is a plan
+    edit, not drift, and stays silent: the operator did that on purpose.
+    A ``previous`` of None (first commit, or no deployed record) has nothing
+    to compare and returns no warnings.
+
+    Args:
+        previous: The station's deployed record, or None.
+        current: The record this run produced.
+        station: The borrowing station, for the warning text.
+
+    Returns:
+        One message per drifted (group, donor), empty when nothing drifted.
+    """
+    if previous is None:
+        return []
+    prev_groups = previous.get("groups")
+    cur_groups = current.get("groups")
+    if not isinstance(prev_groups, Mapping) or not isinstance(cur_groups, Mapping):
+        return []
+    out: list[str] = []
+    for group, cur in cur_groups.items():
+        if not isinstance(cur, Mapping):
+            continue
+        donor = cur.get("donor")
+        digest = cur.get("donor_digest")
+        if donor is None or digest is None:
+            continue
+        prev = prev_groups.get(group)
+        if not isinstance(prev, Mapping) or prev.get("donor") != donor:
+            continue
+        prev_digest = prev.get("donor_digest")
+        if prev_digest is None or prev_digest == digest:
+            continue
+        out.append(
+            f"{station}: donor {donor} drifted under held group {group!r} — "
+            f"the deployed record borrowed coefficients {prev_digest} "
+            f"(donor fitted_at {prev.get('donor_fitted_at')}), this run "
+            f"resolved {digest} (donor fitted_at {cur.get('donor_fitted_at')}). "
+            f"The NEW values are used (donor holds are pointers); review the "
+            f"borrow if {donor}'s re-estimation was not meant to reach "
+            f"{station}."
+        )
+    return out
 
 
 def resolve_stage_plan(

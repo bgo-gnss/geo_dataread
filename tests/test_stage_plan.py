@@ -536,3 +536,140 @@ class TestRecordIsValidConfig:
             [{"name": "long", "free": ["secular"], "segments": None}]
         )
         assert plan.stages[0].segments is None
+
+
+def _donor_record(components: list[list[float]], fitted_at: str = "2026-01-01") -> dict:
+    """A minimal multi-component donor record (``to_record`` shape)."""
+    return {
+        "model": "lineperiodic",
+        "record_version": 1,
+        "fitted_at": fitted_at,
+        "components": [{"params": p} for p in components],
+    }
+
+
+class TestDonorGroupDigest:
+    """The digest is the drift check's whole evidence — pin its sensitivity."""
+
+    def test_stable_across_a_json_round_trip(self) -> None:
+        # Records store full-repr floats and JSON round-trips them
+        # bit-identically; a digest that changed on write -> deploy -> read
+        # would cry drift on every batch run.
+        import json
+
+        from geo_dataread.stage_plan import donor_group_digest
+
+        rec = _donor_record([[10.0, 2.0, 1.0, -1.0, 0.5, -0.5]])
+        rt = json.loads(json.dumps(rec))
+        assert donor_group_digest(rec, "secular", donor="OLAC") == donor_group_digest(
+            rt, "secular", donor="OLAC"
+        )
+
+    def test_a_change_in_any_component_changes_it(self) -> None:
+        # Holds are resolved PER COMPONENT, so a donor whose east moved while
+        # north stayed put has drifted — a component-0 digest would miss it.
+        from geo_dataread.stage_plan import donor_group_digest
+
+        base = [[10.0, 2.0, 0, 0, 0, 0], [5.0, 1.0, 0, 0, 0, 0]]
+        moved_east = [[10.0, 2.0, 0, 0, 0, 0], [5.0, 1.1, 0, 0, 0, 0]]
+        assert donor_group_digest(
+            _donor_record(base), "secular", donor="OLAC"
+        ) != donor_group_digest(_donor_record(moved_east), "secular", donor="OLAC")
+
+    def test_other_groups_do_not_move_it(self) -> None:
+        from geo_dataread.stage_plan import donor_group_digest
+
+        a = _donor_record([[10.0, 2.0, 1.0, -1.0, 0.5, -0.5]])
+        b = _donor_record([[10.0, 2.0, 9.0, -9.0, 9.0, -9.0]])
+        assert donor_group_digest(a, "secular", donor="X") == donor_group_digest(
+            b, "secular", donor="X"
+        )
+        assert donor_group_digest(a, "periodic", donor="X") != donor_group_digest(
+            b, "periodic", donor="X"
+        )
+
+    def test_an_empty_record_is_refused(self) -> None:
+        # A digest of nothing equals another digest of nothing and would hide
+        # the malformation it should surface.
+        from geo_dataread.stage_plan import donor_group_digest
+
+        with pytest.raises(ValueError, match="no components"):
+            donor_group_digest(
+                {"model": "lineperiodic", "components": []}, "secular", donor="X"
+            )
+
+
+class TestAnnotateDonorGroups:
+    def test_donor_entries_gain_vintage_and_digest(self) -> None:
+        from geo_dataread.stage_plan import annotate_donor_groups, donor_group_digest
+
+        donor = _donor_record([[10.0, 2.0, 0, 0, 0, 0]], fitted_at="2026-07-01")
+        groups = {
+            "secular": {"indices": [0, 1], "provenance": "donor:OLAC@2026-07-01"},
+            "periodic": {"indices": [2, 3, 4, 5], "provenance": "self"},
+        }
+        out = annotate_donor_groups(groups, lookup_donor=lambda s: donor)
+        assert out["secular"]["donor"] == "OLAC"
+        assert out["secular"]["donor_fitted_at"] == "2026-07-01"
+        assert out["secular"]["donor_record_version"] == 1
+        assert out["secular"]["donor_digest"] == donor_group_digest(
+            donor, "secular", donor="OLAC"
+        )
+        # a self group gains nothing and the input is not mutated
+        assert out["periodic"] == {"indices": [2, 3, 4, 5], "provenance": "self"}
+        assert "donor" not in groups["secular"]
+
+
+class TestDonorDriftWarnings:
+    """The pointer's only witness: a pure comparison of two records."""
+
+    @staticmethod
+    def _rec(digest: str | None, *, donor: str = "OLAC", vintage: str = "v1") -> dict:
+        entry: dict = {"indices": [0, 1], "provenance": f"donor:{donor}@{vintage}"}
+        if digest is not None:
+            entry.update(donor=donor, donor_fitted_at=vintage, donor_digest=digest)
+        return {"groups": {"secular": entry}}
+
+    def test_a_drifted_donor_is_named_with_both_digests(self) -> None:
+        from geo_dataread.stage_plan import donor_drift_warnings
+
+        msgs = donor_drift_warnings(
+            self._rec("aaa111"), self._rec("bbb222", vintage="v2"), station="JONC"
+        )
+        assert len(msgs) == 1
+        for token in ("JONC", "OLAC", "aaa111", "bbb222", "'secular'"):
+            assert token in msgs[0]
+
+    def test_an_unchanged_donor_is_silent(self) -> None:
+        from geo_dataread.stage_plan import donor_drift_warnings
+
+        assert (
+            donor_drift_warnings(self._rec("aaa111"), self._rec("aaa111"), station="J")
+            == []
+        )
+
+    def test_a_changed_donor_station_is_a_plan_edit_not_drift(self) -> None:
+        from geo_dataread.stage_plan import donor_drift_warnings
+
+        msgs = donor_drift_warnings(
+            self._rec("aaa111", donor="OLAC"),
+            self._rec("bbb222", donor="VMEY"),
+            station="J",
+        )
+        assert msgs == []
+
+    def test_nothing_recorded_means_nothing_drifted(self) -> None:
+        # First commit (no previous record), a legacy previous without a
+        # groups block, and a previous whose group was fitted self — none of
+        # these has a recorded borrow to have drifted FROM.
+        from geo_dataread.stage_plan import donor_drift_warnings
+
+        cur = self._rec("bbb222")
+        assert donor_drift_warnings(None, cur, station="J") == []
+        assert donor_drift_warnings({"model": "lineperiodic"}, cur, station="J") == []
+        assert (
+            donor_drift_warnings(
+                {"groups": {"secular": {"provenance": "self"}}}, cur, station="J"
+            )
+            == []
+        )
