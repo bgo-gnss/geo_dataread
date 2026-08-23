@@ -556,6 +556,7 @@ def station_record_from_arrays(
     refs: Mapping[str, Any] | None = None,
     stage_plan: Any | None = None,
     lookup_donor: Any | None = None,
+    lookup_secular: Any | None = None,
     terms: Sequence[str] | None = None,
 ) -> dict[str, Any] | None:
     """Estimate one station's stored-detrend record from ready arrays.
@@ -624,6 +625,7 @@ def station_record_from_arrays(
         refs=refs,
         stage_plan=stage_plan,
         lookup_donor=lookup_donor,
+        lookup_secular=lookup_secular,
         terms=terms,
     )
     return None if result is None else result.record
@@ -648,6 +650,8 @@ def _restage(
     settings: StationFitSettings,
     plan: Any,
     lookup_donor: Any,
+    lookup_secular: Any = None,
+    station: str | None = None,
 ) -> tuple[Any, dict[str, Any]]:
     """Re-fit an already-detected estimate under a staged plan.
 
@@ -764,7 +768,13 @@ def _restage(
         # Resolved PER COMPONENT: a donor hold borrows that component's
         # coefficients, so one resolution for all three would borrow north's
         # numbers into east and up.
-        stages = resolve_stage_plan(plan, lookup_donor=lookup_donor, component=c)
+        stages = resolve_stage_plan(
+            plan,
+            lookup_donor=lookup_donor,
+            component=c,
+            lookup_secular=lookup_secular,
+            station=station,
+        )
         staged = estimate_staged(
             fit_model,
             t_win[keep],
@@ -858,6 +868,7 @@ def station_estimate_from_arrays(
     refs: Mapping[str, Any] | None = None,
     stage_plan: Any | None = None,
     lookup_donor: Any | None = None,
+    lookup_secular: Any | None = None,
     terms: Sequence[str] | None = None,
 ) -> StationEstimate | None:
     """As :func:`station_record_from_arrays`, keeping the fit diagnostics.
@@ -930,7 +941,15 @@ def station_estimate_from_arrays(
     stage_fragment: dict[str, Any] | None = None
     if stage_plan is not None:
         est, stage_fragment = _restage(
-            est, yearf, data, sigma, settings, stage_plan, lookup_donor
+            est,
+            yearf,
+            data,
+            sigma,
+            settings,
+            stage_plan,
+            lookup_donor,
+            lookup_secular,
+            sta,
         )
 
     record_refs: dict[str, Any] = {
@@ -989,6 +1008,7 @@ def estimate_station(
     fitted_at: str | None = None,
     stage_plan: Any | None = None,
     lookup_donor: Any | None = None,
+    lookup_secular: Any | None = None,
     terms: Sequence[str] | None = None,
 ) -> StationResult:
     """Read one station's local plate-removed TOT series and estimate it.
@@ -1043,6 +1063,7 @@ def estimate_station(
             refs=refs,
             stage_plan=stage_plan,
             lookup_donor=lookup_donor,
+            lookup_secular=lookup_secular,
             terms=terms,
         )
     except ValueError as exc:
@@ -1187,6 +1208,46 @@ def _load_station_models(explicit: Path | None) -> tuple[dict[str, Any], str | N
     if resolved is None or not resolved.is_file():
         return {}, None
     return dict(read_station_models(resolved)), str(resolved)
+
+
+def secular_lookup(yaml_path: "Path | str | None", sta: str) -> Any:
+    """Build the ``lookup_secular`` a ``store:`` hold is resolved against.
+
+    Reads ``detrend.secular`` from ``analysis.yaml``.  A ``store:`` hold that
+    finds no entry RAISES rather than degrading to estimating the group: the
+    operator asked to hold the saved background, and quietly fitting one
+    instead would store different science under the same command.
+
+    ``station=None`` in the ref means "this station's own", which is why the
+    station code is bound here rather than guessed at resolution time.
+    """
+    from geo_dataread.secular_store import read_secular
+
+    entries = read_secular(yaml_path) if yaml_path else {}
+
+    def lookup(who: str | None) -> Any:
+        code = who or sta
+        entry = entries.get(code)
+        if entry is None:
+            where = yaml_path or "<no analysis.yaml>"
+            raise RuntimeError(
+                f"hold =store:{who or 'self'}: {code} has no saved background "
+                f"in {where}. Estimate one first and save it with "
+                f"`gps-detrend-workbench {code} --save-secular`."
+            )
+        if entry.use_sta:
+            # The CSV's UseSTA, carried over: a borrow row points at another
+            # station rather than storing coefficients of its own.
+            donor = entries.get(entry.use_sta)
+            if donor is None:
+                raise RuntimeError(
+                    f"hold =store:{code}: it borrows from {entry.use_sta}, "
+                    f"which has no saved background either"
+                )
+            return donor
+        return entry
+
+    return lookup
 
 
 def _deployed_donor_lookup(params_path: Path | None) -> Any:

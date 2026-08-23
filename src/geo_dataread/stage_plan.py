@@ -53,7 +53,7 @@ from __future__ import annotations
 import dataclasses
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, cast
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     import numpy as np
@@ -62,6 +62,7 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 __all__ = [
     "DonorRef",
     "HoldRef",
+    "StoreRef",
     "StagePlan",
     "StageRef",
     "StageSpec",
@@ -82,7 +83,7 @@ __all__ = [
 ]
 
 #: How a held group's value is spelled on the command line and in config.
-_HOLD_KINDS = ("stage", "donor")
+_HOLD_KINDS = ("stage", "donor", "store")
 
 Segments = tuple[tuple[float | None, float | None], ...]
 
@@ -110,7 +111,25 @@ class DonorRef:
     station: str
 
 
-HoldRef = StageRef | DonorRef
+@dataclasses.dataclass(frozen=True)
+class StoreRef:
+    """Hold a term group at a SAVED BACKGROUND's value — also a pointer.
+
+    Distinct from :class:`DonorRef` because it resolves against a different
+    object: the ``detrend.secular`` store, which holds s(t) as a reusable
+    component, rather than a finished ``detrend_params.json`` record which
+    holds s(t) + steps + transients.  Both are pointers; they point at
+    different things, and the grammar names the kind precisely so that
+    difference cannot be inferred wrongly.
+
+    ``station=None`` means "this station's own saved background", which is
+    the common case: fix s(t) once, then estimate the events against it.
+    """
+
+    station: str | None = None
+
+
+HoldRef = StageRef | DonorRef | StoreRef
 
 
 @dataclasses.dataclass(frozen=True)
@@ -257,7 +276,7 @@ def parse_stage_spec(spec: str) -> StageSpec:
 
 
 def parse_hold_spec(spec: str) -> tuple[str | None, str, HoldRef]:
-    """Parse one ``--hold [STAGE:]GROUP=stage:NAME`` or ``=donor:STA``.
+    """Parse one ``--hold [STAGE:]GROUP=stage:NAME``, ``=donor:STA`` or ``=store:…``.
 
     Args:
         spec: The raw flag value.
@@ -289,10 +308,20 @@ def parse_hold_spec(spec: str) -> tuple[str | None, str, HoldRef]:
         raise ValueError(
             f"--hold {spec!r}: the held value must name its kind — write "
             f"'{left}=stage:NAME' to hold at what an earlier stage fitted, or "
-            f"'{left}=donor:STA' to borrow station STA's value. "
-            f"These are stored differently, so the kind is never inferred."
+            f"'{left}=donor:STA' to borrow station STA's finished record, or "
+            f"'{left}=store:self' / '{left}=store:STA' to hold at a SAVED "
+            f"BACKGROUND. These resolve against different objects and are "
+            f"stored differently, so the kind is never inferred."
         )
-    ref: HoldRef = StageRef(value) if kind == "stage" else DonorRef(value)
+    if kind == "stage":
+        ref: HoldRef = StageRef(value)
+    elif kind == "donor":
+        ref = DonorRef(value)
+    else:
+        # `store:self` is the spelling for "my own saved background". A bare
+        # `store:` cannot be written -- the parser requires a value after the
+        # colon, and relaxing that would make an empty kind look deliberate.
+        ref = StoreRef(None if value.lower() == "self" else value)
 
     if ":" in left:
         stage, _, group = left.partition(":")
@@ -522,7 +551,7 @@ def donor_group_values(
             would hold a group at nothing and look like a successful fit.
     """
     import numpy as np
-    from gps_analysis.staged import group_parameter_mask
+    from gps_analysis.staged import record_group_mask
 
     model = record.get("model")
     if not isinstance(model, str):
@@ -538,11 +567,17 @@ def donor_group_values(
         raise ValueError(f"donor {donor!r}: component {component} is malformed")
     params = np.asarray(entry.get("params"), dtype=float)
 
-    mask = group_parameter_mask(model, group)
+    # Record-aware, not model-aware: `to_record` APPENDS one step_amp_k per
+    # declared step, so a donor in steps.csv stores 7 parameters against
+    # lineperiodic's 6. Comparing the two widths refused every such donor --
+    # which took out borrowing from SELF or HOFN, and with it the whole
+    # "hold this station's own saved background, estimate only the events"
+    # workflow. Measured 2026-08-23.
+    mask = record_group_mask(record, group)
     if mask.size != params.size:
         raise ValueError(
-            f"donor {donor!r}: model {model!r} has {mask.size} parameters but "
-            f"the record stores {params.size} for component {component}"
+            f"donor {donor!r}: model {model!r} resolves {mask.size} parameters "
+            f"but the record stores {params.size} for component {component}"
         )
     if not mask.any():
         raise ValueError(
@@ -709,6 +744,8 @@ def resolve_stage_plan(
     *,
     lookup_donor: "Callable[[str], Mapping[str, object]]",
     component: int,
+    lookup_secular: "Callable[[str | None], Any] | None" = None,
+    station: str | None = None,
 ) -> "tuple[Stage, ...]":
     """Turn a :class:`StagePlan` into ``gps_analysis.Stage`` objects.
 
@@ -728,11 +765,19 @@ def resolve_stage_plan(
         plan: The parsed plan.
         lookup_donor: Station code → that station's current record.
         component: Which component's coefficients to borrow.
+        lookup_secular: Station code (or None for this station) → its saved
+            background, for :class:`StoreRef`.  Required only if the plan
+            uses one; a plan that does and has no lookup is refused rather
+            than silently falling back to estimating the group.
+        station: This station's code, so ``store:self`` can name itself in
+            the provenance string.
 
     Returns:
         Stages ready for :func:`gps_analysis.estimate_staged`.
     """
     from gps_analysis.staged import HeldExplicit, HeldFromStage, Stage
+
+    from geo_dataread.secular_store import secular_group_values
 
     stages: list[Stage] = []
     for spec in plan.stages:
@@ -740,6 +785,27 @@ def resolve_stage_plan(
         for group, ref in spec.held.items():
             if isinstance(ref, StageRef):
                 held[group] = HeldFromStage(ref.stage)
+                continue
+            if isinstance(ref, StoreRef):
+                if lookup_secular is None:
+                    raise RuntimeError(
+                        f"hold {group!r}=store: no secular store is reachable "
+                        f"here. The saved background is config; pass an "
+                        f"analysis.yaml that has one, or estimate the group "
+                        f"instead of holding it."
+                    )
+                who = ref.station or station or "self"
+                entry = lookup_secular(ref.station)
+                values = secular_group_values(
+                    entry, group, component=component, station=who
+                )
+                held[group] = HeldExplicit(
+                    values=values,
+                    # A DIFFERENT kind from donor: this resolves against the
+                    # background store, not a finished record, and a reader
+                    # of the provenance must be able to tell which.
+                    source=f"store:{who}@{entry.fitted_at}",
+                )
                 continue
             record = lookup_donor(ref.station)
             values = donor_group_values(

@@ -673,3 +673,62 @@ class TestDonorDriftWarnings:
             )
             == []
         )
+
+
+class TestBorrowFromADonorThatHasSteps:
+    """Donor borrowing must survive a donor record carrying a declared step.
+
+    Measured 2026-08-23: `donor_group_values` built its mask from the MODEL
+    (6 parameters for lineperiodic) and compared it to the RECORD (7, because
+    `to_record` appends step_amp_1). Every station in steps.csv was therefore
+    unborrowable -- and the workflow that needs it most is holding a
+    station's OWN saved background while estimating only the events, where
+    the donor is the station itself and very often has a step.
+    """
+
+    RECORD = {
+        "model": "lineperiodic",
+        "param_names": [
+            "offset",
+            "rate",
+            "cos_annual",
+            "sin_annual",
+            "cos_semiannual",
+            "sin_semiannual",
+            "step_amp_1",
+        ],
+        "components": [
+            {"params": [10.0, 20.0, 1.0, 2.0, 3.0, 4.0, -150.0]},
+            {"params": [11.0, 21.0, 5.0, 6.0, 7.0, 8.0, 140.0]},
+        ],
+    }
+
+    def test_periodic_borrows_the_seasonal_only(self) -> None:
+        from geo_dataread.stage_plan import donor_group_values
+
+        got = donor_group_values(self.RECORD, "periodic", component=0, donor="SELF")
+        assert list(got) == [1.0, 2.0, 3.0, 4.0]
+
+    def test_secular_borrows_offset_and_rate_not_the_step(self) -> None:
+        from geo_dataread.stage_plan import donor_group_values
+
+        got = donor_group_values(self.RECORD, "secular", component=1, donor="SELF")
+        assert list(got) == [11.0, 21.0], "the appended step leaked into secular"
+
+    def test_the_step_itself_is_borrowable(self) -> None:
+        from geo_dataread.stage_plan import donor_group_values
+
+        got = donor_group_values(self.RECORD, "step", component=0, donor="SELF")
+        assert list(got) == [-150.0]
+
+    def test_a_stepless_donor_still_works(self) -> None:
+        """The case that never broke — keep it covered."""
+        from geo_dataread.stage_plan import donor_group_values
+
+        rec = {
+            "model": "lineperiodic",
+            "param_names": self.RECORD["param_names"][:6],
+            "components": [{"params": [10.0, 20.0, 1.0, 2.0, 3.0, 4.0]}],
+        }
+        got = donor_group_values(rec, "periodic", component=0, donor="DYNG")
+        assert list(got) == [1.0, 2.0, 3.0, 4.0]
