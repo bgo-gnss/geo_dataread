@@ -771,16 +771,6 @@ def donor_drift_warnings(
     return out
 
 
-#: Parameter names that carry the DATUM of a background — the zeroth
-#: polynomial coefficient.  Identified by NAME, never by positional index:
-#: ``terms.GROUP_ORDER``'s docstring pins ``params[1] == "rate"`` as a
-#: load-bearing invariant read by six sites, so nothing here may reason
-#: about positions.  ``poly_0`` is listed for completeness — the
-#: :class:`gps_analysis.terms.Polynomial` name for degree 0 is ``offset``
-#: (``poly_m`` starts at m = 3), but a hand-written record could spell it.
-_DATUM_PARAM_NAMES = frozenset({"offset", "poly_0"})
-
-
 def anchored_offset(
     y: "np.ndarray",
     model: "np.ndarray",
@@ -819,13 +809,9 @@ def anchored_offset(
         anchor window and refuses an empty selection with a message naming
         the station, so this primitive can stay a pure formula.
     """
-    import numpy as np
+    from gps_analysis.detrend import weighted_datum
 
-    resid = np.asarray(y, dtype=np.float64) - np.asarray(model, dtype=np.float64)
-    if sigma is None:
-        return float(np.mean(resid))
-    w = 1.0 / np.square(np.asarray(sigma, dtype=np.float64))
-    return float(np.sum(w * resid) / np.sum(w))
+    return weighted_datum(y, model, sigma)
 
 
 def _entry_group_names(entry: Any, group: str, *, station: str) -> tuple[str, ...]:
@@ -884,7 +870,7 @@ def resolve_stage_plan(
     holding its own — the ~30–40 mm on E/U is pure datum error, and on a
     real borrower it lands in whatever is free (a step amplitude, or the
     seasonal).  The fix replaces ONLY the donor's zeroth polynomial
-    coefficient — identified by NAME (:data:`_DATUM_PARAM_NAMES`), never by
+    coefficient — identified by NAME (:data:`gps_analysis.DATUM_PARAM_NAMES`), never by
     position — with the borrower-local anchor
 
         ``offset_local = anchored_offset(y_b, s_donor∖offset (+ p_donor), σ_b)``
@@ -940,6 +926,7 @@ def resolve_stage_plan(
         Stages ready for :func:`gps_analysis.estimate_staged`.
     """
     import numpy as np
+    from gps_analysis.detrend import DATUM_PARAM_NAMES
     from gps_analysis.staged import (
         HeldExplicit,
         HeldFromStage,
@@ -985,6 +972,10 @@ def resolve_stage_plan(
                     # background store, not a finished record, and a reader
                     # of the provenance must be able to tell which.
                     source=f"store:{who}@{entry.fitted_at}",
+                    # Own background ⇒ own datum. A cross-station one is
+                    # left unmarked here and re-anchored (and marked) below;
+                    # the leaf refuses it if that pass ever misses it.
+                    local_datum=ref.station is None or ref.station == station,
                 )
                 borrowed_terms[group] = (
                     _entry_group_names(entry, group, station=who),
@@ -1003,6 +994,7 @@ def resolve_stage_plan(
                 # so a stored borrow can be checked against a re-estimated
                 # donor rather than merely asserted.
                 source=f"donor:{ref.station}@{fitted_at}",
+                local_datum=ref.station == station,
             )
             names_raw = record.get("param_names")
             rec_names = (
@@ -1056,7 +1048,7 @@ def resolve_stage_plan(
                 datum = [0]
             else:
                 names, values = borrowed_terms[group]
-                datum = [j for j, n in enumerate(names) if n in _DATUM_PARAM_NAMES]
+                datum = [j for j, n in enumerate(names) if n in DATUM_PARAM_NAMES]
             if not datum:
                 continue  # e.g. periodic: no DC term, nothing to re-anchor
             if len(datum) > 1:
@@ -1147,6 +1139,7 @@ def resolve_stage_plan(
                 # note, so a reader can tell a re-anchored borrow from a
                 # verbatim one -- and both from a `donor:` hold.
                 source=(f"{kind}:{who}@{vintage} anchored [{lo!r},{hi!r}]"),
+                local_datum=True,
             )
 
         stages.append(
