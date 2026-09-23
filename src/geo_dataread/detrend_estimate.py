@@ -18,7 +18,7 @@ Per-station fit catalog (``fit_windows.csv``)
 Fit windows and validity-gate overrides are per-station *reviewed
 decisions*, never hardcoded: they live in the deployed fit catalog,
 resolved through the shared :mod:`gps_parser.outlier_catalogs` mechanism
-exactly like ``steps.csv`` / ``protect_windows.csv`` (``postprocess.cfg``
+exactly like ``steps.yaml`` / ``protect_windows.csv`` (``postprocess.cfg``
 ``[FILES] fit_windows``, else ``<gpsconfig dir>/fit_windows.csv``; source
 of the deployed copy: ``gps-config-data/analysis-lane/fit_windows.csv``).
 CLI flags supply the GLOBAL defaults; a station's catalog row overrides
@@ -159,7 +159,7 @@ class FitCatalogRow:
     Every field except ``steps`` is an *override*: None = the operator left
     it blank = use the global default (open bound for the window fields).
     ``steps`` is the per-station known-step list for the fit window; None =
-    fall back to the deployed ``steps.csv`` catalog, an EXPLICIT empty
+    fall back to the deployed ``steps.yaml`` catalog, an EXPLICIT empty
     tuple cannot be expressed (list at least one epoch or rely on the
     window keeping steps outside).
     """
@@ -231,7 +231,7 @@ def default_fit_catalog_path() -> Path | None:
     """Resolve the deployed ``fit_windows.csv`` path via gps_parser.
 
     Resolution order (the shared :func:`gps_parser.outlier_catalogs.catalog_path`
-    mechanism — identical to ``steps.csv`` / ``protect_windows.csv``):
+    mechanism — identical to ``steps.yaml`` / ``protect_windows.csv``):
 
     1. ``postprocess.cfg`` ``[FILES] fit_windows``;
     2. ``<gpsconfig dir>/fit_windows.csv`` (the deploy-target default).
@@ -557,12 +557,13 @@ def station_record_from_arrays(
     stage_plan: Any | None = None,
     lookup_donor: Any | None = None,
     lookup_secular: Any | None = None,
+    anchor_window: tuple[float, float] | None = None,
     terms: Sequence[str] | None = None,
 ) -> dict[str, Any] | None:
     """Estimate one station's stored-detrend record from ready arrays.
 
     The testable core of the driver: window/gates per ``settings``, steps
-    from the settings (fit-catalog row) or the deployed ``steps.csv``
+    from the settings (fit-catalog row) or the deployed ``steps.yaml``
     (graceful), protect windows and per-station outlier levers through the
     shared graceful resolvers (the same wiring as the cleaned-``.NEU``
     writer), then the leaf :func:`gps_analysis.estimate_detrend` and
@@ -580,7 +581,7 @@ def station_record_from_arrays(
         settings: Resolved window/gates/steps for this station.
         model: Trajectory model registry code.
         frame: Reference-frame tag stored on the record.
-        steps_catalog: Explicit ``steps.csv`` path (dev override); None =
+        steps_catalog: Explicit ``steps.yaml`` path (dev override); None =
             deployed default. Ignored when the fit-catalog row lists steps.
         protect_windows: As :func:`gps_views.resolve_protect_windows`.
         outlier_overrides: Explicit ``outlier_overrides.csv`` path; None =
@@ -599,6 +600,12 @@ def station_record_from_arrays(
         fitted_at: Estimation timestamp for the record (None = unstamped,
             deterministic output).
         refs: Extra provenance merged into the record's ``refs``.
+        anchor_window: ``(start, end)`` [fractional yr] over which a
+            cross-station ``store:`` borrow is re-anchored to this
+            station's level; None = the full fit span.  Forwarded to
+            :func:`geo_dataread.stage_plan.resolve_stage_plan`, which
+            validates it and records the window used in the group's
+            provenance string.
 
     Returns:
         The station record (:meth:`DetrendEstimate.to_record` shape), or
@@ -626,6 +633,7 @@ def station_record_from_arrays(
         stage_plan=stage_plan,
         lookup_donor=lookup_donor,
         lookup_secular=lookup_secular,
+        anchor_window=anchor_window,
         terms=terms,
     )
     return None if result is None else result.record
@@ -652,6 +660,7 @@ def _restage(
     lookup_donor: Any,
     lookup_secular: Any = None,
     station: str | None = None,
+    anchor_window: tuple[float, float] | None = None,
 ) -> tuple[Any, dict[str, Any]]:
     """Re-fit an already-detected estimate under a staged plan.
 
@@ -767,13 +776,22 @@ def _restage(
         keep = inliers[c]
         # Resolved PER COMPONENT: a donor hold borrows that component's
         # coefficients, so one resolution for all three would borrow north's
-        # numbers into east and up.
+        # numbers into east and up. The component's own surviving series
+        # rides along so a cross-station `store:` borrow can be RE-ANCHORED
+        # to this station's level (the donor's `offset` is the donor's datum
+        # -- see resolve_stage_plan); with no --anchor-window the anchor
+        # averages over the full fit span, i.e. exactly the epochs the
+        # staged fit sees.
         stages = resolve_stage_plan(
             plan,
             lookup_donor=lookup_donor,
             component=c,
             lookup_secular=lookup_secular,
             station=station,
+            anchor_t=t_win[keep],
+            anchor_y=y_win[c][keep],
+            anchor_sigma=s_win[c][keep],
+            anchor_window=anchor_window,
         )
         staged = estimate_staged(
             fit_model,
@@ -848,6 +866,62 @@ def _restage(
         from geo_dataread.stage_plan import annotate_donor_groups
 
         fragment["groups"] = annotate_donor_groups(groups, lookup_donor=lookup_donor)
+
+    # The FULLY-borrowed station: every stage was apply-only (free: [] all the
+    # way down), so nothing was estimated on this station at all. That must be
+    # unmistakable to a reader, and the record already has the slot for it:
+    # `borrowed`, shaped exactly as gps_api's precompute `_borrowed_record`
+    # writes it and geo_dataread.gps_views surfaces it. The `groups` block
+    # carries the per-group detail (which store/donor, anchored over what
+    # window); this is the record-level flag.
+    stages_block = fragment.get("stages")
+    if (
+        isinstance(stages_block, list)
+        and stages_block
+        and all(not s.get("free") for s in stages_block)
+    ):
+        from gps_analysis.detrend import DETREND_METHOD_BORROWED
+
+        from geo_dataread.stage_plan import DonorRef, StoreRef
+
+        donors: list[str] = []
+        vintages: list[Any] = []
+        for st in plan.stages:
+            for ref in st.held.values():
+                if isinstance(ref, DonorRef):
+                    code, vintage = (
+                        ref.station,
+                        lookup_donor(ref.station).get("fitted_at"),
+                    )
+                elif (
+                    isinstance(ref, StoreRef) and ref.station and ref.station != station
+                ):
+                    code = ref.station
+                    vintage = (
+                        lookup_secular(ref.station).fitted_at
+                        if lookup_secular is not None
+                        else None
+                    )
+                else:
+                    continue
+                if code not in donors:
+                    donors.append(code)
+                    vintages.append(vintage)
+        if donors:
+            fragment["borrowed"] = {
+                "from": donors[0] if len(donors) == 1 else ",".join(donors),
+                "terms": "all",
+                "donor_fitted_at": (vintages[0] if len(vintages) == 1 else vintages),
+            }
+            # ...and re-tag the method to match. `detrend_method` is the field
+            # a reader consults to learn HOW the parameters were made, and the
+            # estimator stamped it from the outlier stage it ran while
+            # screening epochs for the figure -- true of the screening, false
+            # of the parameters, which no fit on this station produced.
+            # gps_views passes the tag through to the served provenance, so
+            # leaving it would have ELDC claim a step-augmented robust fit it
+            # never had.
+            est = _dc.replace(est, detrend_method=DETREND_METHOD_BORROWED)
     return _dc.replace(est, fits=tuple(fits), rms=tuple(rms)), fragment
 
 
@@ -869,6 +943,7 @@ def station_estimate_from_arrays(
     stage_plan: Any | None = None,
     lookup_donor: Any | None = None,
     lookup_secular: Any | None = None,
+    anchor_window: tuple[float, float] | None = None,
     terms: Sequence[str] | None = None,
 ) -> StationEstimate | None:
     """As :func:`station_record_from_arrays`, keeping the fit diagnostics.
@@ -950,6 +1025,7 @@ def station_estimate_from_arrays(
             lookup_donor,
             lookup_secular,
             sta,
+            anchor_window,
         )
 
     record_refs: dict[str, Any] = {
@@ -1232,8 +1308,17 @@ def secular_lookup(yaml_path: "Path | str | None", sta: str) -> Any:
             where = yaml_path or "<no analysis.yaml>"
             raise RuntimeError(
                 f"hold =store:{who or 'self'}: {code} has no saved background "
-                f"in {where}. Estimate one first and save it with "
-                f"`gps-detrend-workbench {code} --save-secular`."
+                f"in {where}.\n\n"
+                f"Two stores hold different objects, and only one is named "
+                f"here. `store:` reads the SECULAR STORE (analysis.yaml) -- "
+                f"s(t) as a reusable component, written by "
+                f"`gps-detrend-workbench {code} --save-secular`. `donor:` "
+                f"reads the FINISHED RECORD in detrend_params.json, which "
+                f"far more stations have; a `donor:` hold takes only the "
+                f"named group out of it, and is re-anchored to this "
+                f"station's level exactly like a store hold.\n\n"
+                f"So: estimate and save a background for {code}, or write "
+                f"`donor:{code}` if {code} already has a record."
             )
         if entry.use_sta:
             # The CSV's UseSTA, carried over: a borrow row points at another
@@ -1244,10 +1329,54 @@ def secular_lookup(yaml_path: "Path | str | None", sta: str) -> Any:
                     f"hold =store:{code}: it borrows from {entry.use_sta}, "
                     f"which has no saved background either"
                 )
-            return donor
+            entry = donor
+        _check_frame(entry, borrower=sta, code=code)
         return entry
 
     return lookup
+
+
+def _check_frame(entry: Any, *, borrower: str, code: str) -> None:
+    """Refuse a borrow that would cross plate-model reference frames.
+
+    A plate-frame velocity means nothing without the plate model that was
+    removed to make it, and ``gps_read.getData(ref="plate")`` removes a
+    PER-STATION one keyed by :func:`geofunc.geofunc.plateDict`.  Around
+    Svartsengi that assignment is mixed — SENG/SKSH/ELDC/THOB are NOAM while
+    GRIV/AUSV/VMOS/SUDV and their neighbours are EURA — and the two frames
+    differ by the full spreading rate: measured 2026-08-26 on SENG's own
+    series through both models, ``EURA − NOAM = N +2.26, E −15.97 mm/yr``.
+
+    That is the same order as the deformation these stations are watched for,
+    so a silent frame cross would not merely add error, it would manufacture
+    an apparent velocity change of intrusion size.  Only entries that DECLARE
+    a frame are checked: a station entry inherits its own station's
+    assignment and needs no annotation, while a derived (cluster or model)
+    entry belongs to no station and must say.
+
+    Raises:
+        RuntimeError: naming both frames and the fix, never a warning — the
+            wrong answer here is indistinguishable from a real signal.
+    """
+    frame = getattr(entry, "frame", None)
+    if not frame:
+        return
+    try:
+        from geofunc.geofunc import plateDict
+
+        assigned = plateDict().get(borrower)
+    except Exception:  # noqa: BLE001 - no plate file reachable: cannot check
+        return
+    if assigned is None or str(assigned).upper() == str(frame).upper():
+        return
+    raise RuntimeError(
+        f"hold =store:{code}: that background is referenced to {frame!r}, but "
+        f"{borrower} is assigned to plate {assigned!r}, so its series has a "
+        f"different plate model removed. The two frames differ by the full "
+        f"spreading rate (~16 mm/yr in east on Reykjanes) — applying this "
+        f"background would look like deformation. Use the {assigned} variant "
+        f"of the background, or change {borrower}'s plate assignment."
+    )
 
 
 def _deployed_donor_lookup(params_path: Path | None) -> Any:
@@ -1354,7 +1483,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--steps",
         type=Path,
         default=None,
-        help="steps.csv dev override (default: deployed catalog)",
+        help="steps.yaml dev override (default: deployed catalog)",
     )
     parser.add_argument(
         "--protect-windows",

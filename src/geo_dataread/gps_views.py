@@ -84,13 +84,16 @@ STEPS_FILENAME = _oc.STEPS_FILENAME
 """Deployed per-station step-catalog filename (gpsconfig-owned)."""
 
 STEP_COMPONENTS = _oc.STEP_COMPONENTS
-"""Component tags a ``steps.csv`` row may carry (``ALL`` = every component)."""
+"""Component tags a ``steps.yaml`` entry may carry (``ALL`` = every component)."""
 
 PROTECT_WINDOWS_FILENAME = _oc.PROTECT_WINDOWS_FILENAME
 """Deployed per-station protect-window catalog filename (gpsconfig-owned)."""
 
 OUTLIER_OVERRIDES_FILENAME = _oc.OUTLIER_OVERRIDES_FILENAME
 """Deployed per-station outlier-override catalog filename (gpsconfig-owned)."""
+
+EXCLUDED_EPOCHS_FILENAME = _oc.EXCLUDED_EPOCHS_FILENAME
+"""Deployed per-station manual-epoch-exclusion catalog filename."""
 
 _COMPONENTS = ("north", "east", "up")
 
@@ -263,13 +266,13 @@ def _degrade(prov: dict[str, Any], reason: str) -> dict[str, Any]:
 
 
 def default_steps_path() -> Path | None:
-    """Resolve the deployed ``steps.csv`` path via gps_parser.
+    """Resolve the deployed ``steps.yaml`` path via gps_parser.
 
     Resolution order (mirrors :func:`default_params_path`):
 
     1. ``postprocess.cfg`` ``[FILES] steps`` (resolved by
        :meth:`gps_parser.ConfigParser.getPostProcessConfig`);
-    2. ``<gpsconfig dir>/steps.csv`` (the deploy-target default).
+    2. ``<gpsconfig dir>/steps.yaml`` (the deploy-target default).
 
     Returns:
         The resolved path (which may not exist yet — the step catalog is
@@ -279,7 +282,7 @@ def default_steps_path() -> Path | None:
 
 
 def read_step_catalog(path: str | Path | None = None) -> dict[str, tuple[float, ...]]:
-    """Read the deployed per-station step catalog (``steps.csv``).
+    """Read the deployed per-station step catalog (``steps.yaml``).
 
     This is geo_dataread's OWN reader (Tier 1 must not import ``gps_api``);
     it parses the SAME format as
@@ -389,6 +392,23 @@ def default_protect_windows_path() -> Path | None:
     return cast(
         "Path | None",
         _oc.catalog_path("protect_windows", _oc.PROTECT_WINDOWS_FILENAME),
+    )
+
+
+def default_excluded_epochs_path() -> Path | None:
+    """Resolve the deployed ``excluded_epochs.csv`` path via gps_parser.
+
+    Same resolution order as :func:`default_protect_windows_path` (option
+    ``[FILES] excluded_epochs``, then the ``<gpsconfig dir>`` default).
+
+    Returns:
+        The resolved path (which may not exist yet — the manual-exclusion
+        catalog is an optional enhancement), or None when no gpsconfig is
+        reachable.
+    """
+    return cast(
+        "Path | None",
+        _oc.catalog_path("excluded_epochs", _oc.EXCLUDED_EPOCHS_FILENAME),
     )
 
 
@@ -504,6 +524,98 @@ def resolve_protect_windows(
         return station_protect_windows(sta, catalog=protect_windows)
     windows = tuple((float(a), float(b)) for a, b in protect_windows)
     return windows, "explicit"
+
+
+def read_excluded_epochs(
+    path: str | Path | None = None,
+) -> dict[str, tuple[float, ...]]:
+    """Read the deployed per-station manual-epoch-exclusion catalog.
+
+    Delegates to the shared ``gps_parser.outlier_catalogs`` reader (single
+    source) — the operator-declared blunder epochs force-flagged as outliers
+    (the INVERSE of ``protect_windows.csv``).
+
+    Args:
+        path: Explicit catalog path; None resolves via the shared resolver.
+
+    Returns:
+        ``{station: (epoch, ...)}`` — per-station fractional-year epochs.
+
+    Raises:
+        FileNotFoundError: When the catalog cannot be resolved/read.
+        ValueError: On a malformed row.
+    """
+    return cast("dict[str, tuple[float, ...]]", _oc.read_excluded_epochs(path))
+
+
+def station_excluded_epochs(
+    sta: str, *, catalog: str | Path | None = None
+) -> tuple[tuple[float, ...], str | None]:
+    """Operator-declared excluded epochs for one station, graceful degrade.
+
+    The manual-removal lever: resolves and reads the catalog, returns the
+    station's force-flag epochs and the resolved source path.  Exclusions
+    are an ENHANCEMENT — a missing / unreadable catalog must NEVER hard-fail
+    cleaning, so ANY problem warns (``UserWarning`` + log) and returns no
+    exclusions.
+
+    Args:
+        sta: Station four-letter name.
+        catalog: Explicit catalog path; None resolves the deployed default.
+
+    Returns:
+        ``(epochs, source)`` — a tuple of fractional-year epochs (possibly
+        empty) and the resolved catalog path (or None when unavailable).
+    """
+    resolved = default_excluded_epochs_path() if catalog is None else Path(catalog)
+    try:
+        excluded_by_sta = read_excluded_epochs(resolved)
+    except FileNotFoundError as exc:
+        warnings.warn(
+            f"no excluded-epoch catalog ({exc}); cleaning WITHOUT manual "
+            "epoch exclusions",
+            UserWarning,
+            stacklevel=2,
+        )
+        logger.warning("no excluded-epoch catalog: %s", exc)
+        return (), None
+    except (ValueError, OSError) as exc:
+        warnings.warn(
+            f"{sta}: excluded-epoch catalog unreadable ({exc}); cleaning "
+            "WITHOUT manual epoch exclusions",
+            UserWarning,
+            stacklevel=2,
+        )
+        logger.warning("%s: excluded-epoch catalog unreadable: %s", sta, exc)
+        return (), None
+    return excluded_by_sta.get(sta, ()), str(resolved)
+
+
+def resolve_excluded_epochs(
+    sta: str,
+    exclude_epochs: str | Path | Sequence[float] | None = None,
+) -> tuple[tuple[float, ...], str | None]:
+    """Normalize the ``exclude_epochs`` cleaning kwarg to epochs + source.
+
+    Mirrors :func:`resolve_protect_windows` so the two cleaning paths treat
+    the kwarg identically:
+
+    - ``None`` — resolve the station's exclusions from the deployed catalog
+      (graceful degrade on a missing/unreadable catalog);
+    - ``str`` / :class:`~pathlib.Path` — resolve from the catalog at that
+      path (same graceful degrade);
+    - an explicit sequence of fractional-year epochs — used directly
+      (source ``"explicit"``), the REPL / operator override.
+
+    Returns:
+        ``(epochs, source)`` — a tuple of fractional-year epochs (possibly
+        empty) and the source (catalog path, ``"explicit"``, or None).
+    """
+    if exclude_epochs is None:
+        return station_excluded_epochs(sta)
+    if isinstance(exclude_epochs, (str, Path)):
+        return station_excluded_epochs(sta, catalog=exclude_epochs)
+    return tuple(float(e) for e in exclude_epochs), "explicit"
 
 
 # ---------------------------------------------------------------------------
@@ -861,6 +973,7 @@ def detect_view_outliers(
     protect_windows: tuple[tuple[float, float], ...] = (),
     min_outlier: npt.ArrayLike | None = None,
     provisional_days: float = PROVISIONAL_DAYS,
+    exclude_epochs: npt.ArrayLike | None = None,
 ) -> tuple[BoolArray, dict[str, Any]]:
     """Outlier flags for a series view, with graceful degrade.
 
@@ -882,6 +995,13 @@ def detect_view_outliers(
         min_outlier: Outlier magnitude floor(s) [caller's unit].
         provisional_days: Recency bound of the PROVISIONAL mask [d]; 0
             disables it.  See the mask's definition below.
+        exclude_epochs: Operator-declared blunder epochs [yr] force-flagged
+            in EVERY component — the manual-removal lever
+            (``excluded_epochs.csv``).  A pure OR into the mask after
+            detection; independent of the detector's verdicts, so a point
+            the detector protects (ambiguous spike-on-drift) is still
+            removed.  Declared epochs that fall outside any series epoch
+            (beyond the ~9 h matching tolerance) are skipped.
 
     Returns:
         ``(flags, provenance)`` — flags shaped like ``data`` (True =
@@ -979,6 +1099,22 @@ def detect_view_outliers(
 
     full = np.zeros(y2d.shape, dtype=np.bool_)
     full[:, finite] = np.atleast_2d(detection.flags)
+
+    # Manual-removal lever: operator-declared blunder epochs force-flagged in
+    # EVERY component, independent of the detector (which errs conservative on
+    # ambiguous spikes-on-drift).  Match declared yearf to series indices via
+    # the shared gps_parser helper; a declared date with no series epoch
+    # within tolerance is skipped (and the caller may warn on the provenance).
+    if exclude_epochs is not None and np.size(exclude_epochs) > 0:
+        manual_idx = _oc.match_declared_epochs(
+            t, np.atleast_1d(np.asarray(exclude_epochs, dtype=np.float64))
+        )
+        if manual_idx:
+            full[:, list(manual_idx)] = True
+        prov["n_manual_excluded"] = int(len(manual_idx))
+    else:
+        prov["n_manual_excluded"] = 0
+
     flags = full[0] if y.ndim == 1 else full
     prov["n_flagged"] = int(np.count_nonzero(flags))
 
@@ -1037,6 +1173,141 @@ def apply_stored_detrend(
     return np.asarray(
         apply_detrend(record, yearf, y, terms=terms, frame=frame), dtype=np.float64
     )
+
+
+def remove_declared_steps(
+    sta: str,
+    yearf: npt.ArrayLike,
+    data: npt.ArrayLike,
+    *,
+    kinds: Sequence[str] = (),
+    params: str | Path | Mapping[str, Any] | None = None,
+    steps_catalog: str | Path | None = None,
+) -> tuple[FloatArray, dict[str, Any]]:
+    """Subtract the recorded amplitudes of declared steps of the given kinds.
+
+    Steps are DECLARED in ``steps.yaml`` (epoch + kind + metadata) and
+    ESTIMATED in ``detrend_params.json`` (``step_amp_1..k``, matched to
+    ``step_epochs``).  This joins the two for a *selective* step removal:
+    every fitted step is classified by its declared kind (matched to the
+    declaration by epoch), and the recorded amplitude of each step whose
+    kind is in ``kinds`` is subtracted as a Heaviside jump.  Pure apply —
+    no re-fit — and it degrades gracefully: a station with no record, or a
+    declared step with no fitted amplitude, warns and leaves the series
+    unchanged for that part.
+
+    Args:
+        sta: Station four-letter name.
+        yearf: Epochs, fractional years, shape (N,).
+        data: Plate-removed observations in MILLIMETRES, shape (C, N).
+        kinds: Step ``kind`` values to remove (from
+            :data:`gps_parser.outlier_catalogs.STEP_KINDS`); empty removes
+            nothing.
+        params: detrend parameter document — path, loaded mapping, or None
+            for the deployed default.
+        steps_catalog: ``steps.yaml`` path; None resolves the deployed one.
+
+    Returns:
+        ``(series, provenance)`` — ``series`` is ``data`` with the selected
+        steps subtracted (a NEW array; input untouched), or ``data``
+        unchanged when nothing was removable.  ``provenance`` carries
+        ``removed`` (list of ``(epoch, kind)`` actually subtracted) and
+        ``skipped`` (``epoch -> reason``).
+    """
+    y = np.asarray(data, dtype=np.float64)
+    prov: dict[str, Any] = {
+        "station": sta,
+        "kinds": list(kinds),
+        "removed": [],
+        "skipped": [],
+        "applied": False,
+        "degraded": False,
+        "degrade_reason": None,
+    }
+    if not kinds:
+        return y, prov
+    kind_set = {k.strip().lower() for k in kinds}
+
+    try:
+        catalog = _oc.read_steps(steps_catalog)
+    except (FileNotFoundError, ValueError) as exc:
+        return y, _degrade(
+            prov, f"{sta}: cannot read step catalog ({exc}); no steps removed"
+        )
+    declared: dict[float, Any] = {
+        round(float(r.epoch_yearf), 6): r for r in catalog.get(sta, ())
+    }
+
+    try:
+        if isinstance(params, Mapping):
+            doc: Mapping[str, Any] = params
+        else:
+            doc = read_detrend_params(params)
+        record, _source = station_detrend_record(doc, sta)
+    except (FileNotFoundError, ValueError) as exc:
+        return y, _degrade(prov, f"{sta}: no detrend record ({exc}); no steps removed")
+    if record is None:
+        return y, _degrade(
+            prov, f"{sta}: absent from the detrend parameter document; no steps removed"
+        )
+
+    step_epochs = list(record.get("step_epochs") or ())
+    if not step_epochs:
+        return y, _degrade(
+            prov, f"{sta}: record has no fitted steps; nothing to remove"
+        )
+
+    names = list(record.get("param_names") or ())
+    components = record.get("components") or ()
+    n_steps = len(step_epochs)
+    # ``to_record`` APPENDS one ``step_amp_k`` per declared step (staged.py
+    # convention), so the amplitudes are the LAST n_steps parameters.
+    base = len(names) - n_steps
+    if base < 0 or names[base:] != [f"step_amp_{i + 1}" for i in range(n_steps)]:
+        return y, _degrade(
+            prov, f"{sta}: record parameter layout unexpected; no steps removed"
+        )
+
+    selected_idx: list[int] = []
+    selected: list[Any] = []
+    for i, epoch in enumerate(step_epochs):
+        row = _match_declared_step(float(epoch), declared)
+        if row is None:
+            prov["skipped"].append((epoch, "not declared in steps.yaml"))
+        elif row.kind not in kind_set:
+            prov["skipped"].append((epoch, f"kind {row.kind!r} not selected"))
+        else:
+            selected_idx.append(i)
+            selected.append(row)
+    if not selected_idx:
+        return y, _degrade(
+            prov, f"{sta}: no declared step matches the selected kinds; nothing removed"
+        )
+
+    epochs = np.asarray([step_epochs[i] for i in selected_idx], dtype=np.float64)
+    tt = np.asarray(yearf, dtype=np.float64)
+    out = y.copy()
+    for c in range(min(len(components), y.shape[0])):
+        params_c = np.asarray(components[c].get("params") or (), dtype=np.float64)
+        if params_c.size != len(names):
+            continue
+        amps = np.asarray([params_c[base + i] for i in selected_idx], dtype=np.float64)
+        out[c] = out[c] - ga_models.heaviside_steps(tt, epochs, amps)
+    prov["removed"] = [(round(float(r.epoch_yearf), 6), r.kind) for r in selected]
+    prov["applied"] = True
+    return out, prov
+
+
+def _match_declared_step(epoch: float, declared: Mapping[float, Any]) -> Any:
+    """The declared step whose epoch matches ``epoch`` within 1e-3 yr."""
+    best = None
+    best_d = 1e-3
+    for e, row in declared.items():
+        d = abs(e - epoch)
+        if d < best_d:
+            best_d = d
+            best = row
+    return best
 
 
 def detrend_arrays(
@@ -1153,6 +1424,7 @@ def read_gps_view(
     steps: str | Path | None = None,
     protect_windows: str | Path | Sequence[tuple[float, float]] | None = None,
     outlier_overrides: str | Path | None = None,
+    exclude_epochs: str | Path | Sequence[float] | None = None,
     frame: str | None = None,
     Dir: str | None = None,
     tType: str = "TOT",
@@ -1219,7 +1491,7 @@ def read_gps_view(
             active stations. None = deployed default; missing / unreadable
             degrades gracefully (warn + base OutlierParams). Ignored when
             ``outlier_params`` is passed explicitly.
-        steps: Declared step catalog path (``steps.csv``) fed to outlier
+        steps: Declared step catalog path (``steps.yaml``) fed to outlier
             detection so the trajectory model absorbs known offsets instead
             of over-flagging them; None = deployed default. A missing /
             unreadable catalog degrades gracefully (warn + no steps).
@@ -1230,6 +1502,14 @@ def read_gps_view(
             sequence of ``(start, end)`` fractional-year intervals, or None
             (deployed default). A missing / unreadable catalog degrades
             gracefully (warn + no windows).
+        exclude_epochs: Manual-removal lever — operator-declared blunder
+            epochs force-flagged in EVERY component. A catalog path
+            (``excluded_epochs.csv``), an explicit sequence of
+            fractional-year epochs, or None (deployed default). The
+            INVERSE of ``protect_windows``: those protect signal from
+            flagging, these force flagging of known-bad points the
+            detector would otherwise protect. A missing / unreadable
+            catalog degrades gracefully (warn + no exclusions).
         frame: Series frame tag for the record integrity check.
         Dir: Series directory override (as :func:`gps_read.getData`).
         tType: GLOBK scheme (as :func:`gps_read.getData`).
@@ -1296,6 +1576,8 @@ def read_gps_view(
         "steps_source": None,
         "protect_windows_applied": 0,
         "protect_windows_source": None,
+        "excluded_epochs_applied": 0,
+        "excluded_epochs_source": None,
         "outlier_overrides_applied": {},
         "outlier_overrides_source": None,
         "min_outlier": None,
@@ -1324,6 +1606,9 @@ def read_gps_view(
             list(resolved.min_outlier) if resolved.min_outlier is not None else None
         )
         attrs["min_outlier_source"] = resolved.min_outlier_source
+        xepochs, xe_source = resolve_excluded_epochs(sta, exclude_epochs)
+        attrs["excluded_epochs_applied"] = len(xepochs)
+        attrs["excluded_epochs_source"] = xe_source
         flags, oprov = detect_view_outliers(
             yearf,
             data,
@@ -1332,6 +1617,7 @@ def read_gps_view(
             step_epochs=step_epochs if step_epochs.size else None,
             protect_windows=pwindows,
             min_outlier=resolved.min_outlier,
+            exclude_epochs=xepochs if xepochs else None,
         )
         flags2d = np.atleast_2d(flags)
         for c, name in enumerate(_COMPONENTS):

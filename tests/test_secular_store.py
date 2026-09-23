@@ -162,3 +162,113 @@ class TestTheStoreHoldKind:
 
         with pytest.raises(ValueError, match="must name its kind"):
             parse_hold_spec("periodic=VMEY")
+
+
+class TestDerivedEntries:
+    """A background that belongs to no single station.
+
+    The Svartsengi case (2026-08-26): 18 stations in the cluster, only SENG
+    and SKSH have any pre-2020 data, and the other 16 were installed in 2024.
+    The shared background those two imply is not either station's, so the
+    store has to be able to say that -- and to say which plate frame it is
+    in, because the cluster's per-station plate assignment is mixed.
+    """
+
+    def test_kind_and_frame_round_trip(self, tmp_path) -> None:
+        from geo_dataread.secular_store import (
+            SecularEntry,
+            read_secular,
+            write_secular,
+        )
+
+        path = tmp_path / "analysis.yaml"
+        entry = SecularEntry(
+            model="lineperiodic",
+            param_names=("offset", "rate"),
+            components={"north": (0.0, 0.11), "east": (0.0, 7.41)},
+            kind="derived",
+            frame="NOAM",
+        )
+        write_secular(path, "SVAR_NOAM", entry)
+        back = read_secular(path)["SVAR_NOAM"]
+        assert back.kind == "derived"
+        assert back.frame == "NOAM"
+        assert back.components["east"] == (0.0, 7.41)
+
+    def test_a_station_entry_stays_bare(self, tmp_path) -> None:
+        """Default kind is not serialised, so the 16 deployed station
+        entries round-trip byte-identically and no reader sees a new key."""
+        from geo_dataread.secular_store import SecularEntry, secular_to_config
+
+        cfg = secular_to_config(
+            SecularEntry(model="lineperiodic", param_names=("offset", "rate"))
+        )
+        assert "kind" not in cfg
+        assert "frame" not in cfg
+
+
+class TestFrameGuard:
+    """A borrow may not silently cross plate-model reference frames.
+
+    Measured on SENG's own series through both plate models:
+    EURA - NOAM = N +2.26, E -15.97 mm/yr. That is the size of the
+    deformation these stations are watched for, so crossing frames does not
+    add noise -- it manufactures an apparent intrusion.
+    """
+
+    def _store(self, tmp_path, frame: str):
+        from geo_dataread.secular_store import SecularEntry, write_secular
+
+        path = tmp_path / "analysis.yaml"
+        write_secular(
+            path,
+            "SVAR_X",
+            SecularEntry(
+                model="lineperiodic",
+                param_names=("offset", "rate"),
+                components={c: (0.0, 7.41) for c in ("north", "east", "up")},
+                kind="derived",
+                frame=frame,
+            ),
+        )
+        return path
+
+    def test_crossing_frames_is_refused(self, tmp_path, monkeypatch) -> None:
+        from geo_dataread import detrend_estimate as de
+
+        monkeypatch.setattr(
+            "geofunc.geofunc.plateDict", lambda: {"ELDC": "NOAM"}, raising=False
+        )
+        lookup = de.secular_lookup(self._store(tmp_path, "EURA"), "ELDC")
+        with pytest.raises(RuntimeError, match="referenced to 'EURA'"):
+            lookup("SVAR_X")
+
+    def test_matching_frame_passes(self, tmp_path, monkeypatch) -> None:
+        from geo_dataread import detrend_estimate as de
+
+        monkeypatch.setattr(
+            "geofunc.geofunc.plateDict", lambda: {"ELDC": "NOAM"}, raising=False
+        )
+        lookup = de.secular_lookup(self._store(tmp_path, "NOAM"), "ELDC")
+        assert lookup("SVAR_X").frame == "NOAM"
+
+    def test_an_unannotated_entry_is_not_checked(self, tmp_path, monkeypatch) -> None:
+        """A station entry inherits its own station's assignment, so it
+        carries no frame and must not be blocked by this guard."""
+        from geo_dataread import detrend_estimate as de
+        from geo_dataread.secular_store import SecularEntry, write_secular
+
+        path = tmp_path / "analysis.yaml"
+        write_secular(
+            path,
+            "SKSH",
+            SecularEntry(
+                model="lineperiodic",
+                param_names=("offset", "rate"),
+                components={c: (0.0, 9.34) for c in ("north", "east", "up")},
+            ),
+        )
+        monkeypatch.setattr(
+            "geofunc.geofunc.plateDict", lambda: {"ELDC": "NOAM"}, raising=False
+        )
+        assert de.secular_lookup(path, "ELDC")("SKSH").frame is None

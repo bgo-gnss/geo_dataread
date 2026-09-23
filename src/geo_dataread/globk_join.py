@@ -442,7 +442,7 @@ def join_segments(
     [m]. The guard |Δ̂ₖ − cₖ| ≤ r_max separates real boundary motion (mm–cm)
     from a datum that is not on the wrap lattice; it is **loud** — a trip
     raises rather than being silently absorbed, because it flags either a
-    genuine step (→ steps.csv, a human decision) or a boundary-pair estimate
+    genuine step (→ steps.yaml, a human decision) or a boundary-pair estimate
     with no overlap to lean on. The offending segment's raw Δ̂, correction,
     residual, and overlap availability are all in the message.
 

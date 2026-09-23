@@ -89,7 +89,35 @@ class SecularEntry:
             The CSV's ``UseSTA``, carried over.  When set, ``components`` may
             be empty — the values live at the donor.
         fit: Which part to apply when borrowing (``periodic`` /
-            ``lineperiodic``).  The CSV's ``Fit``.
+            ``lineperiodic``).  The CSV's ``Fit``.  **Currently INERT**
+            (verified 2026-08-26): written by :func:`secular_to_config` and
+            parsed by ``_entry_from_config``, but read by no consumer — the
+            modern lane expresses per-group borrowing through separate
+            ``--hold secular=…`` / ``--hold periodic=…`` flags instead, so
+            the "periodic only vs lineperiodic" choice this column encoded
+            lives in the stage plan.  Kept because it round-trips legacy
+            ``detrend_itrf2008.csv`` config; do not wire it in without a
+            design pass.
+        kind: What this entry IS.  ``"station"`` (default) is a background
+            fitted on that station's own series — everything the CSV could
+            express.  ``"derived"`` marks a background that belongs to no
+            single station: a cluster mean, or a value read off a regional
+            model.  The distinction is load-bearing because the provenance
+            string a borrow writes is ``store:<code>@…``, and a reader who
+            met ``store:SVAR_N`` with no way to tell it from a site code
+            would take a synthetic vector for a measured one.  It also names
+            the honest limit: a derived entry has no ``segments`` of its own
+            and no station whose data could be re-examined.
+        frame: Reference frame the coefficients live in, when the entry is
+            not tied to a station that would settle it.  A plate-frame
+            velocity is only meaningful against the plate model that was
+            removed, and on Reykjanes the per-station assignment is MIXED
+            (measured 2026-08-26: EURA−NOAM = N +2.26, E −15.97 mm/yr at
+            Svartsengi).  Applying a NOAM-referenced vector to a
+            EURA-assigned station is wrong by the full spreading rate, which
+            is the same order as the deformation such a station is watched
+            for — so a derived entry must say which frame it is in, and a
+            borrow must refuse to cross frames silently.
         fitted_at: Opaque provenance stamp; the leaf reads no clock.
     """
 
@@ -100,6 +128,8 @@ class SecularEntry:
     )
     segments: tuple[tuple[float | None, float | None], ...] | None = None
     use_sta: str | None = None
+    kind: str = "station"
+    frame: str | None = None
     fit: str | None = None
     fitted_at: str | None = None
 
@@ -222,6 +252,10 @@ def secular_to_config(entry: SecularEntry) -> dict[str, Any]:
             out[name] = [float(v) for v in values]
     if entry.segments:
         out["segments"] = [[s[0], s[1]] for s in entry.segments]
+    if entry.kind and entry.kind != "station":
+        out["kind"] = entry.kind
+    if entry.frame:
+        out["frame"] = entry.frame
     if entry.use_sta:
         out["use_sta"] = entry.use_sta
     if entry.fit:
@@ -284,6 +318,8 @@ def _entry_from_config(raw: Any, sta: str) -> SecularEntry:
         components=components,
         segments=seg,
         use_sta=str(use_sta) if use_sta else None,
+        kind=str(raw["kind"]) if raw.get("kind") else "station",
+        frame=str(raw["frame"]) if raw.get("frame") else None,
         fit=str(raw["fit"]) if raw.get("fit") else None,
         fitted_at=str(raw["fitted_at"]) if raw.get("fitted_at") else None,
     )

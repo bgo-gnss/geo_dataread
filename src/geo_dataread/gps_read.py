@@ -1327,25 +1327,8 @@ def gamittoNEU(
     )
 
     # remove plate velocity (shared helper — data still in m, so scale=1)
-    if ref == "plate":
+    if ref in ("plate", "detrend"):
         data = _remove_plate_velocity(sta, yearf, data, reference=reference)
-    elif ref == "detrend":
-        # Stored-parameter detrended .NEU product (internal-delivery slice,
-        # DESIGN_live_detrending §0/§4.2). Previously ref="detrend" fell
-        # through SILENTLY (no plate removal, no detrend). Now: plate-first
-        # (locked decision 5), then a pure apply of the deployed record —
-        # data is still in METERS here, so the mm-unit record is scaled.
-        # Graceful degrade (warning + plate-removed series) is inside
-        # gps_views.detrend_arrays.
-        from geo_dataread import gps_views  # deferred: avoids import cycle
-
-        data = _remove_plate_velocity(sta, yearf, data, reference=reference)
-        # frame= is not cosmetic: without it detrend_arrays skips the
-        # frame guard entirely, and a record tagged for another frame is
-        # applied silently. Both call sites detrend AFTER plate removal.
-        data, _detrend_prov = gps_views.detrend_arrays(
-            sta, yearf, data, data_unit="m", frame=gps_views.PLATE_REMOVED_FRAME
-        )
 
     # convert to mm
     if mm:
@@ -1696,23 +1679,9 @@ def getData(
     if offset is None:
         print("WARNING: offset determination failure for station {}".format(sta))
 
-    if ref == "plate":
+    if ref in ("plate", "detrend"):
         # shared helper — data already in mm after iprep, so scale=1000
         data = _remove_plate_velocity(sta, yearf, data, scale=1000)
-
-    elif ref == "detrend":
-        # Revived (internal-delivery slice, DESIGN_live_detrending §0/§4.2):
-        # stored-parameter detrended view — plate removal FIRST (locked
-        # decision 5: params live in the plate-removed frame), then a pure
-        # apply of the deployed record. No re-fit on read. Graceful degrade
-        # (warning + plate-removed series) lives in gps_views.detrend_arrays.
-        from geo_dataread import gps_views  # deferred: avoids import cycle
-
-        # shared helper — data already in mm after iprep, so scale=1000
-        data = _remove_plate_velocity(sta, yearf, data, scale=1000)
-        data, _detrend_prov = gps_views.detrend_arrays(
-            sta, yearf, data, frame=gps_views.PLATE_REMOVED_FRAME
-        )
 
     elif ref == "itrf2008":
         pass

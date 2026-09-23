@@ -940,7 +940,11 @@ class TestStagePlansReachTheBatch:
         args = [*self._swap_yaml(extra, plan), "--donor-params", str(donor_doc)]
         assert main(["DYNG", *args]) == 0
         entry = read_detrend_params(out)["stations"]["DYNG"]["groups"]["secular"]
-        assert entry["provenance"] == "donor:OLAC@2026-07-01"
+        # A cross-station borrow is re-anchored (2026-08-26), so the
+        # provenance carries the anchor window too -- the donor and its
+        # vintage still lead, because that is what the drift check reads.
+        assert entry["provenance"].startswith("donor:OLAC@2026-07-01")
+        assert "anchored [" in entry["provenance"]
         assert entry["donor"] == "OLAC"
         assert entry["donor_fitted_at"] == "2026-07-01"
         assert entry["donor_record_version"] == 1
@@ -997,11 +1001,16 @@ class TestStagePlansReachTheBatch:
         assert d1 != d2
         for token in ("DYNG", "OLAC", d1, d2):
             assert token in err
-        # (b) the NEW donor values are what run 2 held at
+        # (b) the NEW donor RATE is what run 2 held at -- but not its datum.
+        # Re-anchoring (2026-08-26) splits the borrow: the rate is the
+        # donor's and must follow a re-estimate (the pointer decision), while
+        # the intercept is the borrower's own level and must NOT cross, or it
+        # lands in whatever is free.
         for c, comp in enumerate(run2["components"]):
-            assert (
-                comp["params"][:2]
-                == drifted["stations"]["OLAC"]["components"][c]["params"][:2]
+            donor_params = drifted["stations"]["OLAC"]["components"][c]["params"]
+            assert comp["params"][1] == donor_params[1], "donor rate did not propagate"
+            assert comp["params"][0] != donor_params[0], (
+                "the donor's datum crossed into the borrower"
             )
 
         # and once run 2's record is deployed, an unchanged donor is silent
