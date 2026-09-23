@@ -25,7 +25,7 @@ Rules are a CSV with columns ``station,drop_dir,drop_before_year,reason``
 — one rule per row, ``reason`` mandatory (every exclusion must be
 justified); ``#`` comment lines allowed. The DEPLOYED catalog is
 ``segment_exclusions.csv``, resolved through the shared
-:mod:`gps_parser.outlier_catalogs` mechanism exactly like ``steps.csv``
+:mod:`gps_parser.outlier_catalogs` mechanism exactly like ``steps.yaml``
 (``postprocess.cfg`` ``[FILES] segment_exclusions``, else
 ``<gpsconfig dir>/segment_exclusions.csv``; source of the deployed copy:
 ``gps-config-data/analysis-lane/segment_exclusions.csv`` — the reviewed
@@ -93,7 +93,7 @@ def default_exclusions_path() -> Path | None:
 
     Resolution order (the shared
     :func:`gps_parser.outlier_catalogs.catalog_path` mechanism — identical
-    to ``steps.csv`` / ``protect_windows.csv``):
+    to ``steps.yaml`` / ``protect_windows.csv``):
 
     1. ``postprocess.cfg`` ``[FILES] segment_exclusions``;
     2. ``<gpsconfig dir>/segment_exclusions.csv`` (the deploy-target

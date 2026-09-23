@@ -455,34 +455,128 @@ def test_default_params_path_falls_back_to_gpsconfig(view_env):
 # ---------------------------------------------------------------------------
 
 
-def test_getdata_ref_detrend_is_stored_apply(view_env, deployed_params, seng_record):
+def test_getdata_ref_detrend_is_plate_removed(view_env, deployed_params, seng_record):
+    """ref="detrend" returns plate-removed data (same as ref="plate").
+    The record application is now in the plot driver (timesmatplt.plotTime),
+    NOT in getData — so ref is just a title label."""
     yearf_p, data_p, Ddata_p, _ = gpsr.getData("SENG", ref="plate", Dir=TOT)
     yearf_d, data_d, Ddata_d, _ = gpsr.getData("SENG", ref="detrend", Dir=TOT)
     np.testing.assert_array_equal(yearf_d, yearf_p)
     np.testing.assert_array_equal(Ddata_d, Ddata_p)
-    trend = evaluate_record(seng_record, yearf_p)
-    np.testing.assert_allclose(data_d, data_p - trend, rtol=0.0, atol=1e-9)
+    np.testing.assert_array_equal(data_d, data_p)
 
 
-def test_getdata_ref_detrend_degrades_to_plate(view_env):
-    # no document deployed -> warn + plate-removed series unchanged
+def test_getdata_ref_detrend_no_degrading(view_env):
+    """No degrade: ref="detrend" just means plate-removed. No warning."""
     yearf_p, data_p, _, _ = gpsr.getData("SENG", ref="plate", Dir=TOT)
-    with pytest.warns(UserWarning, match="no detrend parameters"):
-        yearf_d, data_d, _, _ = gpsr.getData("SENG", ref="detrend", Dir=TOT)
+    yearf_d, data_d, _, _ = gpsr.getData("SENG", ref="detrend", Dir=TOT)
     np.testing.assert_array_equal(yearf_d, yearf_p)
     np.testing.assert_array_equal(data_d, data_p)
 
 
-def test_gamittoneu_ref_detrend_is_stored_apply(view_env, deployed_params, seng_record):
+def test_gamittoneu_ref_detrend_is_plate_removed(
+    view_env, deployed_params, seng_record
+):
+    """gamittoNEU(ref="detrend") returns plate-removed data — same as ref="plate"."""
     neu_p = gpsr.gamittoNEU("SENG", mm=True, ref="plate", dstring="yearf", Dir=TOT)
     neu_d = gpsr.gamittoNEU("SENG", mm=True, ref="detrend", dstring="yearf", Dir=TOT)
-    yearf = np.asarray(neu_p["yearf"], dtype=np.float64)
-    trend = evaluate_record(seng_record, yearf)
     for c in range(3):
         np.testing.assert_allclose(
             np.asarray(neu_d[f"data[{c}]"]),
-            np.asarray(neu_p[f"data[{c}]"]) - trend[c],
+            np.asarray(neu_p[f"data[{c}]"]),
             rtol=0.0,
-            atol=1e-6,  # m-unit apply + mm conversion round-trip
+            atol=1e-6,
         )
         np.testing.assert_array_equal(neu_d[f"Ddata[{c}]"], neu_p[f"Ddata[{c}]"])
+
+
+# ---------------------------------------------------------------------------
+# remove_declared_steps — selective step removal by kind
+# ---------------------------------------------------------------------------
+
+
+def _stepped_record(seng_plate, tmp_path, step_epoch=2017.0):
+    """A SENG record fitted with one declared step at ``step_epoch``."""
+    yearf, data, Ddata = seng_plate
+    # Inject a REAL step so the fitted amplitude is non-trivial: otherwise the
+    # estimator finds step_amp ~ 0 (there is no jump in the golden data there).
+    data = data.copy()
+    data[:, yearf >= step_epoch] += 60.0
+    est = estimate_detrend(
+        "lineperiodic",
+        yearf,
+        data,
+        Ddata,
+        window=WINDOW,
+        frame=FRAME,
+        step_epochs=[step_epoch],
+    )
+    return est.to_record(fitted_at="2026-07-14T00:00:00Z")
+
+
+def _steps_yaml(config_dir, sta="SENG", epoch=2017.0, kind="earthquake"):
+    p = config_dir / "steps.yaml"
+    p.write_text(
+        "schema_version: 1\n"
+        "stations:\n"
+        f"  {sta}:\n"
+        f"    - epoch_yearf: {epoch}\n"
+        f"      kind: {kind}\n"
+        "      comment: test step\n"
+    )
+    return p
+
+
+def test_remove_declared_steps_subtracts_selected_kind(view_env, seng_plate, tmp_path):
+    """An earthquake-removal subtracts the recorded step amplitude; the series
+    is a new array (input untouched) and the provenance names the removal."""
+    record = _stepped_record(seng_plate, tmp_path)
+    params = tmp_path / "detrend_params.json"
+    params.write_text(
+        json.dumps({"schema_version": 1, "frame": FRAME, "stations": {"SENG": record}})
+    )
+    _steps_yaml(view_env["config_dir"], kind="earthquake")
+
+    yearf, data, _ = seng_plate
+    out, prov = gps_views.remove_declared_steps(
+        "SENG", yearf, data, kinds=["earthquake"], params=params
+    )
+    assert prov["applied"] is True and not prov["degraded"]
+    assert prov["removed"] == [(2017.0, "earthquake")]
+    # input untouched
+    assert out is not data
+    # the 60 mm injected step was removed: post-step minus pre-step drops by
+    # ~60 mm (the trend + seasonal difference REMAINS — this removes steps
+    # only, not the background)
+    pre = np.nanmean(data[0, yearf < 2017.0])
+    post = np.nanmean(data[0, yearf >= 2017.0])
+    pre2 = np.nanmean(out[0, yearf < 2017.0])
+    post2 = np.nanmean(out[0, yearf >= 2017.0])
+    drop = (post - pre) - (post2 - pre2)
+    assert drop == pytest.approx(60.0, abs=5.0), f"step removed {drop:.1f} mm"
+
+
+def test_remove_declared_steps_skips_unselected_kind(view_env, seng_plate, tmp_path):
+    """An equipment-removal on a station whose only step is seismic removes
+    nothing and degrades with the reason named."""
+    record = _stepped_record(seng_plate, tmp_path)
+    params = tmp_path / "detrend_params.json"
+    params.write_text(
+        json.dumps({"schema_version": 1, "frame": FRAME, "stations": {"SENG": record}})
+    )
+    _steps_yaml(view_env["config_dir"], kind="earthquake")
+
+    yearf, data, _ = seng_plate
+    out, prov = gps_views.remove_declared_steps(
+        "SENG", yearf, data, kinds=["equipment"], params=params
+    )
+    assert prov["applied"] is False and prov["degraded"] is True
+    assert "not selected" in prov["skipped"][0][1]
+    np.testing.assert_array_equal(out, data)
+
+
+def test_remove_declared_steps_no_kinds_is_a_noop(view_env, seng_plate, tmp_path):
+    yearf, data, _ = seng_plate
+    out, prov = gps_views.remove_declared_steps("SENG", yearf, data, kinds=[])
+    assert prov["removed"] == [] and prov["applied"] is False
+    np.testing.assert_array_equal(out, data)

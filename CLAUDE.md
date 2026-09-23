@@ -134,4 +134,35 @@ gps-estimate-detrend ... # entry: geo_dataread.detrend_estimate:main — batch d
 
 ---
 
-*Last reviewed: 2026-08-16 (the batch now READS the stage plans it stores: `--analysis-yaml` + `estimate_station(stage_plan=, lookup_donor=)`. Until then `read_stage_plans` had no caller outside its own tests, so a re-run silently re-fitted a curated station single-stage — SELF 2.859 vs 2.931 mm/yr north. Donor holds resolve against the DEPLOYED detrend_params.json, not `--out`, or the science would depend on argv order. A plan naming a group the batch's `--model` lacks is now a loud per-station error, which is the improvement; per-station model/terms config is the next gap. Also: the per-station line finds the rate BY NAME — under `--model periodic` slot 1 is `sin_annual` and it printed a seasonal amplitude [mm] as "north rate ... mm/yr"; earlier — --uncert on the batch estimator, recorded in refs; earlier — station_estimate_from_arrays: fit diagnostics channel beside the record; earlier — local-TOT pipeline Stage B: gps-estimate-detrend estimator CLI + fit_windows.csv catalog; segment_exclusions.csv relocated to gps-config-data via gps_parser resolver)*
+*Last reviewed: 2026-08-26 (re-anchoring now covers BOTH hold kinds:
+`donor:` (a finished record in detrend_params.json) carried the donor's datum
+exactly as `store:` did — measured, THOB holding SENG via donor: sat
++75.3/-34.3/-124.6 mm off its own data and ignored --anchor-window entirely.
+One pass handles both; provenance still spells which store was read
+(`donor:STA@… anchored […]` vs `store:…`). A legacy record with no
+param_names falls back to the ORDER (GROUP_ORDER puts the polynomial first,
+`velocity._RATE_INDEX = 1`), scoped to `secular` — never to taking the level
+verbatim. Consequence: the donor rate propagates on a re-estimate (pointer
+semantics kept) but the donor OFFSET no longer crosses; two batch tests
+asserting the old behaviour were updated. Also: secular_store: `SecularEntry.kind`
+(`station`/`derived`) + `frame` — a background that belongs to no station
+(a cluster mean, a regional-model value) must not read as a measured one,
+and must say which plate model it is referenced to. `secular_lookup` now
+REFUSES a borrow that crosses plate frames: the per-station assignment is
+mixed around Svartsengi and EURA−NOAM = N +2.26, E −15.97 mm/yr (measured on
+SENG's series through both models) — intrusion-sized, so a silent cross would
+read as signal. Default `kind` is unserialised, so the 16 deployed station
+entries round-trip byte-identically. Previous entry (stage_plan: cross-station `store:STA` borrows are
+RE-ANCHORED at resolution time — the donor's `offset` is the donor's datum
+(measured: SENG holding SKSH's s(t) was off (−2.9, −30.1, +41.5) mm N/E/U,
+pure level error). `resolve_stage_plan` replaces the zeroth poly coefficient
+BY NAME with a 1/σ²-weighted local anchor over `anchor_window` (default: full
+fit span; donor seasonal subtracted only when borrowed too); provenance
+`store:STA@… anchored [a,b]`; needs the borrower's series (threaded from
+`_restage`) — refused without it; `store:self` byte-identical. Apply-only
+plans (`apply:` + holds) now legal end to end — a fully-borrowed record gets
+`borrowed={from,terms:all,…}`; `check_stage_plan_sources` = data-free
+pre-flight. Fixed: `_spell` wrote StoreRef as `donor:…` (silent hold-kind
+flip); `SecularEntry.fit` documented inert. Batch main still wires no
+lookup_secular: store: holds + `--anchor-window` are workbench-only.
+Previous 2026-08-16: batch reads its stored stage plans. Older: `git log`.)*

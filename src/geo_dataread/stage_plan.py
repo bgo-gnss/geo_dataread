@@ -12,8 +12,14 @@ grammars are born.
 Spellings::
 
     --stage NAME:GROUP,GROUP@START:END        fit domain optional
+    --stage NAME:                             apply-only: holds everything,
+                                              estimates nothing (must have holds)
     --hold  [STAGE:]GROUP=stage:NAME          hold at what an earlier stage fitted
     --hold  [STAGE:]GROUP=donor:STA           hold at a donor station's value
+    --hold  [STAGE:]GROUP=store:self|store:STA  hold at a SAVED BACKGROUND;
+                                              a cross-station borrow is
+                                              RE-ANCHORED at resolution time
+                                              (see resolve_stage_plan)
 
 Three refusals, each preventing a *silent* change of stored science rather than
 a mere typo:
@@ -53,7 +59,7 @@ from __future__ import annotations
 import dataclasses
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, cast
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     import numpy as np
@@ -62,12 +68,18 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 __all__ = [
     "DonorRef",
     "HoldRef",
+    "StoreRef",
     "StagePlan",
     "StageRef",
     "StageSpec",
     "STAGE_PLAN_KEYS",
+    "anchored_offset",
+    "annotate_donor_groups",
     "build_stage_plan",
+    "check_stage_plan_sources",
     "default_analysis_yaml_path",
+    "donor_drift_warnings",
+    "donor_group_digest",
     "donor_group_values",
     "read_stage_plans",
     "parse_hold_spec",
@@ -79,7 +91,7 @@ __all__ = [
 ]
 
 #: How a held group's value is spelled on the command line and in config.
-_HOLD_KINDS = ("stage", "donor")
+_HOLD_KINDS = ("stage", "donor", "store")
 
 Segments = tuple[tuple[float | None, float | None], ...]
 
@@ -107,7 +119,25 @@ class DonorRef:
     station: str
 
 
-HoldRef = StageRef | DonorRef
+@dataclasses.dataclass(frozen=True)
+class StoreRef:
+    """Hold a term group at a SAVED BACKGROUND's value — also a pointer.
+
+    Distinct from :class:`DonorRef` because it resolves against a different
+    object: the ``detrend.secular`` store, which holds s(t) as a reusable
+    component, rather than a finished ``detrend_params.json`` record which
+    holds s(t) + steps + transients.  Both are pointers; they point at
+    different things, and the grammar names the kind precisely so that
+    difference cannot be inferred wrongly.
+
+    ``station=None`` means "this station's own saved background", which is
+    the common case: fix s(t) once, then estimate the events against it.
+    """
+
+    station: str | None = None
+
+
+HoldRef = StageRef | DonorRef | StoreRef
 
 
 @dataclasses.dataclass(frozen=True)
@@ -242,11 +272,12 @@ def parse_stage_spec(spec: str) -> StageSpec:
         free_part = rest
 
     free = tuple(g.strip() for g in free_part.split(",") if g.strip())
-    if not free:
-        raise ValueError(
-            f"--stage {spec!r} declares no free term group; a stage that "
-            f"estimates nothing is not a stage"
-        )
+    # An EMPTY free list is legal grammar: `--stage apply:` declares an
+    # apply-only stage that holds everything and estimates nothing -- the
+    # fully-borrowed station (design §2.6, e.g. ELDC holding both secular and
+    # periodic from a donor).  Whether such a stage actually HOLDS anything
+    # cannot be known here (holds arrive separately), so the "estimates
+    # nothing and holds nothing" refusal lives in :func:`build_stage_plan`.
     dupes = {g for g in free if free.count(g) > 1}
     if dupes:
         raise ValueError(f"--stage {spec!r} repeats group(s) {sorted(dupes)}")
@@ -254,7 +285,7 @@ def parse_stage_spec(spec: str) -> StageSpec:
 
 
 def parse_hold_spec(spec: str) -> tuple[str | None, str, HoldRef]:
-    """Parse one ``--hold [STAGE:]GROUP=stage:NAME`` or ``=donor:STA``.
+    """Parse one ``--hold [STAGE:]GROUP=stage:NAME``, ``=donor:STA`` or ``=store:…``.
 
     Args:
         spec: The raw flag value.
@@ -286,10 +317,20 @@ def parse_hold_spec(spec: str) -> tuple[str | None, str, HoldRef]:
         raise ValueError(
             f"--hold {spec!r}: the held value must name its kind — write "
             f"'{left}=stage:NAME' to hold at what an earlier stage fitted, or "
-            f"'{left}=donor:STA' to borrow station STA's value. "
-            f"These are stored differently, so the kind is never inferred."
+            f"'{left}=donor:STA' to borrow station STA's finished record, or "
+            f"'{left}=store:self' / '{left}=store:STA' to hold at a SAVED "
+            f"BACKGROUND. These resolve against different objects and are "
+            f"stored differently, so the kind is never inferred."
         )
-    ref: HoldRef = StageRef(value) if kind == "stage" else DonorRef(value)
+    if kind == "stage":
+        ref: HoldRef = StageRef(value)
+    elif kind == "donor":
+        ref = DonorRef(value)
+    else:
+        # `store:self` is the spelling for "my own saved background". A bare
+        # `store:` cannot be written -- the parser requires a value after the
+        # colon, and relaxing that would make an empty kind look deliberate.
+        ref = StoreRef(None if value.lower() == "self" else value)
 
     if ":" in left:
         stage, _, group = left.partition(":")
@@ -387,15 +428,35 @@ def build_stage_plan(
                 )
         held[stage_name][group] = ref
 
+    for st in stages:
+        if not st.free and not held[st.name]:
+            raise ValueError(
+                f"--stage {st.name}: declares no free term group and no --hold "
+                f"binds to it; a stage either estimates term groups or applies "
+                f"held ones (e.g. --stage {st.name}: --hold "
+                f"{st.name}:secular=store:STA --hold {st.name}:periodic=store:STA "
+                f"for a fully-borrowed station)"
+            )
+
     return StagePlan(
         tuple(dataclasses.replace(st, held=dict(held[st.name])) for st in stages)
     )
 
 
 def _spell(ref: HoldRef) -> str:
-    """Render a :class:`HoldRef` back into its command-line spelling."""
+    """Render a :class:`HoldRef` back into its command-line spelling.
+
+    Exhaustive over the three kinds ON PURPOSE.  The fallthrough used to
+    spell every non-stage ref ``donor:...``, which serialized a
+    :class:`StoreRef` into ``analysis.yaml`` as ``donor:None`` /
+    ``donor:STA`` — a stored plan whose hold KIND had silently flipped, the
+    exact class of rewrite the grammar's "the kind is never inferred"
+    refusal exists to prevent.  Found 2026-08-26 while adding re-anchoring.
+    """
     if isinstance(ref, StageRef):
         return f"stage:{ref.stage}"
+    if isinstance(ref, StoreRef):
+        return f"store:{ref.station or 'self'}"
     return f"donor:{ref.station}"
 
 
@@ -446,8 +507,11 @@ def stage_plan_from_config(entries: Iterable[Mapping[str, object]]) -> StagePlan
             if isinstance(free_raw, (list, tuple))
             else []
         )
-        if not name or not free:
-            raise ValueError(f"stage_plan entry {raw!r} needs 'name' and 'free'")
+        if not name:
+            raise ValueError(f"stage_plan entry {raw!r} needs 'name'")
+        # `free` may be an empty list: an apply-only stage round-trips as
+        # {"name": ..., "free": [], "held": {...}} and build_stage_plan
+        # enforces that it holds something.
         spec = f"{name}:{','.join(free)}"
 
         segs_raw = raw.get("segments")
@@ -519,7 +583,7 @@ def donor_group_values(
             would hold a group at nothing and look like a successful fit.
     """
     import numpy as np
-    from gps_analysis.staged import group_parameter_mask
+    from gps_analysis.staged import record_group_mask
 
     model = record.get("model")
     if not isinstance(model, str):
@@ -535,11 +599,17 @@ def donor_group_values(
         raise ValueError(f"donor {donor!r}: component {component} is malformed")
     params = np.asarray(entry.get("params"), dtype=float)
 
-    mask = group_parameter_mask(model, group)
+    # Record-aware, not model-aware: `to_record` APPENDS one step_amp_k per
+    # declared step, so a donor in steps.yaml stores 7 parameters against
+    # lineperiodic's 6. Comparing the two widths refused every such donor --
+    # which took out borrowing from SELF or HOFN, and with it the whole
+    # "hold this station's own saved background, estimate only the events"
+    # workflow. Measured 2026-08-23.
+    mask = record_group_mask(record, group)
     if mask.size != params.size:
         raise ValueError(
-            f"donor {donor!r}: model {model!r} has {mask.size} parameters but "
-            f"the record stores {params.size} for component {component}"
+            f"donor {donor!r}: model {model!r} resolves {mask.size} parameters "
+            f"but the record stores {params.size} for component {component}"
         )
     if not mask.any():
         raise ValueError(
@@ -549,11 +619,246 @@ def donor_group_values(
     return params[mask]
 
 
+def donor_group_digest(record: Mapping[str, object], group: str, *, donor: str) -> str:
+    """Short content digest of the coefficients a donor borrow resolves to.
+
+    Covers the group's coefficients of **every** component, because donor
+    holds are resolved per component (:func:`resolve_stage_plan` is called
+    once per component in ``_restage``) — a component-0-only digest would
+    miss a donor whose east seasonal moved while north stayed put.
+
+    The digest is built from ``repr`` of the floats.  Records store
+    full-``repr`` precision and JSON round-trips it bit-identically (the
+    ``to_record`` contract in ``gps_analysis.detrend``), so the digest is
+    stable across write → deploy → read, and ANY coefficient change — however
+    small — changes it.  That is the point: drift detection must not decide
+    what magnitude of change "matters"; the operator does.
+
+    Args:
+        record: The donor's stored detrend record.
+        group: Term-group name (staged vocabulary).
+        donor: Station code, for error messages only.
+
+    Returns:
+        12 hex chars of SHA-256 — enough to compare, short enough to print
+        in a warning.
+
+    Raises:
+        ValueError: Whatever :func:`donor_group_values` raises, plus a
+            record with no components at all — a digest of nothing would
+            compare equal to another digest of nothing and hide the very
+            malformation it should surface.
+    """
+    import hashlib
+
+    comps = record.get("components")
+    n_components = len(comps) if isinstance(comps, Sequence) else 0
+    if n_components == 0:
+        raise ValueError(f"donor {donor!r}: record has no components to digest")
+    parts = [
+        ",".join(
+            repr(float(v))
+            for v in donor_group_values(record, group, component=c, donor=donor)
+        )
+        for c in range(n_components)
+    ]
+    return hashlib.sha256(";".join(parts).encode("ascii")).hexdigest()[:12]
+
+
+def annotate_donor_groups(
+    groups: Mapping[str, Mapping[str, object]],
+    *,
+    lookup_donor: "Callable[[str], Mapping[str, object]]",
+) -> dict[str, dict[str, object]]:
+    """Stamp donor vintage + digest onto the donor-held entries of ``groups``.
+
+    The ``groups`` block is written by
+    :meth:`gps_analysis.StagedEstimate.to_record_fragment`, which sees only
+    the ``HeldExplicit`` this module built — it cannot know the donor's
+    ``record_version``/``fitted_at`` or coefficients beyond one component.
+    This side resolved the pointer, so this side records what it resolved TO:
+    without that, a re-estimated donor changes every borrower's next record
+    with nothing anywhere saying it happened.
+
+    A donor entry is recognised by its provenance spelling
+    ``donor:STA@<fitted_at>`` — written by :func:`resolve_stage_plan` in this
+    same module, so writer and reader of the spelling cannot drift apart.
+    Re-deriving "which groups are donor-held" from the plan instead would
+    mean reimplementing ``estimate_staged``'s ownership rule (last hold
+    wins), i.e. a second place assembling the same decision.
+
+    Args:
+        groups: The fragment's ``groups`` block.
+        lookup_donor: Station code → that station's current record — the
+            same lookup the holds were resolved against moments earlier, so
+            vintage and digest describe the values actually used.
+
+    Returns:
+        A new mapping; non-donor entries are copied unchanged.
+    """
+    out: dict[str, dict[str, object]] = {}
+    for group, entry in groups.items():
+        annotated = dict(entry)
+        provenance = annotated.get("provenance")
+        if isinstance(provenance, str) and provenance.startswith("donor:"):
+            station = provenance[len("donor:") :].partition("@")[0]
+            record = lookup_donor(station)
+            annotated["donor"] = station
+            annotated["donor_fitted_at"] = record.get("fitted_at")
+            annotated["donor_record_version"] = record.get("record_version")
+            annotated["donor_digest"] = donor_group_digest(record, group, donor=station)
+        out[group] = annotated
+    return out
+
+
+def donor_drift_warnings(
+    previous: Mapping[str, object] | None,
+    current: Mapping[str, object],
+    *,
+    station: str,
+) -> list[str]:
+    """Name every donor whose values moved between two of a station's records.
+
+    ``DonorRef`` is a pointer by design — re-estimating a donor propagates to
+    every borrower — and this is the propagation's only witness: compare the
+    ``donor_digest`` the deployed record stored against the one this run just
+    resolved.  A pure comparison of two records; no lookup, no I/O, and no
+    veto — the caller warns and the NEW value is used regardless (pointer
+    semantics preserved).
+
+    A changed ``donor`` station or a group no longer donor-held is a plan
+    edit, not drift, and stays silent: the operator did that on purpose.
+    A ``previous`` of None (first commit, or no deployed record) has nothing
+    to compare and returns no warnings.
+
+    Args:
+        previous: The station's deployed record, or None.
+        current: The record this run produced.
+        station: The borrowing station, for the warning text.
+
+    Returns:
+        One message per drifted (group, donor), empty when nothing drifted.
+    """
+    if previous is None:
+        return []
+    prev_groups = previous.get("groups")
+    cur_groups = current.get("groups")
+    if not isinstance(prev_groups, Mapping) or not isinstance(cur_groups, Mapping):
+        return []
+    out: list[str] = []
+    for group, cur in cur_groups.items():
+        if not isinstance(cur, Mapping):
+            continue
+        donor = cur.get("donor")
+        digest = cur.get("donor_digest")
+        if donor is None or digest is None:
+            continue
+        prev = prev_groups.get(group)
+        if not isinstance(prev, Mapping) or prev.get("donor") != donor:
+            continue
+        prev_digest = prev.get("donor_digest")
+        if prev_digest is None or prev_digest == digest:
+            continue
+        out.append(
+            f"{station}: donor {donor} drifted under held group {group!r} — "
+            f"the deployed record borrowed coefficients {prev_digest} "
+            f"(donor fitted_at {prev.get('donor_fitted_at')}), this run "
+            f"resolved {digest} (donor fitted_at {cur.get('donor_fitted_at')}). "
+            f"The NEW values are used (donor holds are pointers); review the "
+            f"borrow if {donor}'s re-estimation was not meant to reach "
+            f"{station}."
+        )
+    return out
+
+
+#: Parameter names that carry the DATUM of a background — the zeroth
+#: polynomial coefficient.  Identified by NAME, never by positional index:
+#: ``terms.GROUP_ORDER``'s docstring pins ``params[1] == "rate"`` as a
+#: load-bearing invariant read by six sites, so nothing here may reason
+#: about positions.  ``poly_0`` is listed for completeness — the
+#: :class:`gps_analysis.terms.Polynomial` name for degree 0 is ``offset``
+#: (``poly_m`` starts at m = 3), but a hand-written record could spell it.
+_DATUM_PARAM_NAMES = frozenset({"offset", "poly_0"})
+
+
+def anchored_offset(
+    y: "np.ndarray",
+    model: "np.ndarray",
+    sigma: "np.ndarray | None" = None,
+) -> float:
+    """Locally re-anchored datum p̂₀ of a borrowed background.
+
+    Equation:
+        ``p̂₀ = Σᵢ wᵢ·(yᵢ − gᵢ) / Σᵢ wᵢ``,  ``wᵢ = 1/σᵢ²``
+
+    — the weighted mean of the residual of the borrower's own observations
+    against the datum-free borrowed model, which is exactly the WLS solution
+    of the one-column constant design ``y − g = p₀·1 + ε`` and therefore
+    uses the same ``1/σ²`` weighting convention as
+    :func:`gps_analysis.fitting._wls_solve`.
+
+    Symbols → args:
+        - ``yᵢ`` → ``y``: the borrower's observations on the anchor
+          window, one component, (N,) [mm]
+        - ``gᵢ`` → ``model``: the borrowed model evaluated at the same
+          epochs WITHOUT its datum term (donor s(t) minus offset, plus the
+          donor seasonal when that is borrowed too), (N,) [mm]
+        - ``σᵢ`` → ``sigma``: the borrower's own 1-σ uncertainties, (N,)
+          [mm]; None ⇒ unit weights (plain mean)
+
+    Returns:
+        p̂₀ [mm] — the borrower-local level of the borrowed background.
+
+    Reference:
+        Weighted mean as the Gauss–Markov estimator of a constant: Aitken
+        1936, Proc. R. Soc. Edinb. 55 (the P = 1 case of the WLS solve).
+
+    Numerical notes:
+        Closed form; no design is inverted, so there is no conditioning
+        concern.  Requires at least one epoch — the CALLER validates the
+        anchor window and refuses an empty selection with a message naming
+        the station, so this primitive can stay a pure formula.
+    """
+    import numpy as np
+
+    resid = np.asarray(y, dtype=np.float64) - np.asarray(model, dtype=np.float64)
+    if sigma is None:
+        return float(np.mean(resid))
+    w = 1.0 / np.square(np.asarray(sigma, dtype=np.float64))
+    return float(np.sum(w * resid) / np.sum(w))
+
+
+def _entry_group_names(entry: Any, group: str, *, station: str) -> tuple[str, ...]:
+    """The parameter names of one group of a saved background, in order.
+
+    The value-side counterpart is
+    :func:`geo_dataread.secular_store.secular_group_values`; both filter
+    ``entry.param_names`` through the SAME classifier
+    (:func:`gps_analysis.staged._staged_group_of`), so names and values
+    stay index-aligned by construction.
+    """
+    from gps_analysis.staged import _staged_group_of
+
+    names = tuple(n for n in entry.param_names if _staged_group_of(n) == group)
+    if not names:
+        raise ValueError(
+            f"secular store {station!r}: stores no {group!r} parameter names "
+            f"(has {list(entry.param_names)})"
+        )
+    return names
+
+
 def resolve_stage_plan(
     plan: StagePlan,
     *,
     lookup_donor: "Callable[[str], Mapping[str, object]]",
     component: int,
+    lookup_secular: "Callable[[str | None], Any] | None" = None,
+    station: str | None = None,
+    anchor_t: "np.ndarray | None" = None,
+    anchor_y: "np.ndarray | None" = None,
+    anchor_sigma: "np.ndarray | None" = None,
+    anchor_window: tuple[float, float] | None = None,
 ) -> "tuple[Stage, ...]":
     """Turn a :class:`StagePlan` into ``gps_analysis.Stage`` objects.
 
@@ -569,22 +874,123 @@ def resolve_stage_plan(
     conditional — the honest reading, since the donor's uncertainty describes
     the DONOR's series, not this station's.
 
+    **Cross-station borrows are RE-ANCHORED here.**  A ``store:STA`` hold
+    where STA is another station pins the borrower's LEVEL to the donor's:
+    the ``offset`` entry of the secular group is the intercept at t = 0 in
+    ABSOLUTE fractional years (t ≈ 2×10³), so it is wildly station-specific.
+    Measured on SENG holding SKSH's s(t) over [2015.5, 2019.9] (SENG has
+    pre-unrest data, so real deformation does not confound the test): mean
+    residual (−2.94, −30.06, +41.45) mm N/E/U against (+0.68, −0.46, +0.02)
+    holding its own — the ~30–40 mm on E/U is pure datum error, and on a
+    real borrower it lands in whatever is free (a step amplitude, or the
+    seasonal).  The fix replaces ONLY the donor's zeroth polynomial
+    coefficient — identified by NAME (:data:`_DATUM_PARAM_NAMES`), never by
+    position — with the borrower-local anchor
+
+        ``offset_local = anchored_offset(y_b, s_donor∖offset (+ p_donor), σ_b)``
+
+    over the anchor window (``anchor_window``, defaulting to the full span
+    of the series supplied).  The donor's ``rate``/``curvature``/``poly_*``
+    and every periodic coefficient are used verbatim.  The donor PERIODIC
+    term is subtracted before averaging ONLY when ``periodic`` is also held
+    from a store/donor in the same stage; when the borrower estimates its
+    own periodic, none is subtracted — the seasonal carries no DC term
+    (pure cos/sin columns average to ~0 over the window), so the anchor
+    stays well posed either way.
+
+    Re-anchoring happens at RESOLUTION time, on the pointer, deliberately
+    NOT by materialising an anchored copy into the borrower's own store:
+    this module's contract is that ``donor:``/``store:`` holds are pointers
+    ("a re-estimated donor propagates to everyone borrowing from it"), and
+    a materialised copy would be indistinguishable from a self-estimated
+    background to every reader that does not check ``use_sta``.  The
+    provenance string records the manoeuvre —
+    ``store:STA@<fitted_at> anchored [START,END]`` — so a reader can tell a
+    re-anchored borrow from a verbatim one, and from a ``donor:`` hold.
+
+    ``store:self`` (and ``store:STA`` naming the borrower itself) is left
+    completely unchanged: a station's own background already carries its own
+    datum.
+
     Args:
         plan: The parsed plan.
         lookup_donor: Station code → that station's current record.
         component: Which component's coefficients to borrow.
+        lookup_secular: Station code (or None for this station) → its saved
+            background, for :class:`StoreRef`.  Required only if the plan
+            uses one; a plan that does and has no lookup is refused rather
+            than silently falling back to estimating the group.
+        station: This station's code, so ``store:self`` can name itself in
+            the provenance string and a ``store:STA`` naming the borrower
+            is recognised as a self-hold.
+        anchor_t: The borrower's epochs [fractional yr], matching
+            ``anchor_y``.  Required whenever a cross-station ``store:`` hold
+            carries a datum parameter; a plan that needs one and was not
+            given the series is REFUSED rather than silently holding the
+            donor's offset (the datum error above is what "falling back"
+            would store).
+        anchor_y: The borrower's observations for ``component``, (N,) [mm].
+        anchor_sigma: The borrower's 1-σ uncertainties, (N,) [mm]; None ⇒
+            unweighted anchor.
+        anchor_window: ``(start, end)`` [fractional yr] to average over;
+            None ⇒ the full span of ``anchor_t``.  A degenerate window or
+            one selecting zero epochs is refused, naming the station.
 
     Returns:
         Stages ready for :func:`gps_analysis.estimate_staged`.
     """
-    from gps_analysis.staged import HeldExplicit, HeldFromStage, Stage
+    import numpy as np
+    from gps_analysis.staged import (
+        HeldExplicit,
+        HeldFromStage,
+        Stage,
+        evaluate_group_values,
+    )
 
+    from geo_dataread.secular_store import secular_group_values
+
+    me = station or "this station"
     stages: list[Stage] = []
     for spec in plan.stages:
         held: dict[str, object] = {}
+        # Everything a later re-anchor needs about this stage's borrowed
+        # groups: (names, values) for store/donor holds, and the store
+        # entries themselves. Filled in the resolution pass below.
+        borrowed_terms: dict[str, tuple[tuple[str, ...], "np.ndarray"]] = {}
+        # kind, the ref's station (None = self), the name to print, vintage.
+        # BOTH hold kinds land here: `donor:` reads a finished record and
+        # `store:` a saved background, but the datum problem is identical --
+        # the offset in either belongs to the station it was fitted on.
+        borrow_held: dict[str, tuple[str, str | None, str, Any]] = {}
         for group, ref in spec.held.items():
             if isinstance(ref, StageRef):
                 held[group] = HeldFromStage(ref.stage)
+                continue
+            if isinstance(ref, StoreRef):
+                if lookup_secular is None:
+                    raise RuntimeError(
+                        f"hold {group!r}=store: no secular store is reachable "
+                        f"here. The saved background is config; pass an "
+                        f"analysis.yaml that has one, or estimate the group "
+                        f"instead of holding it."
+                    )
+                who = ref.station or station or "self"
+                entry = lookup_secular(ref.station)
+                values = secular_group_values(
+                    entry, group, component=component, station=who
+                )
+                held[group] = HeldExplicit(
+                    values=values,
+                    # A DIFFERENT kind from donor: this resolves against the
+                    # background store, not a finished record, and a reader
+                    # of the provenance must be able to tell which.
+                    source=f"store:{who}@{entry.fitted_at}",
+                )
+                borrowed_terms[group] = (
+                    _entry_group_names(entry, group, station=who),
+                    values,
+                )
+                borrow_held[group] = ("store", ref.station, who, entry.fitted_at)
                 continue
             record = lookup_donor(ref.station)
             values = donor_group_values(
@@ -598,6 +1004,151 @@ def resolve_stage_plan(
                 # donor rather than merely asserted.
                 source=f"donor:{ref.station}@{fitted_at}",
             )
+            names_raw = record.get("param_names")
+            rec_names = (
+                [str(n) for n in names_raw]
+                if isinstance(names_raw, Sequence) and not isinstance(names_raw, str)
+                else []
+            )
+            if rec_names:
+                from gps_analysis.staged import record_group_mask
+
+                mask = record_group_mask(record, group)
+                borrowed_terms[group] = (
+                    tuple(n for n, m in zip(rec_names, mask) if m),
+                    values,
+                )
+            borrow_held[group] = ("donor", ref.station, ref.station, fitted_at)
+
+        # --- re-anchor pass: every CROSS-STATION borrow, both kinds -------
+        names: tuple[str, ...]
+        datum: list[int]
+        for group, (kind, ref_station, who, vintage) in borrow_held.items():
+            if ref_station is None or ref_station == station:
+                continue  # store:self (either spelling) stays byte-identical
+            if group not in borrowed_terms:
+                # A legacy donor record with no param_names. Names are the
+                # precise route to the datum and the preferred one, but their
+                # absence must not mean "take the donor's level verbatim" --
+                # that is the very error this pass exists to remove, and it
+                # was the status quo. Fall back to the ORDER instead, which
+                # this ecosystem already treats as load-bearing:
+                # `terms.GROUP_ORDER` stable-sorts the polynomial first and
+                # `velocity._RATE_INDEX = 1` reads params[1] as the rate at
+                # six sites, so within the secular group index 0 is the
+                # intercept. Only that group carries a datum, so the
+                # fallback is scoped to it and every other group passes
+                # through untouched.
+                if group != "secular":
+                    continue
+                explicit = held[group]
+                assert isinstance(explicit, HeldExplicit)  # noqa: S101
+                values = explicit.values
+                if len(values) < 2:
+                    raise ValueError(
+                        f"{me}: holding {group!r} from {kind}:{who} needs "
+                        f"either that record's param_names or at least an "
+                        f"(intercept, rate) pair to locate its datum; it has "
+                        f"{len(values)} value(s). Re-estimate {who} — records "
+                        f"now store param_names."
+                    )
+                names = ()
+                datum = [0]
+            else:
+                names, values = borrowed_terms[group]
+                datum = [j for j, n in enumerate(names) if n in _DATUM_PARAM_NAMES]
+            if not datum:
+                continue  # e.g. periodic: no DC term, nothing to re-anchor
+            if len(datum) > 1:
+                raise ValueError(
+                    f"{me}: {kind} {who!r} group {group!r} carries "
+                    f"{len(datum)} datum parameters "
+                    f"({[names[j] for j in datum]}); one background has one "
+                    f"level, so this record is malformed"
+                )
+            if anchor_t is None or anchor_y is None:
+                raise ValueError(
+                    f"{me}: holding {group!r} from {kind}:{who} borrows "
+                    f"another station's background, whose "
+                    f"{(names[datum[0]] if names else 'intercept')!r} is the "
+                    f"DONOR's datum — using it "
+                    f"verbatim puts tens of mm of level error into whatever "
+                    f"is free (measured: SENG holding SKSH's s(t) is off by "
+                    f"(-2.9, -30.1, +41.5) mm N/E/U). Re-anchoring needs "
+                    f"this station's own series: pass anchor_t/anchor_y "
+                    f"(and anchor_sigma) to resolve_stage_plan, or hold "
+                    f"store:self instead."
+                )
+            tt = np.asarray(anchor_t, dtype=np.float64)
+            yy = np.asarray(anchor_y, dtype=np.float64)
+            lo, hi = (
+                anchor_window
+                if anchor_window is not None
+                else (float(tt.min()), float(tt.max()))
+            )
+            lo, hi = float(lo), float(hi)
+            if not (np.isfinite(lo) and np.isfinite(hi)) or hi <= lo:
+                raise ValueError(
+                    f"{me}: anchor window [{lo!r},{hi!r}] is empty or "
+                    f"degenerate; give --anchor-window START,END with "
+                    f"START < END [fractional years]"
+                )
+            sel = (tt >= lo) & (tt <= hi)
+            if not sel.any():
+                raise ValueError(
+                    f"{me}: anchor window [{lo!r},{hi!r}] selects zero "
+                    f"epochs of the series ({tt.min():.4f}-{tt.max():.4f}); "
+                    f"the anchor for the store:{who} borrow cannot be "
+                    f"computed. Widen --anchor-window or drop it to use the "
+                    f"full fit span."
+                )
+            if names:
+                keep = [j for j in range(len(names)) if j not in datum]
+                model = evaluate_group_values(
+                    [names[j] for j in keep], values[keep], tt[sel]
+                )
+            else:
+                # Positional fallback: only the rate is known to be at 1, so
+                # the background evaluated here is intercept-free linear.
+                model = np.asarray(values[1], dtype=np.float64) * tt[sel]
+            # The donor SEASONAL is part of the borrowed background only when
+            # it is borrowed too (held from a store/donor in this same
+            # stage); a self-estimated periodic must not be subtracted here
+            # -- it is not part of what these held values will apply.
+            if group != "periodic" and "periodic" in borrowed_terms:
+                per_names, per_values = borrowed_terms["periodic"]
+                model = model + evaluate_group_values(per_names, per_values, tt[sel])
+            elif group != "periodic" and isinstance(
+                spec.held.get("periodic"), (StoreRef, DonorRef)
+            ):
+                # Borrowed, but its parameter NAMES are unknowable (a donor
+                # record without param_names), so its seasonal cannot be
+                # evaluated on the anchor window. Refuse rather than anchor
+                # against a background that omits a term the hold will apply.
+                raise ValueError(
+                    f"{me}: 'periodic' is borrowed alongside {group!r} but "
+                    f"its record carries no param_names, so the anchor "
+                    f"cannot subtract the donor seasonal. Re-estimate the "
+                    f"donor (records now store param_names) or borrow "
+                    f"periodic from the store instead."
+                )
+            offset_local = anchored_offset(
+                yy[sel],
+                model,
+                None
+                if anchor_sigma is None
+                else np.asarray(anchor_sigma, dtype=np.float64)[sel],
+            )
+            anchored = values.copy()
+            anchored[datum[0]] = offset_local
+            held[group] = HeldExplicit(
+                values=anchored,
+                # Same spelling as the verbatim store hold PLUS the anchor
+                # note, so a reader can tell a re-anchored borrow from a
+                # verbatim one -- and both from a `donor:` hold.
+                source=(f"{kind}:{who}@{vintage} anchored [{lo!r},{hi!r}]"),
+            )
+
         stages.append(
             Stage(
                 name=spec.name,
@@ -607,6 +1158,57 @@ def resolve_stage_plan(
             )
         )
     return tuple(stages)
+
+
+def check_stage_plan_sources(
+    plan: StagePlan,
+    *,
+    lookup_donor: "Callable[[str], Mapping[str, object]]",
+    component: int = 0,
+    lookup_secular: "Callable[[str | None], Any] | None" = None,
+    station: str | None = None,
+) -> None:
+    """Pre-flight: verify every donor/store pointer in ``plan`` resolves.
+
+    The workbench checks a plan BEFORE reading any data, so a missing donor
+    or an absent saved background costs nothing.  It used to call
+    :func:`resolve_stage_plan` for that — which now refuses a cross-station
+    ``store:`` hold without the borrower's series (re-anchoring needs it),
+    and the pre-flight has no series yet.  This helper does ONLY the pointer
+    resolution (values fetched and discarded, nothing anchored, nothing
+    returned), so the existence check keeps failing early while the refusal
+    stays where it belongs: on the resolution whose values are actually
+    used.
+
+    Raises whatever the lookups and the group slicers raise — the same
+    errors :func:`resolve_stage_plan` would surface for a dangling pointer.
+    """
+    from geo_dataread.secular_store import secular_group_values
+
+    for spec in plan.stages:
+        for group, ref in spec.held.items():
+            if isinstance(ref, StoreRef):
+                if lookup_secular is None:
+                    raise RuntimeError(
+                        f"hold {group!r}=store: no secular store is reachable "
+                        f"here. The saved background is config; pass an "
+                        f"analysis.yaml that has one, or estimate the group "
+                        f"instead of holding it."
+                    )
+                who = ref.station or station or "self"
+                secular_group_values(
+                    lookup_secular(ref.station),
+                    group,
+                    component=component,
+                    station=who,
+                )
+            elif isinstance(ref, DonorRef):
+                donor_group_values(
+                    lookup_donor(ref.station),
+                    group,
+                    component=component,
+                    donor=ref.station,
+                )
 
 
 # ---------------------------------------------------------------------------
