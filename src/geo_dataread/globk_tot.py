@@ -33,6 +33,28 @@ seed rules above live there). ``--exclusions`` is the dev override; with
 no deployed catalog and no flag the join proceeds WITHOUT exclusions,
 loudly.
 
+Per-station junction offsets
+----------------------------
+
+The join removes only whole 10 m wrap quanta at SEGMENT boundaries. A jump
+that is neither — e.g. a ``station.info`` antenna-height convention change
+that is already spliced INSIDE one upstream segment, because older days were
+processed with the old height and never reprocessed — passes through. Such a
+junction is fixed by a declared constant offset, not by a heuristic:
+``junction_offsets.csv`` with columns
+``station,component,before_year,offset_m,reason`` adds ``offset_m`` [m] to
+every epoch of ``component`` (N/E/U) strictly before ``before_year``, after
+the join. ``reason`` is mandatory. Deployed and resolved exactly like
+``segment_exclusions.csv`` (``[FILES] junction_offsets`` or
+``<gpsconfig dir>/junction_offsets.csv``, source
+``gps-config-data/analysis-lane/``); ``--junction-offsets`` is the dev
+override. An absent catalog means "no offsets" (they are rare, reviewed
+exceptions), reported in the run header.
+
+Seed rule: ``GUSK,U,2023.0,1.0930`` — days up to 2021.95 were processed with
+a 1.093 m antenna height in ``station.info``, later corrected to the TOS value
+0.0, so the old solutions sit 1.093 m low (BGÓ 2026-09-24).
+
 Usage::
 
     gps-globk-tot SENG DYNG REYK \\
@@ -48,6 +70,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import dataclasses
 import re
 import warnings
 from collections.abc import Mapping, Sequence
@@ -59,6 +82,7 @@ from gps_parser import outlier_catalogs as _oc
 
 from geo_dataread.globk_join import (
     GlobkJoinError,
+    JoinedSeries,
     MbSegment,
     discover_segments,
     join_segments,
@@ -70,13 +94,19 @@ __all__ = [
     "AXES",
     "EXCLUSIONS_FILENAME",
     "AxisResult",
+    "JUNCTION_OFFSETS_FILENAME",
+    "JunctionOffset",
     "SegmentExclusion",
+    "apply_junction_offsets",
+    "default_junction_offsets_path",
     "default_exclusions_path",
     "load_exclusions",
     "resolve_exclusions",
     "exclusion_reason",
     "join_station",
+    "load_junction_offsets",
     "main",
+    "resolve_junction_offsets",
 ]
 
 #: mb ``.dat`` file suffix ↔ component letter.
@@ -86,6 +116,11 @@ EXCLUSIONS_FILENAME = "segment_exclusions.csv"
 """Deployed segment-exclusion catalog filename (gpsconfig-owned)."""
 
 _EXCLUSION_COLUMNS = ("station", "drop_dir", "drop_before_year", "reason")
+
+JUNCTION_OFFSETS_FILENAME = "junction_offsets.csv"
+"""Deployed junction-offset catalog filename (gpsconfig-owned)."""
+
+_OFFSET_COLUMNS = ("station", "component", "before_year", "offset_m", "reason")
 
 
 def default_exclusions_path() -> Path | None:
@@ -242,6 +277,127 @@ def exclusion_reason(
 
 
 @dataclass(frozen=True)
+class JunctionOffset:
+    """One reviewed constant offset for the epochs before a junction.
+
+    ``offset_m`` [m] is ADDED to every epoch of ``component`` (``"N"``,
+    ``"E"`` or ``"U"``) strictly before ``before_year`` [fractional year] —
+    the correction that puts the older side of the junction onto the newer
+    side's convention. ``reason`` records the justification verbatim.
+    """
+
+    station: str
+    component: str
+    before_year: float
+    offset_m: float
+    reason: str
+
+
+def default_junction_offsets_path() -> Path | None:
+    """Resolve the deployed ``junction_offsets.csv`` path via gps_parser.
+
+    Same resolution as :func:`default_exclusions_path`: ``postprocess.cfg``
+    ``[FILES] junction_offsets``, else ``<gpsconfig dir>/junction_offsets.csv``.
+    """
+    return cast(
+        "Path | None",
+        _oc.catalog_path("junction_offsets", JUNCTION_OFFSETS_FILENAME),
+    )
+
+
+def load_junction_offsets(path: Path) -> dict[str, tuple[JunctionOffset, ...]]:
+    """Load per-station junction offsets from a CSV file.
+
+    Columns (exactly): ``station,component,before_year,offset_m,reason``;
+    ``#`` comment and blank lines skipped. ``component`` is N/E/U,
+    ``reason`` mandatory, numbers must parse. Raises
+    :class:`GlobkJoinError` naming the offending row.
+    """
+    rules: dict[str, list[JunctionOffset]] = {}
+    lines = [
+        line
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+    reader = csv.DictReader(lines)
+    if reader.fieldnames is None or tuple(reader.fieldnames) != _OFFSET_COLUMNS:
+        raise GlobkJoinError(
+            f"{path}: junction-offset CSV must have exactly the columns "
+            f"{','.join(_OFFSET_COLUMNS)!r}, got {reader.fieldnames!r}"
+        )
+    for lineno, row in enumerate(reader, start=2):
+        station = (row["station"] or "").strip().upper()
+        component = (row["component"] or "").strip().upper()
+        reason = (row["reason"] or "").strip()
+        if not station:
+            raise GlobkJoinError(f"{path}:{lineno}: missing station")
+        if component not in AXES.values():
+            raise GlobkJoinError(
+                f"{path}:{lineno}: component must be one of N/E/U, got {component!r}"
+            )
+        if not reason:
+            raise GlobkJoinError(
+                f"{path}:{lineno}: missing reason — every junction offset is a "
+                "reviewed decision and must be justified"
+            )
+        try:
+            before_year = float(row["before_year"])
+            offset_m = float(row["offset_m"])
+        except (TypeError, ValueError):
+            raise GlobkJoinError(
+                f"{path}:{lineno}: before_year and offset_m must be numbers, "
+                f"got {row['before_year']!r}, {row['offset_m']!r}"
+            ) from None
+        rules.setdefault(station, []).append(
+            JunctionOffset(station, component, before_year, offset_m, reason)
+        )
+    return {station: tuple(r) for station, r in rules.items()}
+
+
+def resolve_junction_offsets(
+    explicit: Path | None,
+) -> tuple[dict[str, tuple[JunctionOffset, ...]], str | None]:
+    """Resolve + load junction offsets (explicit path > deployed catalog).
+
+    An explicit path must exist and parse. With none, the deployed catalog is
+    used when present; an ABSENT catalog means no offsets (they are rare,
+    reviewed exceptions — unlike segment exclusions no station depends on
+    one being there by default). A corrupt catalog is a hard error.
+
+    Returns:
+        ``(rules, source)``; ``source`` is None when no catalog was found.
+    """
+    if explicit is not None:
+        return load_junction_offsets(explicit), str(explicit)
+    resolved = default_junction_offsets_path()
+    if resolved is None or not resolved.is_file():
+        return {}, None
+    return load_junction_offsets(resolved), str(resolved)
+
+
+def apply_junction_offsets(
+    joined: JoinedSeries, rules: Sequence[JunctionOffset]
+) -> tuple[JoinedSeries, int]:
+    """Add each matching rule's offset to the epochs before its junction.
+
+    Rules for other components are ignored. Returns the (possibly new)
+    series and how many epoch-values were shifted in total; the input is
+    not mutated.
+    """
+    values = joined.values.copy()
+    n_shifted = 0
+    for rule in rules:
+        if rule.component != joined.component.upper()[:1]:
+            continue
+        before = joined.epochs < rule.before_year
+        values[before] += rule.offset_m
+        n_shifted += int(before.sum())
+    if n_shifted == 0:
+        return joined, 0
+    return dataclasses.replace(joined, values=values), n_shifted
+
+
+@dataclass(frozen=True)
 class AxisResult:
     """Outcome of joining one station component (axis 1/2/3 ↔ N/E/U).
 
@@ -260,6 +416,7 @@ def join_station(
     segment_dirs: Sequence[Path],
     out_dir: Path,
     exclusions: Mapping[str, Sequence[SegmentExclusion]] | None = None,
+    junction_offsets: Mapping[str, Sequence[JunctionOffset]] | None = None,
 ) -> list[AxisResult]:
     """Join all three components of one station and write its TOT files.
 
@@ -272,6 +429,7 @@ def join_station(
     and the remaining axes still run; unexpected exceptions propagate.
     """
     rules: Sequence[SegmentExclusion] = (exclusions or {}).get(station, ())
+    offsets: Sequence[JunctionOffset] = (junction_offsets or {}).get(station, ())
     results: list[AxisResult] = []
     for axis in sorted(AXES):
         try:
@@ -292,10 +450,15 @@ def join_station(
         except GlobkJoinError as exc:
             results.append(AxisResult(axis, "error", str(exc)))
             continue
+        joined, n_shifted = apply_junction_offsets(
+            joined, [r for r in offsets if r.component == AXES[axis]]
+        )
         out_path = write_joined_series(joined, out_dir / f"mb_{station}_TOT.dat{axis}")
         detail = f"{joined.epochs.size} epochs -> {out_path.name}"
         if n_excluded:
             detail += f" ({n_excluded} segment(s) excluded by rule)"
+        if n_shifted:
+            detail += f" ({n_shifted} epoch(s) shifted by a junction offset)"
         results.append(AxisResult(axis, "written", detail))
     return results
 
@@ -437,6 +600,16 @@ def main(argv: Sequence[str] | None = None) -> int:
             "default: the deployed segment_exclusions.csv via gps_parser"
         ),
     )
+    parser.add_argument(
+        "--junction-offsets",
+        type=Path,
+        default=None,
+        help=(
+            "per-station junction-offset CSV dev override "
+            "(columns: station,component,before_year,offset_m,reason); "
+            "default: the deployed junction_offsets.csv via gps_parser"
+        ),
+    )
     args = parser.parse_args(argv)
 
     # Directories first: every one is reported with its source, because with
@@ -450,12 +623,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     exclusions, exclusions_source = resolve_exclusions(
         args.exclusions.expanduser() if args.exclusions else None
     )
+    junction_offsets, offsets_source = resolve_junction_offsets(
+        args.junction_offsets.expanduser() if args.junction_offsets else None
+    )
     print(f"pre:        {pre_dir}  ({pre_src})")
     print(f"rap:        {rap_dir}  ({rap_src})")
     print(f"out:        {out_dir}  ({out_src})")
     print(f"stations:   {len(stations)}  ({sta_src})")
     if exclusions_source is not None:
         print(f"exclusions: {exclusions_source}")
+    print(f"junctions:  {offsets_source or 'none (no junction_offsets.csv)'}")
     if args.dry_run:
         print("\ndry run — nothing read, nothing written")
         return 0
@@ -466,7 +643,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     n_errors = 0
     for station in stations:
         print(f"== {station} ==")
-        for result in join_station(station, segment_dirs, out_dir, exclusions):
+        for result in join_station(
+            station, segment_dirs, out_dir, exclusions, junction_offsets
+        ):
             print(
                 f"   {AXES[result.axis]} (dat{result.axis}): "
                 f"[{result.status}] {result.detail}"

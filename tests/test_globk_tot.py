@@ -22,12 +22,16 @@ from geo_dataread.globk_join import (
     read_mb_segment,
 )
 from geo_dataread.globk_tot import (
+    JunctionOffset,
     SegmentExclusion,
+    apply_junction_offsets,
     exclusion_reason,
     join_station,
     load_exclusions,
+    load_junction_offsets,
     main,
     resolve_exclusions,
+    resolve_junction_offsets,
 )
 
 FIXTURES = Path(__file__).parent / "fixtures" / "globk"
@@ -48,6 +52,7 @@ SUND,rap,,rap is a strict subset of pre (0 unique epochs) and the rapid solution
 def _no_deployed_exclusions(monkeypatch: pytest.MonkeyPatch) -> None:
     """Isolate from any real deployed segment_exclusions.csv on this host."""
     monkeypatch.setattr(globk_tot, "default_exclusions_path", lambda: None)
+    monkeypatch.setattr(globk_tot, "default_junction_offsets_path", lambda: None)
 
 
 def _write_segment(
@@ -364,3 +369,124 @@ class TestCli:
         assert rc == 0
         reread = read_mb_segment(out / "mb_SUND_TOT.dat2")
         np.testing.assert_allclose(reread.epochs, [2024.1, 2024.2])  # rap dropped
+
+
+# ---------------------------------------------------------------------------
+# junction offsets — a declared constant for the epochs before a junction
+# that is neither a segment boundary nor a 10 m wrap quantum (GUSK, 2026-09-24)
+# ---------------------------------------------------------------------------
+
+OFFSETS_CSV = """\
+# junction_offsets.csv — reviewed per-station junction offsets.
+station,component,before_year,offset_m,reason
+GUSK,U,2023.0,1.0930,days <= 2021.95 processed with a stale 1.093 m station.info antenna height - BGO 2026-09-24
+"""
+
+
+def _spliced_segment(tmp_path: Path) -> tuple[Path, Path]:
+    """One pre segment whose Up carries a 1.093 m junction INSIDE it.
+
+    The shape of GUSK: old epochs processed with a 1.093 m antenna height sit
+    1.093 m low relative to the newer ones — one file, so the join cannot see
+    the junction, and not a 10 m quantum, so a de-wrap would not remove it.
+    """
+    pre, rap = tmp_path / "pre", tmp_path / "rap"
+    pre.mkdir()
+    rap.mkdir()
+    for axis, comp in ((1, "N"), (2, "E"), (3, "U")):
+        rows = [(2020.0, 3.350, 0.005), (2021.9, 3.352, 0.005)]
+        rows += [(2025.2, 3.352 + (1.093 if comp == "U" else 0.0), 0.005)]
+        _write_segment(pre / f"mb_GUSK_GPS.dat{axis}", "GUSK", comp, 123.37, rows)
+    return pre, rap
+
+
+class TestJunctionOffsets:
+    def test_loads_the_seed_catalog(self, tmp_path: Path) -> None:
+        path = tmp_path / "junction_offsets.csv"
+        path.write_text(OFFSETS_CSV)
+        rules = load_junction_offsets(path)
+        (rule,) = rules["GUSK"]
+        assert (rule.component, rule.before_year, rule.offset_m) == ("U", 2023.0, 1.093)
+        assert "stale" in rule.reason
+
+    @pytest.mark.parametrize(
+        "row, match",
+        [
+            ("GUSK,U,2023.0,1.093,", "missing reason"),
+            ("GUSK,Z,2023.0,1.093,r", "N/E/U"),
+            ("GUSK,U,soon,1.093,r", "must be numbers"),
+            (",U,2023.0,1.093,r", "missing station"),
+        ],
+    )
+    def test_malformed_rows_are_refused(
+        self, tmp_path: Path, row: str, match: str
+    ) -> None:
+        path = tmp_path / "j.csv"
+        path.write_text("station,component,before_year,offset_m,reason\n" + row + "\n")
+        with pytest.raises(GlobkJoinError, match=match):
+            load_junction_offsets(path)
+
+    def test_wrong_columns_are_refused(self, tmp_path: Path) -> None:
+        path = tmp_path / "j.csv"
+        path.write_text("station,before_year,offset_m,reason\nGUSK,2023,1,r\n")
+        with pytest.raises(GlobkJoinError, match="exactly the columns"):
+            load_junction_offsets(path)
+
+    def test_absent_deployed_catalog_means_no_offsets(self) -> None:
+        assert resolve_junction_offsets(None) == ({}, None)
+
+    def test_apply_shifts_only_epochs_before_the_junction(self) -> None:
+        from geo_dataread.globk_join import JoinedSeries
+
+        joined = JoinedSeries(
+            station="GUSK",
+            component="U",
+            epochs=np.array([2020.0, 2021.9, 2025.2]),
+            values=np.array([3.35, 3.352, 4.445]),
+            sigmas=np.full(3, 0.005),
+            header=None,  # type: ignore[arg-type]
+            corrections=(),
+        )
+        rule = JunctionOffset("GUSK", "U", 2023.0, 1.093, "r")
+        shifted, n = apply_junction_offsets(joined, [rule])
+        assert n == 2
+        np.testing.assert_allclose(shifted.values, [4.443, 4.445, 4.445])
+        np.testing.assert_allclose(joined.values, [3.35, 3.352, 4.445])  # untouched
+        other = JunctionOffset("GUSK", "N", 2023.0, 1.093, "r")
+        assert apply_junction_offsets(joined, [other]) == (joined, 0)
+
+    def test_join_station_closes_the_junction_on_up_only(self, tmp_path: Path) -> None:
+        pre, rap = _spliced_segment(tmp_path)
+        out = tmp_path / "TOT"
+        out.mkdir()
+        rules = {"GUSK": (JunctionOffset("GUSK", "U", 2023.0, 1.093, "r"),)}
+        results = join_station("GUSK", [pre, rap], out, junction_offsets=rules)
+        assert [r.status for r in results] == ["written"] * 3
+        assert "junction offset" in results[2].detail
+        assert "junction offset" not in results[0].detail
+        up = read_mb_segment(out / "mb_GUSK_TOT.dat3").values
+        assert float(np.ptp(up)) < 0.005  # the 1.093 m jump is gone
+        north = read_mb_segment(out / "mb_GUSK_TOT.dat1").values
+        np.testing.assert_allclose(north, [3.350, 3.352, 3.352])  # N untouched
+
+    def test_cli_flag_end_to_end(self, tmp_path: Path) -> None:
+        pre, rap = _spliced_segment(tmp_path)
+        csv_path = tmp_path / "junction_offsets.csv"
+        csv_path.write_text(OFFSETS_CSV)
+        out = tmp_path / "TOT"
+        rc = main(
+            [
+                "GUSK",
+                "--pre",
+                str(pre),
+                "--rap",
+                str(rap),
+                "--out",
+                str(out),
+                "--junction-offsets",
+                str(csv_path),
+            ]
+        )
+        assert rc == 0
+        up = read_mb_segment(out / "mb_GUSK_TOT.dat3").values
+        assert float(np.ptp(up)) < 0.005
