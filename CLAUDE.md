@@ -46,7 +46,7 @@ geo_dataread/
 │   ├── gps_displ.py      # displacements / station-relative motion
 │   ├── gps_savetimes.py  # serialise time series to disk (gps-savetimes; --clean also-writes cleaned .NEU)
 │   ├── globk_join.py     # GLOBK multibase segment read + datum-consistent join (10 m de-wrap, min-σ dedup) + mb_STA_TOT.dat writer (format_tot_file/write_joined_series, 3-line-header contract) (typed, mypy-strict)
-│   ├── globk_tot.py      # gps-globk-tot CLI: batch pre/rap → local TOT dir; per-station segment-exclusion catalog (segment_exclusions.csv, deployed via gps_parser outlier_catalogs; --exclusions dev override; reason mandatory) (typed, mypy-strict)
+│   ├── globk_tot.py      # gps-globk-tot CLI: batch pre/rap → local TOT dir; per-station segment-exclusion catalog (segment_exclusions.csv) + declared non-quantum junction offsets (junction_offsets.csv, e.g. GUSK U +1.093 m for a stale station.info height), both deployed via gps_parser outlier_catalogs; --exclusions / --junction-offsets dev overrides; reason mandatory (typed, mypy-strict)
 │   ├── detrend_estimate.py # gps-estimate-detrend CLI: batch estimate stored-detrend params from local TOT (ref=plate) → detrend_params.json (schema v1); per-station fit catalog fit_windows.csv (window + gate overrides, e.g. DYNG max_gap 1.0) via gps_parser resolver; unstamped = byte-reproducible, --stamp for timestamps; --uncert is the read-time sigma screen (default 15 = getData's own, workbench uses 10) and rides into refs, because it changes WHICH epochs were fitted without touching any fitted quantity; station_estimate_from_arrays returns record + the inlier mask lifted to the caller's index space (station_record_from_arrays wraps it) — the workbench's grey overlay, which no re-run detector could match (typed, mypy-strict)
 │   ├── gas_read.py       # GAS (strainmeter) data
 │   ├── sil_read.py       # SIL seismic data
@@ -119,7 +119,7 @@ These verdicts are UNSTABLE by nature — they resolve as epochs arrive.
 geo-dataread          # entry: geo_dataread:main
 gps-savetimes ...     # entry: geo_dataread.gps_savetimes:main
 gps-displacemnts ...  # entry: geo_dataread.gps_displ:main   (sic — typo preserved verbatim from pyproject.toml)
-gps-globk-tot ...     # entry: geo_dataread.globk_tot:main — batch GLOBK pre/rap segments → local mb_STA_TOT.dat{1,2,3} (deployed segment_exclusions.csv; --exclusions dev override)
+gps-globk-tot ...     # entry: geo_dataread.globk_tot:main — batch GLOBK pre/rap segments → local mb_STA_TOT.dat{1,2,3} (deployed segment_exclusions.csv + junction_offsets.csv; --exclusions / --junction-offsets dev overrides)
 gps-estimate-detrend ... # entry: geo_dataread.detrend_estimate:main — batch detrend-parameter estimation over local TOT → detrend_params.json (fit_windows.csv per-station windows/gates)
                          #   --analysis-yaml: per-station STAGE PLANS (detrend.estimation.stage_plans), what gps-detrend-workbench --commit writes
                          #   --donor-params:  document a 'donor:' hold borrows from (default: the DEPLOYED one, never this run's --out)
