@@ -1659,82 +1659,10 @@ def read_gps_view(
     return df
 
 
-#: Two epochs belong to the same day when they are closer than half a day.
-BASELINE_EPOCH_TOLERANCE_YEARS = 0.5 / 365.25
-
-
-def baseline_arrays(
-    station_a: tuple[npt.ArrayLike, npt.ArrayLike, npt.ArrayLike],
-    station_b: tuple[npt.ArrayLike, npt.ArrayLike, npt.ArrayLike],
-    *,
-    tol: float = BASELINE_EPOCH_TOLERANCE_YEARS,
-    rezero: bool = True,
-) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64], npt.NDArray[np.float64]]:
-    """Baseline A − B between two stations' N/E/U series, on common epochs.
-
-    Equation (per component c, per common epoch i):
-        ``b_c(tᵢ) = a_c(tᵢ) − b_c(tᵢ)``,
-        ``σ_b,c(tᵢ) = √(σ_a,c(tᵢ)² + σ_b,c(tᵢ)²)``
-
-    Symbols → args:
-        - ``tᵢ`` → epochs matched by DAY: a B epoch within ``tol`` of an A
-          epoch [fractional yr] is the same day. Float equality is not used;
-          the two series come from the same GLOBK runs but nothing guarantees
-          bit-identical epochs.
-        - ``a_c``, ``σ_a,c`` → ``station_a = (yearf, data(3,N), Ddata(3,N))``
-        - ``b_c``, ``σ_b,c`` → ``station_b``, same shapes, units of ``data``
-
-    Each input must already be in the SAME view and frame (both plate,
-    both detrended, …) — this function only differences; the caller owns
-    the frame check. The components are each station's local N/E/U, which
-    for the short baselines this is used on (tens of km) is the local frame
-    of either end to well below the noise.
-
-    Args:
-        station_a: ``(yearf, data, Ddata)`` of the station the baseline
-            points FROM (the minuend).
-        station_b: Same for the subtrahend.
-        tol: Epoch-matching tolerance [fractional yr]; default half a day.
-        rezero: Subtract the first common epoch's value, per component
-            (default). Each single-station series was referenced to its own
-            window start, so the raw difference carries an arbitrary
-            constant; re-zeroing makes the baseline start at 0 like any
-            single-station plot. NaN epochs (masked outliers) are skipped
-            when choosing the reference value.
-
-    Returns:
-        ``(yearf, data, Ddata)`` of the baseline on the common epochs, A's
-        epochs kept.
-
-    Raises:
-        ValueError: when the two stations share no epoch.
-
-    Numerical notes:
-        The σ is the uncorrelated combination and therefore conservative:
-        errors common to both stations (orbits, reference frame, part of the
-        troposphere) cancel in the baseline but are counted twice here.
-    """
-    ta, da, sa = (np.asarray(v, dtype=np.float64) for v in station_a)
-    tb, db, sb = (np.asarray(v, dtype=np.float64) for v in station_b)
-    order_b = np.argsort(tb)
-    tb, db, sb = tb[order_b], db[:, order_b], sb[:, order_b]
-    pos = np.clip(np.searchsorted(tb, ta), 1, max(tb.size - 1, 1))
-    left = np.clip(pos - 1, 0, tb.size - 1)
-    right = np.clip(pos, 0, tb.size - 1)
-    nearest = np.where(np.abs(tb[left] - ta) <= np.abs(tb[right] - ta), left, right)
-    keep = np.abs(tb[nearest] - ta) < tol
-    if not keep.any():
-        raise ValueError(
-            "baseline: the two stations share no epoch "
-            f"(A {ta.min():.3f}-{ta.max():.3f}, B {tb.min():.3f}-{tb.max():.3f})"
-        )
-    j = nearest[keep]
-    t = ta[keep]
-    data = da[:, keep] - db[:, j]
-    sigma = np.sqrt(sa[:, keep] ** 2 + sb[:, j] ** 2)
-    if rezero:
-        for c in range(data.shape[0]):
-            finite = np.flatnonzero(np.isfinite(data[c]))
-            if finite.size:
-                data[c] = data[c] - data[c, finite[0]]
-    return t, data, sigma
+# Baselines live in their own numpy-only module so light runtimes (gps_api)
+# can use them; re-exported here because gps_views.baseline_arrays shipped
+# first (2026-10-08).
+from geo_dataread.baseline import (  # noqa: E402
+    BASELINE_EPOCH_TOLERANCE_YEARS as BASELINE_EPOCH_TOLERANCE_YEARS,
+)
+from geo_dataread.baseline import baseline_arrays as baseline_arrays  # noqa: E402
