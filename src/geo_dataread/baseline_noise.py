@@ -293,6 +293,18 @@ def pair_inputs(
     return rho, (ka, kb), how
 
 
+def network_stations(cfg: Any) -> list[str]:
+    """Station ids in ``stations.cfg``: sections that carry a ``latitude``.
+
+    ``ConfigParser().getStationInfo()`` also returns non-station sections
+    (``PATHS``, ``DEFAULTS``, ``FILES``); a station needs coordinates for the
+    distance law anyway.
+    """
+    return [
+        s.upper() for s in cfg.getStationInfo() if cfg.config.has_option(s, "latitude")
+    ]
+
+
 def main(argv: list[str] | None = None) -> int:
     """``gps-baseline-noise``: refit the record from TOT and write it."""
     import argparse
@@ -318,7 +330,7 @@ def main(argv: list[str] | None = None) -> int:
     from .gps_read import getData
 
     cfg = cp.ConfigParser()
-    stations = [s.upper() for s in (a.stations or cfg.getStationInfo())]
+    stations = [s.upper() for s in a.stations] if a.stations else network_stations(cfg)
     now = datetime.datetime.now(datetime.UTC)
     end = (
         a.end
