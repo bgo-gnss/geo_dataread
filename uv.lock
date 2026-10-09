@@ -177,7 +177,12 @@ dev = [
 [[package]]
 name = "geofunc"
 version = "0.2.0"
-source = { git = "https://github.com/bgo-gnss/geofunc.git#97bec8146a6bc38d2e5c1b74c8db0c671f7a456f" }
+source = { git = "https://github.com/bgo-gnss/geofunc.git#f7353ef6f08510e2a4ac2d9021b6f102d1714462" }
+dependencies = [
+    { name = "numpy" },
+    { name = "pyproj" },
+    { name = "scipy" },
+]
 
 [[package]]
 name = "gps-analysis"
