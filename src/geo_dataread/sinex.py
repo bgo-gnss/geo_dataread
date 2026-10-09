@@ -31,12 +31,12 @@ from __future__ import annotations
 import dataclasses
 import datetime
 import gzip
-import math
 from collections.abc import Iterable, Sequence
 from pathlib import Path
 
 import numpy as np
 import numpy.typing as npt
+from geofunc import local
 
 __all__ = [
     "SinexError",
@@ -51,10 +51,8 @@ __all__ = [
 
 FloatArray = npt.NDArray[np.float64]
 
-# GRS80 (GLOBK uses a = 6378137, 1/f = 298.257222101)
-_A_E = 6378137.0
-_F = 1.0 / 298.257222101
-_E2 = _F * (2.0 - _F)
+# GRS80, as GLOBK (a = 6378137, 1/f = 298.257222101); geometry is geofunc.local
+_E2 = local.GRS80.e2
 
 _COORD_TYPES = ("STAX", "STAY", "STAZ")
 
@@ -315,24 +313,22 @@ def read_sinex(path: str | Path) -> SinexSolution:
 
 
 def xyz_to_llh(xyz: npt.ArrayLike) -> tuple[float, float, float]:
-    """Geodetic (lat, lon) in radians and height (m) on GRS80."""
-    x, y, z = (float(v) for v in np.asarray(xyz, dtype=float))
-    lon = math.atan2(y, x)
-    p = math.hypot(x, y)
-    lat = math.atan2(z, p * (1.0 - _E2))
-    h = 0.0
-    for _ in range(10):
-        n = _A_E / math.sqrt(1.0 - _E2 * math.sin(lat) ** 2)
-        h = p / math.cos(lat) - n
-        lat = math.atan2(z, p * (1.0 - _E2 * n / (n + h)))
-    return lat, lon, h
+    """Geodetic (lat, lon) in radians and height (m) on GRS80.
+
+    Thin wrapper over :func:`geofunc.local.ecef_to_geodetic` (one point);
+    new code should call that directly and use the named result.
+    """
+    g = local.ecef_to_geodetic(xyz)
+    return float(g.lat), float(g.lon), float(g.h)
 
 
 def neu_rotation(lat: float, lon: float) -> FloatArray:
-    """R with rows N, E, U, so that ``neu = R @ dxyz`` (geodetic ENU)."""
-    sl, cl = math.sin(lat), math.cos(lat)
-    so, co = math.sin(lon), math.cos(lon)
-    return np.array([[-sl * co, -sl * so, cl], [-so, co, 0.0], [cl * co, cl * so, sl]])
+    """R with rows N, E, U, so that ``neu = R @ dxyz`` (geodetic local frame).
+
+    Thin wrapper over :func:`geofunc.local.local_rotation`.
+    """
+    r: FloatArray = local.local_rotation(lat, lon, order="neu")
+    return r
 
 
 def baseline_neu(
@@ -350,8 +346,9 @@ def baseline_neu(
     twice as the quadrature sum would.
     """
     ia, ib = sol.xyz_index(a, soln_a), sol.xyz_index(b, soln_b)
-    r = neu_rotation(*xyz_to_llh(sol.estimate[ia])[:2])
-    j = np.hstack([r, -r])
     idx = np.concatenate([ia, ib])
-    d = r @ (sol.estimate[ia] - sol.estimate[ib])
-    return d, j @ sol.cov[np.ix_(idx, idx)] @ j.T
+    out = local.baseline(
+        sol.estimate[ia], sol.estimate[ib], cov=sol.cov[np.ix_(idx, idx)]
+    )
+    assert out.cov is not None
+    return out.d, out.cov
