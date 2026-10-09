@@ -105,3 +105,17 @@ def test_fit_refuses_without_data() -> None:
             {"A": [0, 0, 0]},
             window=(2024.0, 2025.0),
         )
+
+
+def test_network_stations_skips_non_station_sections() -> None:
+    import configparser
+    from types import SimpleNamespace
+
+    raw = configparser.ConfigParser()
+    raw.read_string(
+        "[PATHS]\ntot = /x\n[DEFAULTS]\na = 1\n[FILES]\nb = 2\n"
+        "[reyk]\nlatitude = 64.1\nlongitude = -21.9\n"
+        "[VFLN]\nlatitude = 63.9\nlongitude = -19.1\n"
+    )
+    cfg = SimpleNamespace(config=raw, getStationInfo=raw.sections)
+    assert bn.network_stations(cfg) == ["REYK", "VFLN"]
