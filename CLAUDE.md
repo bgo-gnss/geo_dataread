@@ -43,6 +43,8 @@ geo_dataread/
 │   ├── gps_read.py       # ~1660 LOC — main GPS time-series reader (slice-4 purge + slice-6 read_join)
 │   ├── gps_views.py      # apply-on-read views: raw|cleaned|detrended toggle (typed, mypy-strict)
 │   ├── baseline.py       # baselines A−B: split_baseline, match_epochs (by day), baseline() → Baseline incl. both ends referenced alike, check_same_view. NUMPY ONLY (a test pins it) so gps_api can reuse it; feed it read_gps_view output
+│   ├── baseline_noise.py # BaselineNoiseRecord (ρ(d) law + station σ scale k + median k + window/provenance) → $GPS_API_STORE/noise/baseline_noise.json (atomic write; NOT the config tree); fit_baseline_noise, own_shared_fraction, pair_inputs (own ρ ≥60 consecutive days, else ρ(d)); gps-baseline-noise refits from TOT (stations.cfg lat/lon → geofunc.local)
+│   ├── sinex.py          # numpy-only SINEX reader (full covariance); geometry via geofunc.local
 │   ├── gps_write.py      # cleaned .NEU writer: gamittoNEU→gamittoFile, union-drop + .prov.json sidecar; steps.csv→step_epochs + protect_windows.csv (unrest lever) + outlier_overrides.csv (per-station levers incl. per-component min_outlier floor [N,E,U]); degrade → _cleaned.DEGRADED.NEU (typed, mypy-strict)
 │   ├── gps_displ.py      # displacements / station-relative motion
 │   ├── gps_savetimes.py  # serialise time series to disk (gps-savetimes; --clean also-writes cleaned .NEU)
@@ -121,6 +123,7 @@ geo-dataread          # entry: geo_dataread:main
 gps-savetimes ...     # entry: geo_dataread.gps_savetimes:main
 gps-displacemnts ...  # entry: geo_dataread.gps_displ:main   (sic — typo preserved verbatim from pyproject.toml)
 gps-globk-tot ...     # entry: geo_dataread.globk_tot:main — batch GLOBK pre/rap segments → local mb_STA_TOT.dat{1,2,3} (deployed segment_exclusions.csv + junction_offsets.csv; --exclusions / --junction-offsets dev overrides)
+gps-baseline-noise [--dir TOT] [--window-years 2] # refit the empirical baseline-σ record (cron-able, ~4 s)
 gps-estimate-detrend ... # entry: geo_dataread.detrend_estimate:main — batch detrend-parameter estimation over local TOT → detrend_params.json (fit_windows.csv per-station windows/gates)
                          #   --analysis-yaml: per-station STAGE PLANS (detrend.estimation.stage_plans), what gps-detrend-workbench --commit writes
                          #   --donor-params:  document a 'donor:' hold borrows from (default: the DEPLOYED one, never this run's --out)
@@ -135,7 +138,7 @@ gps-estimate-detrend ... # entry: geo_dataread.detrend_estimate:main — batch d
 
 ---
 
-*Last reviewed: 2026-08-26 (re-anchoring now covers BOTH hold kinds:
+*Last reviewed: 2026-10-09 (baseline_noise + sinex modules; baseline() opt-in rho=/sigma_scale=). Previous 2026-08-26 (re-anchoring now covers BOTH hold kinds:
 `donor:` (a finished record in detrend_params.json) carried the donor's datum
 exactly as `store:` did — measured, THOB holding SENG via donor: sat
 +75.3/-34.3/-124.6 mm off its own data and ignored --anchor-window entirely.
