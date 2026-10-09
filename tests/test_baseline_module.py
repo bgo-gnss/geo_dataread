@@ -93,3 +93,42 @@ def test_check_same_view() -> None:
     bl.check_same_view(("AAAA", "BBBB"), (True, True))
     with pytest.raises(ValueError, match="BBBB has none"):
         bl.check_same_view(("AAAA", "BBBB"), (True, False))
+
+
+def _pair(n: int = 5):
+    t = 2026.0 + np.arange(n) / 365.25
+    sa = np.full((3, n), 2.0)
+    sb = np.full((3, n), 2.0)
+    return (t, np.zeros((3, n)), sa), (t, np.ones((3, n)), sb)
+
+
+def test_default_sigma_is_quadrature_and_unchanged() -> None:
+    a, b = _pair()
+    out = bl.baseline(a, b)
+    np.testing.assert_allclose(out.sigma, np.sqrt(8.0))
+    assert out.sigma_quadrature is None and out.rho is None
+
+
+def test_empirical_sigma_with_shared_fraction_and_scale() -> None:
+    a, b = _pair()
+    out = bl.baseline(
+        a, b, rho=[0.75, 0.0, 1.0], sigma_scale=([1.0, 1.0, 0.5], [1.0, 1.0, 0.5])
+    )
+    np.testing.assert_allclose(out.sigma[0], 2.0 * np.sqrt(0.5))  # √(4+4−2·0.75·4)
+    np.testing.assert_allclose(out.sigma[1], np.sqrt(8.0))  # ρ = 0 → quadrature
+    np.testing.assert_allclose(out.sigma[2], 0.0)  # fully shared, equal σ
+    np.testing.assert_allclose(out.sigma_quadrature, np.sqrt(8.0))
+    assert out.rho.shape == (3, 5)
+    np.testing.assert_allclose(out.data, bl.baseline(a, b).data)  # values untouched
+
+
+def test_empirical_sigma_refusals() -> None:
+    a, b = _pair()
+    with pytest.raises(ValueError, match="needs rho"):
+        bl.baseline(a, b, sigma_scale=([1, 1, 1], [1, 1, 1]))
+    with pytest.raises(ValueError, match="rho must"):
+        bl.baseline(a, b, rho=[0.5, 0.5])
+    with pytest.raises(ValueError, match="rho must"):
+        bl.baseline(a, b, rho=[0.5, 0.5, 1.5])
+    with pytest.raises(ValueError, match="sigma_scale needs"):
+        bl.baseline(a, b, rho=[0.5] * 3, sigma_scale=([1, 1], [1, 1, 1]))

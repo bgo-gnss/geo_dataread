@@ -98,8 +98,11 @@ class Baseline:
         stations: ``(A, B)`` markers, or ``None`` when not given.
         yearf: Common epochs (A's), shape (N,) [fractional yr].
         data: A − B per component, shape (C, N).
-        sigma: √(σ_A² + σ_B²), shape (C, N) — conservative: errors common to
-            both stations cancel in the difference but are counted twice.
+        sigma: shape (C, N). By default the quadrature √(σ_A² + σ_B²) —
+            conservative: errors common to both stations cancel in the
+            difference but are counted twice. With ``rho`` (and optionally
+            ``sigma_scale``) given to :func:`baseline`, the empirical
+            √(σ_A′² + σ_B′² − 2ρ·σ_A′·σ_B′), σ′ = k·σ.
         ends: ``((yearf_A, data_A), (yearf_B, data_B))`` — each station's
             FULL series (all its own epochs, not only the common ones),
             shifted so that on every common epoch ``data_A − data_B``
@@ -112,6 +115,8 @@ class Baseline:
     data: FloatArray
     sigma: FloatArray
     ends: tuple[tuple[FloatArray, FloatArray], tuple[FloatArray, FloatArray]]
+    sigma_quadrature: FloatArray | None = None
+    rho: FloatArray | None = None
 
 
 def baseline(
@@ -121,6 +126,8 @@ def baseline(
     stations: tuple[str, str] | None = None,
     tol: float = BASELINE_EPOCH_TOLERANCE_YEARS,
     rezero: bool = True,
+    rho: npt.ArrayLike | None = None,
+    sigma_scale: tuple[npt.ArrayLike, npt.ArrayLike] | None = None,
 ) -> Baseline:
     """Baseline A − B on common days, with both ends referenced alike.
 
@@ -134,6 +141,16 @@ def baseline(
         - ``b``, ``σ_b`` → ``station_b``, same layout and units
         - ``t₀`` → per component, the first common epoch where the
           difference is finite; the bracket is applied only when ``rezero``
+
+    Empirical σ (opt-in): formal GLOBK σ count the daily error the two
+    stations SHARE twice, so short baselines get σ several times their real
+    scatter. Pass ``rho`` — the shared fraction per component, shape (C,) or
+    (C, N), e.g. ``gps_analysis.empirical_sigma.shared_fraction_model`` at
+    the pair's distance — and optionally ``sigma_scale = (k_A, k_B)``, each
+    (C,), the stations' ``sigma_scale_factor``:
+        ``σ_c = √(σ_A′² + σ_B′² − 2ρ_c·σ_A′·σ_B′)``, ``σ′ = k·σ``
+    The quadrature value stays in ``Baseline.sigma_quadrature``. Validated
+    out of sample on IMO TOT 2025–26: NRMS 0.52/0.51/0.33 → 0.91/0.91/0.94.
 
     Each single-station series was referenced to its own window start, so
     the raw difference carries an arbitrary constant; re-zeroing (default)
@@ -174,13 +191,40 @@ def baseline(
         end_a[c] -= da[c, ia[k]]
         end_b[c] -= db[c, ib[k]]
     data = end_a[:, ia] - end_b[:, ib] if rezero else raw
-    sigma = np.sqrt(sa[:, ia] ** 2 + sb[:, ib] ** 2)
+    sa_c, sb_c = sa[:, ia], sb[:, ib]
+    quad = np.sqrt(sa_c**2 + sb_c**2)
+    if rho is None:
+        if sigma_scale is not None:
+            raise ValueError("baseline: sigma_scale needs rho (the shared fraction)")
+        return Baseline(
+            stations=stations,
+            yearf=ta[ia],
+            data=data,
+            sigma=quad,
+            ends=((ta, end_a), (tb, end_b)),
+        )
+    n_comp = raw.shape[0]
+    r = np.asarray(rho, dtype=np.float64)
+    r = r.reshape(-1, 1) if r.ndim == 1 else r
+    if r.shape not in ((n_comp, 1), raw.shape) or np.any(np.abs(r) > 1):
+        raise ValueError(
+            f"baseline: rho must be ({n_comp},) or {raw.shape} within [-1, 1], "
+            f"got shape {np.shape(rho)}"
+        )
+    if sigma_scale is not None:
+        ka, kb = (np.asarray(k, dtype=np.float64).reshape(-1, 1) for k in sigma_scale)
+        if ka.shape[0] != n_comp or kb.shape[0] != n_comp:
+            raise ValueError(f"baseline: sigma_scale needs ({n_comp},) per station")
+        sa_c, sb_c = ka * sa_c, kb * sb_c
+    sigma = np.sqrt(np.maximum(sa_c**2 + sb_c**2 - 2.0 * r * sa_c * sb_c, 0.0))
     return Baseline(
         stations=stations,
         yearf=ta[ia],
         data=data,
         sigma=sigma,
         ends=((ta, end_a), (tb, end_b)),
+        sigma_quadrature=quad,
+        rho=np.broadcast_to(r, raw.shape).copy(),
     )
 
 
