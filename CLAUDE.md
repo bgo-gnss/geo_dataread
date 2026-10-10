@@ -45,6 +45,7 @@ geo_dataread/
 │   ├── baseline.py       # baselines A−B: split_baseline, match_epochs (by day), baseline() → Baseline incl. both ends referenced alike, check_same_view. NUMPY ONLY (a test pins it) so gps_api can reuse it; feed it read_gps_view output
 │   ├── baseline_noise.py # BaselineNoiseRecord (ρ(d) law + station σ scale k + median k + window/provenance) → $GPS_API_STORE/noise/baseline_noise.json (atomic write; NOT the config tree); fit_baseline_noise, own_shared_fraction, pair_inputs (own ρ ≥60 consecutive days, else ρ(d)); gps-baseline-noise refits from TOT (stations.cfg lat/lon → geofunc.local)
 │   ├── sinex.py          # numpy-only SINEX reader (full covariance); geometry via geofunc.local
+│   ├── pos.py            # numpy-only PBO .pos reader (tssum output, okada /D/SNX/pos): PosSeries (XYZ/NEU + σ + correlations, GLOBK yearf); openGlobkTimes(tType="POS") reads it in place of mb_ files
 │   ├── gps_write.py      # cleaned .NEU writer: gamittoNEU→gamittoFile, union-drop + .prov.json sidecar; steps.csv→step_epochs + protect_windows.csv (unrest lever) + outlier_overrides.csv (per-station levers incl. per-component min_outlier floor [N,E,U]); degrade → _cleaned.DEGRADED.NEU (typed, mypy-strict)
 │   ├── gps_displ.py      # displacements / station-relative motion
 │   ├── gps_savetimes.py  # serialise time series to disk (gps-savetimes; --clean also-writes cleaned .NEU)
@@ -138,7 +139,7 @@ gps-estimate-detrend ... # entry: geo_dataread.detrend_estimate:main — batch d
 
 ---
 
-*Last reviewed: 2026-10-09 (baseline_noise + sinex modules; baseline() opt-in rho=/sigma_scale=). Previous 2026-08-26 (re-anchoring now covers BOTH hold kinds:
+*Last reviewed: 2026-10-10 (pos.py: .pos reader + tType="POS"). Previous 2026-10-09 (baseline_noise + sinex modules; baseline() opt-in rho=/sigma_scale=). Previous 2026-08-26 (re-anchoring now covers BOTH hold kinds:
 `donor:` (a finished record in detrend_params.json) carried the donor's datum
 exactly as `store:` did — measured, THOB holding SENG via donor: sat
 +75.3/-34.3/-124.6 mm off its own data and ignored --anchor-window entirely.
