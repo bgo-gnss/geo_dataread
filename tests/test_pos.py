@@ -66,6 +66,18 @@ def test_missing_station_and_bad_file(tmp_path: Path) -> None:
         pos.read_pos(tmp_path / "BAD.imo.final_itr08.pos")
 
 
+def test_pos_path_prefers_new_id_then_legacy(tmp_path: Path) -> None:
+    legacy = tmp_path / f"AKUR.{pos.LEGACY_PROD_ID}.pos"
+    shutil.copy(FIX / "AKUR.imo.final_itr08.pos", legacy)
+    assert pos.pos_path("akur", tmp_path) == legacy
+    new = tmp_path / f"AKUR.{pos.DEFAULT_PROD_ID}.pos"
+    shutil.copy(legacy, new)
+    assert pos.pos_path("AKUR", tmp_path) == new
+    # an explicit id gets no fallback
+    with pytest.raises(FileNotFoundError):
+        pos.pos_path("AKUR", tmp_path, prod_id="imo.rapid_itr08")
+
+
 def test_openGlobkTimes_pos_scheme() -> None:
     from geo_dataread.gps_read import openGlobkTimes
 
