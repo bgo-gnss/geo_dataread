@@ -73,6 +73,24 @@ def test_openGlobkTimes_pos_scheme() -> None:
     assert data.shape == (3, 5) and yearf[0] == pytest.approx(2026.667122, abs=1e-6)
 
 
+def test_overflow_fields_are_nan(tmp_path: Path) -> None:
+    # SEY1 on okada: reference height and recent dN/dE/dU overflow (2026-10)
+    lines = (FIX / "AKUR.imo.final_itr08.pos").read_text().splitlines()
+    i = next(k for k, ln in enumerate(lines) if ln.startswith("NEU Reference position"))
+    lines[i] = (
+        lines[i][:25] + "   63.9956463003  352.7515334168 ********** (Unknown/WGS84)"
+    )
+    row = lines[-1].split()
+    row[15:18] = ["*********"] * 3
+    lines[-1] = " " + " ".join(row)
+    f = tmp_path / "AKUR.imo.final_itr08.pos"
+    f.write_text("\n".join(lines) + "\n")
+    s = pos.read_pos(f)
+    assert np.isnan(s.ref_llh[2]) and not np.isnan(s.ref_llh[:2]).any()
+    assert np.isnan(s.dneu[-1]).all() and not np.isnan(s.dneu[:-1]).any()
+    assert not np.isnan(s.sneu).any()
+
+
 def test_numpy_only() -> None:
     # like sinex.py: usable from gps_api / notebooks without the legacy stack
     imports = [
