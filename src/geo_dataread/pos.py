@@ -68,6 +68,8 @@ class PosSeries:
     ``xyz``/``sxyz`` and ``dneu``/``sneu`` are in metres; ``rxyz`` holds the
     correlations (XY, XZ, YZ) and ``rneu`` (NE, NU, EU). ``llh`` is latitude,
     longitude (degrees, longitude in 0…360 as written) and height (m).
+    Fields tssum could not fit (Fortran ``*****`` overflow, e.g. dN/dE when the
+    reference position is far from the site) are NaN.
     """
 
     station: str
@@ -123,9 +125,14 @@ def _open_text(path: Path) -> list[str]:
         return f.read().splitlines()
 
 
+def _num(tok: str) -> float:
+    """Fortran overflow (``*****``) → NaN; tssum writes it for |dN/dE| ≥ 10⁴ m."""
+    return float("nan") if tok.startswith("*") else float(tok)
+
+
 def _ref(value: str, path: Path, what: str) -> FloatArray:
     try:
-        return np.array([float(x) for x in value.split()[:3]])
+        return np.array([_num(x) for x in value.split()[:3]])
     except (ValueError, IndexError) as exc:
         raise PosError(f"{path}: bad {what} {value!r}") from exc
 
@@ -158,7 +165,10 @@ def read_pos(path: str | Path) -> PosSeries:
             f"{path}: row {start + bad[0] + 1} has {len(rows[bad[0]])} columns, expected {_NCOL}"
         )
     if rows:
-        num = np.array([r[2:24] for r in rows], dtype=float)
+        try:
+            num = np.array([[_num(x) for x in r[2:24]] for r in rows])
+        except ValueError as exc:
+            raise PosError(f"{path}: {exc}") from exc
         stamps = [
             f"{r[0][:4]}-{r[0][4:6]}-{r[0][6:8]}T{r[1][:2]}:{r[1][2:4]}:{r[1][4:6]}"
             for r in rows
