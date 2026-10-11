@@ -693,7 +693,7 @@ def openGlobkTimes(sta, Dir=None, tType="TOT"):
             (daily); "08h" reads the 8-hourly solutions. A scheme whose
             files are absent raises FileNotFoundError (only ``tType="TOT"``
             retains the legacy fallback to lowercase ``mb_<STA>_tot.dat*``).
-            ``tType="POS"`` reads the PBO ``<STA>.imo.final_itr08.pos`` file
+            ``tType="POS"`` reads the PBO ``<STA>.imo.daily_itr08.pos`` file
             instead (:mod:`geo_dataread.pos`; Dir defaults to the
             postprocess ``pos_dir``, else okada's ``/D/SNX/pos`` mount).
 

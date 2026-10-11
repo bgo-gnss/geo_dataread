@@ -2,7 +2,7 @@
 
 The daily SINEX job on okada (``make_daily_sinex.sh``) keeps the glorg output
 with ``PBOP`` lines, and ``tssum`` turns those into one file per station:
-``/D/SNX/pos/<SITE>.imo.final_itr08.pos`` (read-only mount on the laptop:
+``/D/SNX/pos/<SITE>.imo.daily_itr08.pos`` (read-only mount on the laptop:
 ``/mnt_data/okada/D/SNX/pos``). Each row is one daily solution with
 
 - the absolute ECEF position X/Y/Z, its sigmas and the X–Y/X–Z/Y–Z correlations;
@@ -40,6 +40,7 @@ import numpy.typing as npt
 __all__ = [
     "DEFAULT_POS_DIR",
     "DEFAULT_PROD_ID",
+    "LEGACY_PROD_ID",
     "PosError",
     "PosSeries",
     "open_pos_times",
@@ -52,7 +53,10 @@ FloatArray = npt.NDArray[np.float64]
 #: okada's archive as seen through the read-only mount on the laptop
 DEFAULT_POS_DIR = "/mnt_data/okada/D/SNX/pos"
 #: product id ``tssum`` writes into the file name (``<SITE>.<prod_id>.pos``)
-DEFAULT_PROD_ID = "imo.final_itr08"
+DEFAULT_PROD_ID = "imo.daily_itr08"
+#: the id the files had until 2026-10-11 (its "final" was a label, not the orbits);
+#: :func:`pos_path` falls back to it when looking for the default id
+LEGACY_PROD_ID = "imo.final_itr08"
 
 _NCOL = 25  # date time mjd  X Y Z  Sx Sy Sz  Rxy Rxz Ryz  lat lon h  dN dE dU  Sn Se Su  Rne Rnu Reu  soln
 
@@ -201,11 +205,17 @@ def read_pos(path: str | Path) -> PosSeries:
 def pos_path(
     sta: str, directory: str | Path | None = None, prod_id: str = DEFAULT_PROD_ID
 ) -> Path:
-    """``<directory>/<STA>.<prod_id>.pos`` (or ``.pos.gz``); FileNotFoundError if neither exists."""
+    """``<directory>/<STA>.<prod_id>.pos`` (or ``.pos.gz``); FileNotFoundError if none exists.
+
+    With the default ``prod_id``, a file under :data:`LEGACY_PROD_ID` is used
+    when there is none under the new id (a ``.pos`` set built before the rename).
+    """
     d = Path(directory) if directory is not None else Path(DEFAULT_POS_DIR)
-    for name in (f"{sta.upper()}.{prod_id}.pos", f"{sta.upper()}.{prod_id}.pos.gz"):
-        if (d / name).is_file():
-            return d / name
+    ids = [prod_id] + ([LEGACY_PROD_ID] if prod_id == DEFAULT_PROD_ID else [])
+    for pid in ids:
+        for name in (f"{sta.upper()}.{pid}.pos", f"{sta.upper()}.{pid}.pos.gz"):
+            if (d / name).is_file():
+                return d / name
     raise FileNotFoundError(
         f"no .pos time series for station '{sta}' ({prod_id}) in {d}"
     )
