@@ -18,6 +18,13 @@ Pieces:
 
 - :func:`read_pos` — path (``.pos`` or ``.pos.gz``) → :class:`PosSeries`.
 - :func:`pos_path` — station id + directory → the file.
+- :func:`pos_local` — N/E/U (and their 3×3 covariance) computed from the
+  ECEF X/Y/Z and covariance relative to a reference position WE choose
+  (:data:`REFERENCE_MODES`), after the reviewed junction offsets
+  (``junction_offsets.csv``, e.g. GUSK's antenna height) are applied in
+  ECEF. tssum's own dN/dE/dU columns are the GLOBK ``Loc.`` convention
+  relative to the file's header position; they are kept in
+  :class:`PosSeries` but not used by default.
 - :func:`open_pos_times` — ``(yearf, data, ddata)`` in the shape and units of
   :func:`geo_dataread.gps_read.openGlobkTimes` (metres, rows N/E/U), so the
   existing chain reads ``.pos`` with ``tType="POS"``.
@@ -35,17 +42,28 @@ import datetime
 import gzip
 from pathlib import Path
 
+from collections.abc import Mapping, Sequence
+from typing import TYPE_CHECKING, Literal
+
 import numpy as np
 import numpy.typing as npt
+from geofunc import local
 from gtimes.timefunc import dTimetoYearf
+
+if TYPE_CHECKING:
+    from geo_dataread.globk_tot import JunctionOffset
 
 __all__ = [
     "DEFAULT_POS_DIR",
     "DEFAULT_PROD_ID",
     "LEGACY_PROD_ID",
+    "REFERENCE_MODES",
     "PosError",
     "PosSeries",
+    "apriori_xyz",
+    "junction_dlocal",
     "open_pos_times",
+    "pos_local",
     "pos_path",
     "read_pos",
 ]
@@ -59,6 +77,13 @@ DEFAULT_PROD_ID = "imo.daily_itr08"
 #: the id the files had until 2026-10-11 (its "final" was a label, not the orbits);
 #: :func:`pos_path` falls back to it when looking for the default id
 LEGACY_PROD_ID = "imo.final_itr08"
+
+#: how :func:`pos_local` picks the reference position: a station a-priori
+#: coordinate (``station_coord.xyz``), a statistic of the series
+#: (:func:`geofunc.local.reference_position`), or ``"tssum"`` — tssum's own
+#: dN/dE/dU columns, unchanged (GLOBK ``Loc.`` convention, header reference)
+REFERENCE_MODES = ("wmean", "mean", "median", "first", "apriori", "tssum")
+ReferenceMode = Literal["wmean", "mean", "median", "first", "apriori", "tssum"]
 
 _NCOL = 25  # date time mjd  X Y Z  Sx Sy Sz  Rxy Rxz Ryz  lat lon h  dN dE dU  Sn Se Su  Rne Rnu Reu  soln
 
@@ -222,14 +247,119 @@ def pos_path(
     )
 
 
+def apriori_xyz(sta: str, path: str | Path | None = None) -> FloatArray | None:
+    """The station's a-priori ECEF coordinate ``(3,)`` from ``station_coord.xyz``.
+
+    ``path`` defaults to postprocess.cfg ``[PATHS] coord_file`` (via
+    gps_parser). Lines are ``X Y Z SITE``. None when the station is not listed.
+    """
+    if path is None:
+        from gps_parser import ConfigParser
+
+        path = ConfigParser().getPostProcessDir("coord_file")
+    with open(Path(path).expanduser()) as f:
+        for line in f:
+            tok = line.split()
+            if len(tok) >= 4 and tok[3].upper() == sta.upper():
+                return np.array([float(v) for v in tok[:3]])
+    return None
+
+
+def junction_dlocal(
+    yearf: npt.ArrayLike, rules: Sequence[JunctionOffset]
+) -> FloatArray:
+    """Per-epoch N/E/U offsets ``(n, 3)`` [m] from reviewed junction rules.
+
+    Each rule adds ``offset_m`` to its component for the epochs strictly
+    before ``before_year`` — the same rule ``gps-globk-tot`` applies to the
+    TOT series, here as a local vector for
+    :func:`geofunc.local.apply_local_offsets`.
+    """
+    y = np.asarray(yearf, dtype=float)
+    d = np.zeros((len(y), 3))
+    for rule in rules:
+        d[y < rule.before_year, "NEU".index(rule.component.upper())] += rule.offset_m
+    return d
+
+
+def _default_junctions(sta: str) -> tuple[JunctionOffset, ...]:
+    from geo_dataread.globk_tot import resolve_junction_offsets
+
+    rules, _ = resolve_junction_offsets(None)
+    return rules.get(sta.upper(), ())
+
+
+def pos_local(
+    s: PosSeries,
+    ref: ReferenceMode | npt.ArrayLike = "wmean",
+    *,
+    junctions: Sequence[JunctionOffset]
+    | Mapping[str, Sequence[JunctionOffset]]
+    | None = None,
+    convention: local.Convention = "geodetic",
+    coord_file: str | Path | None = None,
+) -> tuple[local.Local, FloatArray | None]:
+    """N/E/U displacements ``(n, 3)`` [m] + covariance ``(n, 3, 3)`` from the X/Y/Z.
+
+    1. The junction offsets (``junctions``: rules for this station, a
+       ``{station: rules}`` mapping, or None = the deployed
+       ``junction_offsets.csv``) are added in ECEF along the station's own
+       axes, so every product derived from the coordinates includes them.
+    2. The reference position ``ref``: an ECEF point ``(3,)``, ``"apriori"``
+       (``station_coord.xyz``; falls back to ``"wmean"`` when the station is
+       not listed) or a statistic of the corrected series — ``"wmean"`` (the
+       least-squares mean with the full 3×3 covariances), ``"mean"``,
+       ``"median"``, ``"first"``.
+    3. :func:`geofunc.local.displacements` with ``convention`` —
+       ``"geodetic"`` (true local level) or ``"globk"`` (glorg ``Loc.``, the
+       TOT/tssum convention).
+
+    ``ref="tssum"`` returns tssum's own columns untouched (no junction
+    offsets, header reference, GLOBK convention, σ only on the diagonal).
+    Returns ``(Local(d, cov), ref_xyz)``; ``ref_xyz`` is None for "tssum".
+    """
+    if isinstance(ref, str) and ref == "tssum":
+        cov = np.zeros((len(s), 3, 3))
+        idx = np.arange(3)
+        cov[:, idx, idx] = s.sneu**2
+        return local.Local(s.dneu.copy(), cov), None
+    if junctions is None:
+        rules: Sequence[JunctionOffset] = _default_junctions(s.station)
+    elif isinstance(junctions, Mapping):
+        rules = tuple(junctions.get(s.station.upper(), ()))
+    else:
+        rules = junctions
+    xyz = s.xyz
+    if rules:
+        xyz = local.apply_local_offsets(xyz, junction_dlocal(s.yearf, rules))
+    cov = s.cov_xyz()
+    if isinstance(ref, str):
+        if ref not in REFERENCE_MODES:
+            raise ValueError(f"ref must be one of {REFERENCE_MODES} or an ECEF point")
+        ref_xyz = apriori_xyz(s.station, coord_file) if ref == "apriori" else None
+        if ref_xyz is None:
+            how = "wmean" if ref == "apriori" else ref
+            ref_xyz = local.reference_position(xyz, cov=cov, how=how)  # type: ignore[arg-type]
+    else:
+        ref_xyz = np.asarray(ref, dtype=float)
+    return local.displacements(xyz, ref_xyz, cov=cov, convention=convention), ref_xyz
+
+
 def open_pos_times(
-    sta: str, directory: str | Path | None = None, prod_id: str = DEFAULT_PROD_ID
+    sta: str,
+    directory: str | Path | None = None,
+    prod_id: str = DEFAULT_PROD_ID,
+    *,
+    ref: ReferenceMode | npt.ArrayLike = "wmean",
+    convention: local.Convention = "geodetic",
 ) -> tuple[FloatArray, FloatArray, FloatArray]:
     """``(yearf, data, ddata)`` like :func:`geo_dataread.gps_read.openGlobkTimes`.
 
     ``data``/``ddata`` are ``(3, n)``: rows dN, dE, dU and their sigmas, in
-    metres, relative to the file's NEU reference position (the caller removes
-    its own offset, as for the ``mb_`` files).
+    metres, from :func:`pos_local` (junction offsets applied, relative to
+    ``ref``, ``convention``). ``ref="tssum"`` gives tssum's own columns.
     """
     s = read_pos(pos_path(sta, directory, prod_id))
-    return s.yearf, s.dneu.T.copy(), s.sneu.T.copy()
+    out, _ = pos_local(s, ref, convention=convention)
+    sig = np.sqrt(np.diagonal(out.cov, axis1=-2, axis2=-1))  # type: ignore[arg-type]
+    return s.yearf, out.d.T.copy(), sig.T.copy()

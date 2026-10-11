@@ -670,7 +670,7 @@ def extractfromgamitbakf(cfile, stations):
     return slines
 
 
-def openGlobkTimes(sta, Dir=None, tType="TOT"):
+def openGlobkTimes(sta, Dir=None, tType="TOT", *, ref_position=None, convention="geodetic"):
     """
     function to import data from globk time series files into a numpy arrays
 
@@ -696,6 +696,14 @@ def openGlobkTimes(sta, Dir=None, tType="TOT"):
             ``tType="POS"`` reads the PBO ``<STA>.imo.daily_itr08.pos`` file
             instead (:mod:`geo_dataread.pos`; Dir defaults to the
             postprocess ``pos_dir``, else okada's ``/D/SNX/pos`` mount).
+            N/E/U are then computed from the file's X/Y/Z and covariance
+            (:func:`geo_dataread.pos.pos_local`, junction offsets applied).
+        ref_position: POS only — the reference position the N/E/U are
+            relative to: ``"wmean"`` (default), ``"mean"``, ``"median"``,
+            ``"first"``, ``"apriori"`` (``station_coord.xyz``), ``"tssum"``
+            (tssum's own columns) or an ECEF point.
+        convention: POS only — ``"geodetic"`` (default, true local level)
+            or ``"globk"`` (glorg ``Loc.``, the convention of the TOT files).
 
     returns:
 
@@ -715,7 +723,17 @@ def openGlobkTimes(sta, Dir=None, tType="TOT"):
                 Dir = ConfigParser().getPostProcessDir("pos_dir")
             except Exception:
                 Dir = pos.DEFAULT_POS_DIR
-        return pos.open_pos_times(sta, Dir)
+        return pos.open_pos_times(
+            sta,
+            Dir,
+            ref="wmean" if ref_position is None else ref_position,
+            convention=convention,
+        )
+    if ref_position is not None or convention != "geodetic":
+        raise ValueError(
+            f"ref_position/convention apply to tType='POS' only (the {tType} "
+            "files are displacements, not coordinates)"
+        )
 
     config = ConfigParser()
 
@@ -1650,6 +1668,8 @@ def getData(
     tType="TOT",
     uncert=15,
     offset=None,
+    ref_position=None,
+    convention="geodetic",
 ):
     """
     Function extracting and filtering data to prepeare for plotting.
@@ -1666,6 +1686,11 @@ def getData(
         tType: type of data
         uncert: uncertainty
         offset: offset
+        ref_position: tType="POS" only — reference position of the N/E/U
+            (see :func:`openGlobkTimes`). When given, the series stays
+            relative to it (``offset`` defaults to 0 instead of the mean of
+            the first samples).
+        convention: tType="POS" only — "geodetic" or "globk".
 
     Returns:
         yearf: floating point year array
@@ -1684,7 +1709,14 @@ def getData(
         # revived in refactor-B slice 6) is read_join().
         tType = "TOT"
 
-    yearf, data, Ddata = openGlobkTimes(sta, Dir=Dir, tType=tType)
+    if ref_position is None and convention == "geodetic":
+        yearf, data, Ddata = openGlobkTimes(sta, Dir=Dir, tType=tType)
+    else:
+        yearf, data, Ddata = openGlobkTimes(
+            sta, Dir=Dir, tType=tType, ref_position=ref_position, convention=convention
+        )
+    if ref_position is not None and offset is None:
+        offset = np.zeros(3)  # keep the chosen reference as the zero
     yearf, data, Ddata = dPeriod(yearf, data, Ddata, fstart, fend)
     if yearf is None or len(yearf) == 0:
         print("WARNING: no data for station {}".format(sta))
