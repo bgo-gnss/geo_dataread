@@ -24,7 +24,8 @@ Pieces:
 
 Time: :attr:`PosSeries.yearf` follows GLOBK — ``year + (doy − 1 + hours/24) /
 days_in_year`` at the solution epoch (11:59 for the daily runs) — so it equals
-the ``mb_`` fractional years.
+the ``mb_`` fractional years. The conversions are gtimes' (``dTimetoYearf``;
+``gtimes.mjd_to_yearf`` etc. for the ``mjd`` column).
 """
 
 from __future__ import annotations
@@ -36,6 +37,7 @@ from pathlib import Path
 
 import numpy as np
 import numpy.typing as npt
+from gtimes.timefunc import dTimetoYearf
 
 __all__ = [
     "DEFAULT_POS_DIR",
@@ -97,14 +99,13 @@ class PosSeries:
     @property
     def yearf(self) -> FloatArray:
         """GLOBK fractional year of each epoch (equals the ``mb_`` time column)."""
-        out = np.empty(len(self))
-        for i, t in enumerate(
-            self.epochs.astype("datetime64[s]").astype(datetime.datetime)
-        ):
-            start = datetime.datetime(t.year, 1, 1)
-            ndays = (datetime.datetime(t.year + 1, 1, 1) - start).days
-            out[i] = t.year + (t - start).total_seconds() / 86400.0 / ndays
-        return out
+        return np.array(
+            [
+                dTimetoYearf(t)
+                for t in self.epochs.astype("datetime64[s]").astype(datetime.datetime)
+            ],
+            dtype=float,
+        )
 
     def cov_xyz(self) -> FloatArray:
         """Per-epoch 3×3 X/Y/Z covariance, shape ``(n, 3, 3)``, m²."""
