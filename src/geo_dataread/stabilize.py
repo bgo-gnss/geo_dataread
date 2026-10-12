@@ -40,7 +40,7 @@ settings (``stab_ite 4 0.5 4.0``, ``cnd_hgtv 10 10 4 4``);
 from __future__ import annotations
 
 import dataclasses
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 
 import numpy as np
 import numpy.typing as npt
@@ -171,6 +171,8 @@ def stabilize(
     sol: SinexSolution,
     reference: Iterable[str],
     config: StabilizeConfig | None = None,
+    *,
+    apriori: Mapping[str, npt.ArrayLike] | None = None,
 ) -> Stabilized:
     """Tie a loose SINEX day to its a priori frame the way glorg does.
 
@@ -178,6 +180,13 @@ def stabilize(
     takes part, like glorg ``use_site``). Sites without an a priori are
     skipped. Raises ``ValueError`` when fewer reference sites remain than the
     parameters need.
+
+    ``apriori`` re-aligns to ANOTHER frame: ``{code: X/Y/Z at the solution
+    epoch}`` replaces the SINEX a priori of the reference sites (e.g. IGb14
+    from :func:`geo_dataread.globk_apr.apriori_xyz`). Reference codes
+    missing from it are DROPPED — never mixed in with the SINEX frame — and
+    so are codes with more than one SINEX solution that day (which segment
+    the external a priori belongs to is ambiguous).
     """
     cfg = config or StabilizeConfig()
     params = tuple(p for p in _ALL if p in set(cfg.params))
@@ -191,6 +200,18 @@ def stabilize(
     est = sol.estimate
     x0 = np.where(np.isfinite(sol.apriori), est - np.nan_to_num(sol.apriori), 0.0)
     pos = {k: sol.apriori[i : i + 3] for k, i in row.items()}
+    if apriori is not None:
+        ext = {
+            c.upper()[:4]: np.asarray(v, dtype=np.float64) for c, v in apriori.items()
+        }
+        per_code: dict[str, int] = {}
+        for k in row:
+            per_code[k[:4]] = per_code.get(k[:4], 0) + 1
+        row = {k: i for k, i in row.items() if k[:4] in ext and per_code[k[:4]] == 1}
+        pos = {k: ext[k[:4]] for k in row}
+        x0 = x0.copy()
+        for k, i in row.items():
+            x0[i : i + 3] = est[i : i + 3] - pos[k]
     rhat = {k: p / np.linalg.norm(p) for k, p in pos.items()}
     h = cfg.height_var
     a = (3.0 - 1.0 / h) / 2.0

@@ -46,6 +46,8 @@ geo_dataread/
 │   ├── baseline_noise.py # BaselineNoiseRecord (ρ(d) law + station σ scale k + median k + window/provenance) → $GPS_API_STORE/noise/baseline_noise.json (atomic write; NOT the config tree); fit_baseline_noise, own_shared_fraction, pair_inputs (own ρ ≥60 consecutive days, else ρ(d)); gps-baseline-noise refits from TOT (stations.cfg lat/lon → geofunc.local)
 │   ├── sinex.py          # numpy-only SINEX reader (full covariance); geometry via geofunc.local
 │   ├── stabilize.py      # glorg frame stabilization re-implemented on the LOOSE daily SINEX (pmu/translation partials, geocentric-NEU 75/25 weights, height/NE screens, n-sigma deletion, 4 iterations from loose, applied via geofunc.local.condition over the FULL covariance) → Stabilized(solution, theta±, iteration reports); reproduces org positions+σ of every site to ≤0.011 mm (numpy only)
+│   ├── globk_apr.py      # GLOBK .apr (pos+vel+epoch, EXTENDED EXP/LOG post-seismic in NEU) + eq rename (8-char chains, 4-char code, _XCL) readers → apriori_xyz(codes, epoch) (numpy only)
+│   ├── realign.py        # gps-realign: loose archive → stabilize per day in itrf2008 (glorg frame, reproduces tssum .pos) or igb14 (GAMIT tables apr/eq), optional --to itrf2020 (EPSG Helmert w/ cov) → per-station .pos + days.csv
 │   ├── org.py            # glorg .org reader: read_org_positions (final XYZ/adj/σ), read_org_setup (use_site codes + pos_org/stab_ite/cnd_hgtv → StabilizeConfig), match_sinex_rows (code + nearest apriori; _GPS/_nPS suffix ≠ SINEX soln) (numpy only)
 │   ├── pos.py            # numpy-only PBO .pos reader (tssum output, okada /D/SNX/pos): PosSeries (XYZ/NEU + σ + correlations, GLOBK yearf); openGlobkTimes(tType="POS") reads it in place of mb_ files
 │   ├── station_catalog.py # platefile/coordFile lookups + plate_velocity_neu (N,E,U via geofunc.plates; replaces gf.plateVelo's E,N,U + the swap in _remove_plate_velocity) (typed)
@@ -127,6 +129,7 @@ geo-dataread          # entry: geo_dataread:main
 gps-savetimes ...     # entry: geo_dataread.gps_savetimes:main
 gps-displacemnts ...  # entry: geo_dataread.gps_displ:main   (sic — typo preserved verbatim from pyproject.toml)
 gps-globk-tot ...     # entry: geo_dataread.globk_tot:main — batch GLOBK pre/rap segments → local mb_STA_TOT.dat{1,2,3} (deployed segment_exclusions.csv + junction_offsets.csv; --exclusions / --junction-offsets dev overrides)
+gps-realign --start D --end D --frame igb14|itrf2008 [--to itrf2020] --out DIR [-j N] # re-align the loose SINEX archive → per-station .pos
 gps-baseline-noise [--dir TOT] [--window-years 2] # refit the empirical baseline-σ record (cron-able, ~4 s)
 gps-estimate-detrend ... # entry: geo_dataread.detrend_estimate:main — batch detrend-parameter estimation over local TOT → detrend_params.json (fit_windows.csv per-station windows/gates)
                          #   --analysis-yaml: per-station STAGE PLANS (detrend.estimation.stage_plans), what gps-detrend-workbench --commit writes
@@ -142,7 +145,7 @@ gps-estimate-detrend ... # entry: geo_dataread.detrend_estimate:main — batch d
 
 ---
 
-*Last reviewed: 2026-10-12 (stabilize/org: glorg stabilization on the loose SINEX; station_catalog: plate velocity via geofunc.plates). Previous 2026-10-10 (pos.py: .pos reader + tType="POS"). Previous 2026-10-09 (baseline_noise + sinex modules; baseline() opt-in rho=/sigma_scale=). Previous 2026-08-26 (re-anchoring now covers BOTH hold kinds:
+*Last reviewed: 2026-10-12 (stabilize/org: glorg stabilization on the loose SINEX; station_catalog: plate velocity via geofunc.plates). Previous 2026-10-10 (pos.py: .pos reader + tType="POS"; write_pos 2026-10-12). Previous 2026-10-09 (baseline_noise + sinex modules; baseline() opt-in rho=/sigma_scale=). Previous 2026-08-26 (re-anchoring now covers BOTH hold kinds:
 `donor:` (a finished record in detrend_params.json) carried the donor's datum
 exactly as `store:` did — measured, THOB holding SENG via donor: sat
 +75.3/-34.3/-124.6 mm off its own data and ignored --anchor-window entirely.

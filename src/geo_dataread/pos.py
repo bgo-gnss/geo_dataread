@@ -66,6 +66,7 @@ __all__ = [
     "pos_local",
     "pos_path",
     "read_pos",
+    "write_pos",
 ]
 
 FloatArray = npt.NDArray[np.float64]
@@ -363,3 +364,129 @@ def open_pos_times(
     out, _ = pos_local(s, ref, convention=convention)
     sig = np.sqrt(np.diagonal(out.cov, axis1=-2, axis2=-1))  # type: ignore[arg-type]
     return s.yearf, out.d.T.copy(), sig.T.copy()
+
+
+_FIELDS = """Start Field Description
+YYYYMMDD      Year, month, day for the given position epoch
+HHMMSS        Hour, minute, second for the given position epoch
+JJJJJ.JJJJJ   Modified Julian day for the given position epoch
+X             X coordinate, Specified Reference Frame, meters
+Y             Y coordinate, Specified Reference Frame, meters
+Z             Z coordinate, Specified Reference Frame, meters
+Sx            Standard deviation of the X position, meters
+Sy            Standard deviation of the Y position, meters
+Sz            Standard deviation of the Z position, meters
+Rxy           Correlation of the X and Y position
+Rxz           Correlation of the X and Z position
+Ryz           Correlation of the Y and Z position
+Nlat          North latitude, WGS-84 ellipsoid, decimal degrees
+Elong         East longitude, WGS-84 ellipsoid, decimal degrees
+Height (Up)   Height relative to WGS-84 ellipsoid, m
+dN            Difference in North component from NEU reference position, meters
+dE            Difference in East component from NEU reference position, meters
+du            Difference in vertical component from NEU reference position, meters
+Sn            Standard deviation of dN, meters
+Se            Standard deviation of dE, meters
+Su            Standard deviation of dU, meters
+Rne           Correlation of dN and dE
+Rnu           Correlation of dN and dU
+Reu           Correlation of dEand dU
+Soln          "rapid", "final", "suppl/suppf", "campd", or "repro" corresponding to products  generated with rapid or final orbit products, in supplemental processing, campaign data processing or reprocessing
+End Field Description
+*YYYYMMDD HHMMSS JJJJJ.JJJJ         X             Y             Z            Sx        Sy       Sz     Rxy   Rxz    Ryz            NLat         Elong         Height         dN        dE        dU         Sn       Se       Su      Rne    Rnu    Reu  Soln"""
+
+_MJD0 = np.datetime64("1858-11-17T00:00:00", "s")
+
+
+def _sig_corr(c: FloatArray) -> tuple[FloatArray, FloatArray]:
+    sd = np.sqrt(np.diagonal(c, axis1=-2, axis2=-1))
+    with np.errstate(invalid="ignore", divide="ignore"):
+        r = np.stack(
+            [
+                c[..., 0, 1] / (sd[..., 0] * sd[..., 1]),
+                c[..., 0, 2] / (sd[..., 0] * sd[..., 2]),
+                c[..., 1, 2] / (sd[..., 1] * sd[..., 2]),
+            ],
+            axis=-1,
+        )
+    return sd, np.nan_to_num(r)
+
+
+def write_pos(
+    path: str | Path,
+    station: str,
+    epochs: npt.ArrayLike,
+    xyz: npt.ArrayLike,
+    cov: npt.ArrayLike,
+    *,
+    frame: str,
+    soln: str = "final",
+    ref_xyz: npt.ArrayLike | None = None,
+    name: str | None = None,
+    released: datetime.datetime | None = None,
+) -> Path:
+    """Write a PBO ``.pos`` (format 1.1.1, as tssum) that :func:`read_pos` reads.
+
+    ``epochs`` are datetimes; like tssum they are written truncated to the
+    minute (GLOBK's 11:59:45 day epoch → ``115900``, MJD ``….4993``), which
+    is what keeps ``yearf`` equal to the TOT time column. ``cov (n, 3, 3)``
+    is the X/Y/Z covariance [m²]. dN/dE/dU and their sigmas/correlations are
+    in the GLOBK ``Loc.`` convention relative to ``ref_xyz`` (default: the
+    covariance-weighted mean position), lat/lon/height on WGS-84.
+    """
+    t = (
+        np.asarray(epochs, dtype="datetime64[s]")
+        .astype("datetime64[m]")
+        .astype("datetime64[s]")
+    )
+    x = np.asarray(xyz, dtype=np.float64)
+    c = np.asarray(cov, dtype=np.float64)
+    if not (len(t) == len(x) == len(c)) or len(t) == 0:
+        raise ValueError("epochs, xyz and cov must be non-empty and the same length")
+    order = np.argsort(t, kind="stable")
+    t, x, c = t[order], x[order], c[order]
+    ref = (
+        local.reference_position(x, cov=c, how="wmean")
+        if ref_xyz is None
+        else np.asarray(ref_xyz, dtype=np.float64)
+    )
+    sxyz, rxyz = _sig_corr(c)
+    g = local.ecef_to_geodetic(x, ellipsoid=local.WGS84)
+    g0 = local.ecef_to_geodetic(ref, ellipsoid=local.WGS84)
+    loc = local.displacements(x, ref, cov=c, convention="globk")
+    assert loc.cov is not None
+    sneu, rneu = _sig_corr(loc.cov)
+    mjd = (t - _MJD0).astype(np.float64) / 86400.0
+    stamp = [str(v).replace("-", "").replace(":", "").split("T") for v in t]
+    released = released or datetime.datetime.now(datetime.timezone.utc)
+    deg = np.degrees
+    head = [
+        f"PBO Station Position Time Series. Reference Frame : {frame}",
+        "Format Version: 1.1.1",
+        f"4-character ID: {station.upper()[:4]}",
+        f"Station name  : {(name or station.upper()[:4] + '_GPS'):<16}",
+        f"First Epoch   : {stamp[0][0]} {stamp[0][1]}",
+        f"Last Epoch    : {stamp[-1][0]} {stamp[-1][1]}",
+        f"Release Date  : {released:%Y%m%d %H%M%S}",
+        f"XYZ Reference position : {ref[0]:15.5f}{ref[1]:15.5f}{ref[2]:15.5f} ({frame})",
+        f"NEU Reference position : {deg(g0.lat):16.10f}{deg(g0.lon) % 360:15.10f}{g0.h:10.5f} ({frame}/WGS84)",
+        _FIELDS,
+    ]
+    rows = []
+    for k in range(len(t)):
+        rows.append(
+            f" {stamp[k][0]} {stamp[k][1]} {mjd[k]:10.4f} "
+            f"{x[k, 0]:14.5f} {x[k, 1]:14.5f} {x[k, 2]:14.5f} "
+            f"{sxyz[k, 0]:8.5f} {sxyz[k, 1]:8.5f} {sxyz[k, 2]:8.5f} "
+            f"{rxyz[k, 0]:6.3f} {rxyz[k, 1]:6.3f} {rxyz[k, 2]:6.3f}     "
+            f"{deg(g.lat[k]):15.10f} {deg(g.lon[k]) % 360:15.10f} {g.h[k]:10.5f}   "
+            f"{loc.d[k, 0]:9.5f} {loc.d[k, 1]:9.5f} {loc.d[k, 2]:9.5f}   "
+            f"{sneu[k, 0]:8.5f} {sneu[k, 1]:8.5f} {sneu[k, 2]:8.5f} "
+            f"{rneu[k, 0]:6.3f} {rneu[k, 1]:6.3f} {rneu[k, 2]:6.3f} {soln}"
+        )
+    out = Path(path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    tmp = out.with_suffix(out.suffix + ".tmp")
+    tmp.write_text("\n".join(head + rows) + "\n")
+    tmp.replace(out)
+    return out
