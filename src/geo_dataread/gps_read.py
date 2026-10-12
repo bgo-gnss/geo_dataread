@@ -672,7 +672,13 @@ def extractfromgamitbakf(cfile, stations):
 
 
 def openGlobkTimes(
-    sta, Dir=None, tType="TOT", *, ref_position=None, convention="geodetic"
+    sta,
+    Dir=None,
+    tType="TOT",
+    *,
+    ref_position=None,
+    convention="geodetic",
+    pos_id=None,
 ):
     """
     function to import data from globk time series files into a numpy arrays
@@ -707,6 +713,9 @@ def openGlobkTimes(
             (tssum's own columns) or an ECEF point.
         convention: POS only — ``"geodetic"`` (default, true local level)
             or ``"globk"`` (glorg ``Loc.``, the convention of the TOT files).
+        pos_id: POS only — which product in ``Dir``: ``None`` (the default
+            ``imo.daily_itr08``), a short name (``"igb14"``, ``"itrf2020"``)
+            or a full id (:func:`geo_dataread.pos.pos_product`).
 
     returns:
 
@@ -729,12 +738,13 @@ def openGlobkTimes(
         return pos.open_pos_times(
             sta,
             Dir,
+            pos.pos_product(pos_id),
             ref="wmean" if ref_position is None else ref_position,
             convention=convention,
         )
-    if ref_position is not None or convention != "geodetic":
+    if ref_position is not None or convention != "geodetic" or pos_id is not None:
         raise ValueError(
-            f"ref_position/convention apply to tType='POS' only (the {tType} "
+            f"ref_position/convention/pos_id apply to tType='POS' only (the {tType} "
             "files are displacements, not coordinates)"
         )
 
@@ -1668,6 +1678,7 @@ def getData(
     offset=None,
     ref_position=None,
     convention="geodetic",
+    pos_id=None,
 ):
     """
     Function extracting and filtering data to prepeare for plotting.
@@ -1689,6 +1700,9 @@ def getData(
             relative to it (``offset`` defaults to 0 instead of the mean of
             the first samples).
         convention: tType="POS" only — "geodetic" or "globk".
+        pos_id: tType="POS" only — product in Dir (default imo.daily_itr08;
+            "igb14", "itrf2020" or a full id). Plate removal then uses that
+            frame's plate-motion model (ITRF2008 / ITRF2014 / ITRF2020).
 
     Returns:
         yearf: floating point year array
@@ -1707,12 +1721,22 @@ def getData(
         # revived in refactor-B slice 6) is read_join().
         tType = "TOT"
 
-    if ref_position is None and convention == "geodetic":
+    if ref_position is None and convention == "geodetic" and pos_id is None:
         yearf, data, Ddata = openGlobkTimes(sta, Dir=Dir, tType=tType)
     else:
         yearf, data, Ddata = openGlobkTimes(
-            sta, Dir=Dir, tType=tType, ref_position=ref_position, convention=convention
+            sta,
+            Dir=Dir,
+            tType=tType,
+            ref_position=ref_position,
+            convention=convention,
+            pos_id=pos_id,
         )
+    pmm = "ITRF2008"
+    if pos_id is not None:
+        from geo_dataread import pos
+
+        pmm = pos.POS_PRODUCTS.get(pos.pos_product(pos_id), ("", "ITRF2008"))[1]
     if ref_position is not None and offset is None:
         offset = np.zeros(3)  # keep the chosen reference as the zero
     yearf, data, Ddata = dPeriod(yearf, data, Ddata, fstart, fend)
@@ -1726,14 +1750,16 @@ def getData(
 
     if ref in ("plate", "detrend"):
         # shared helper — data already in mm after iprep, so scale=1000
-        data = _remove_plate_velocity(sta, yearf, data, scale=1000)
+        data = _remove_plate_velocity(sta, yearf, data, reference=pmm, scale=1000)
 
     elif ref == "itrf2008":
         pass
 
     else:
         # explicit plate name — same shared helper, mm path
-        data = _remove_plate_velocity(sta, yearf, data, plate=ref, scale=1000)
+        data = _remove_plate_velocity(
+            sta, yearf, data, plate=ref, reference=pmm, scale=1000
+        )
 
     return yearf, data, Ddata, offset
 
