@@ -670,7 +670,9 @@ def extractfromgamitbakf(cfile, stations):
     return slines
 
 
-def openGlobkTimes(sta, Dir=None, tType="TOT", *, ref_position=None, convention="geodetic"):
+def openGlobkTimes(
+    sta, Dir=None, tType="TOT", *, ref_position=None, convention="geodetic"
+):
     """
     function to import data from globk time series files into a numpy arrays
 

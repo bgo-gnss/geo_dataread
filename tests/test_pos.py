@@ -129,6 +129,7 @@ def test_pos_local_globk_reproduces_tssum_columns() -> None:
     s = _akur()
     out, ref = pos.pos_local(s, s.ref_xyz, junctions=(), convention="globk")
     np.testing.assert_allclose(out.d, s.dneu, atol=2e-5)
+    assert out.cov is not None
     sig = np.sqrt(np.diagonal(out.cov, axis1=1, axis2=2))
     np.testing.assert_allclose(sig, s.sneu, atol=2e-5)
     np.testing.assert_array_equal(ref, s.ref_xyz)
@@ -141,7 +142,8 @@ def test_pos_local_reference_modes() -> None:
     np.testing.assert_array_equal(ref, s.xyz[0])
     wmean, _ = pos.pos_local(s, junctions=())
     # least-squares mean as reference: the weighted residuals balance out
-    w = np.linalg.inv(wmean.cov)
+    assert wmean.cov is not None
+    w = np.linalg.inv(np.asarray(wmean.cov, dtype=float))
     np.testing.assert_allclose(
         np.einsum("nij,nj->i", w, wmean.d), 0.0, atol=1e-6 * np.abs(w).max()
     )
@@ -150,7 +152,7 @@ def test_pos_local_reference_modes() -> None:
         np.diff(first.d, axis=0), np.diff(wmean.d, axis=0), atol=1e-9
     )
     with pytest.raises(ValueError, match="ref must be"):
-        pos.pos_local(s, "middle", junctions=())  # type: ignore[arg-type]
+        pos.pos_local(s, "middle", junctions=())
 
 
 def test_pos_local_apriori_from_coord_file(tmp_path: Path) -> None:
@@ -160,9 +162,12 @@ def test_pos_local_apriori_from_coord_file(tmp_path: Path) -> None:
     coord.write_text(
         f" 1.0 2.0 3.0 REYK\n {apr[0]:.5f} {apr[1]:.5f} {apr[2]:.5f} AKUR\n"
     )
-    np.testing.assert_allclose(pos.apriori_xyz("akur", coord), apr, atol=1e-5)
+    got = pos.apriori_xyz("akur", coord)
+    assert got is not None
+    np.testing.assert_allclose(got, apr, atol=1e-5)
     assert pos.apriori_xyz("NONE", coord) is None
     out, ref = pos.pos_local(s, "apriori", junctions=(), coord_file=coord)
+    assert ref is not None
     np.testing.assert_allclose(ref, apr, atol=1e-5)
     # not listed: falls back to the least-squares mean
     other = tmp_path / "other.xyz"
@@ -179,6 +184,7 @@ def test_pos_local_applies_junction_offsets_along_up() -> None:
     cut = float(s.yearf[2])
     rule = JunctionOffset("AKUR", "U", cut, 1.093, "test")
     plain, ref = pos.pos_local(s, "first", junctions=())
+    assert ref is not None
     fixed, _ = pos.pos_local(s, ref, junctions={"AKUR": [rule]})
     np.testing.assert_allclose(fixed.d[:2, 2] - plain.d[:2, 2], 1.093, atol=1e-6)
     np.testing.assert_allclose(fixed.d[:2, :2], plain.d[:2, :2], atol=1e-6)
@@ -192,11 +198,13 @@ def test_getData_pos_reference_stays_zero(tmp_path: Path) -> None:
     from geo_dataread.gps_read import getData, openGlobkTimes
 
     s = _akur()
-    y, data, _, off = getData(
+    y, data, _, off = getData(  # type: ignore[no-untyped-call]
         "AKUR", Dir=str(FIX), tType="POS", ref_position=s.ref_xyz, uncert=1e3
     )
     out, _ = pos.pos_local(s, s.ref_xyz)
     np.testing.assert_allclose(data, out.d.T * 1000, atol=1e-9)  # mm
     np.testing.assert_array_equal(off, np.zeros(3))
     with pytest.raises(ValueError, match="POS.? only"):
-        openGlobkTimes("AKUR", Dir=str(FIX), tType="TOT", ref_position="wmean")
+        openGlobkTimes(  # type: ignore[no-untyped-call]
+            "AKUR", Dir=str(FIX), tType="TOT", ref_position="wmean"
+        )
