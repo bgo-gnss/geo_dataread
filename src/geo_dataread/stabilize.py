@@ -76,12 +76,16 @@ class StabilizeConfig:
     min_rms: float = 0.003
     min_dh: float = 0.005
     min_dne: float = 0.0005
-    ut1_mas: float = 0.0  # UT1-AT rotation of the pmu partials (glorg: ~0)
+    # UT1-AT angle rotating the pmu partials. 0 reproduces glorg's output on
+    # the archive; UT1-TAI in time- or arc-mas does not (mm-level misfit).
+    ut1_mas: float = 0.0
 
     def __post_init__(self) -> None:
         bad = [p for p in self.params if p not in _ALL]
         if bad or not self.params:
             raise ValueError(f"params must be a non-empty subset of {_ALL}: {bad}")
+        if self.iterations < 1:
+            raise ValueError("iterations must be ≥ 1")
 
 
 @dataclasses.dataclass(frozen=True)
@@ -196,24 +200,32 @@ def stabilize(
     ss = dict.fromkeys(used, 1.0)
     reports: list[IterationReport] = []
     x, cov = x0, sol.cov
-    theta = sig = np.zeros(k_par)
     for it in range(1, cfg.iterations + 1):
         blk = {k: sol.cov[row[k] : row[k] + 3, row[k] : row[k] + 3] for k in used}
         vh = {k: float(rhat[k] @ blk[k] @ rhat[k]) for k in used}
         used = [k for k in used if vh[k] > 0]
         removed_h = _screen({k: vh[k] for k in used}, cfg.min_dh, cfg.use_ratio)
         used = [k for k in used if k not in removed_h]
-        if 3 * len(used) < k_par:
+        # glorg (apply_cfull): 1 site estimates only Z translation, 2 sites
+        # only the translations; fewer equations than parameters aborts
+        active = list(params)
+        if len(used) == 1:
+            active = [p for p in params if p == "ztran"]
+        elif len(used) == 2:
+            active = [p for p in params if p.endswith("tran")]
+        if not active or 3 * len(used) < len(active):
             raise ValueError(
-                f"iteration {it}: {len(used)} reference sites for {k_par} parameters"
+                f"iteration {it}: {len(used)} reference sites cannot fix {params}"
             )
+        on = np.array([p in active for p in params])
+        k_on = int(on.sum())
 
-        nmat = np.zeros((k_par, k_par))
-        u = np.zeros(k_par)
+        nmat = np.zeros((k_on, k_on))
+        u = np.zeros(k_on)
         pre = 0.0
         parts = {}
         for k in used:
-            amat = design(pos[k], params, ut1_mas=cfg.ut1_mas)
+            amat = design(pos[k], active, ut1_mas=cfg.ut1_mas)
             r = _geocentric_neu(pos[k])
             w = np.linalg.inv(r.T @ np.diag([a, a, h]) @ r * ss[k])
             b = x0[row[k] : row[k] + 3]
@@ -222,11 +234,14 @@ def stabilize(
             pre += float(b @ w @ b)
             parts[k] = (amat, w)
         ninv = np.linalg.inv(nmat)
-        theta = ninv @ u
+        th_on = ninv @ u
         nr = 3 * len(used)
-        chi2 = (pre - float(u @ theta)) / nr
-        sig = np.sqrt(np.diag(ninv) * chi2)
-        lrows = np.zeros((k_par, est.size))
+        chi2 = (pre - float(u @ th_on)) / nr
+        theta = np.zeros(k_par)
+        sig = np.zeros(k_par)
+        theta[on] = th_on
+        sig[on] = np.sqrt(np.diag(ninv) * chi2)
+        lrows = np.zeros((k_on, est.size))
         for k, (amat, w) in parts.items():
             lrows[:, row[k] : row[k] + 3] = ninv @ amat.T @ w
         out = local.condition(x0, sol.cov, lrows)

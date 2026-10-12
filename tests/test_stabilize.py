@@ -25,13 +25,14 @@ GLORG_IT4_SIG = [0.03048, 0.02998, 0.03606, 0.00089, 0.00090, 0.00100]
 @pytest.fixture(scope="module")
 def day() -> tuple[sinex.SinexSolution, stabilize.Stabilized]:
     sol = sinex.read_sinex(SNX)
-    ref, cfg = org.read_org_setup(ORG)
+    ref, cfg, _ = org.read_org_setup(ORG)
     return sol, stabilize.stabilize(sol, ref, cfg)
 
 
 def test_read_org_setup() -> None:
-    ref, cfg = org.read_org_setup(ORG)
+    ref, cfg, unsupported = org.read_org_setup(ORG)
     assert cfg == stabilize.StabilizeConfig()  # the IMO icel.org.cmd settings
+    assert unsupported == ()  # nothing glorg did that stabilize() leaves out
     assert len(ref) == 77 and ref[:3] == ["GOL2", "ALGO", "AMC2"]
     assert "CHUR" in ref and "PIE1" in ref  # '#CHUR PIE1' is a comment line
 
@@ -96,9 +97,32 @@ def test_design_partials() -> None:
 def test_bad_config_and_too_few_sites() -> None:
     with pytest.raises(ValueError, match="subset"):
         stabilize.StabilizeConfig(params=("xrot", "tilt"))
+    with pytest.raises(ValueError, match="iterations"):
+        stabilize.StabilizeConfig(iterations=0)
     sol = sinex.read_sinex(SNX)
     with pytest.raises(ValueError, match="reference sites"):
-        stabilize.stabilize(sol, ["ONSA"])  # 3 equations, 6 parameters
+        stabilize.stabilize(sol, [])
+    with pytest.raises(ValueError, match="reference sites"):
+        # one site leaves only Z translation, which this set-up does not estimate
+        stabilize.stabilize(sol, ["ONSA"], stabilize.StabilizeConfig(params=("xrot",)))
+
+
+def test_one_or_two_reference_sites_reduce_like_glorg() -> None:
+    sol = sinex.read_sinex(SNX)
+    one_it = stabilize.StabilizeConfig(iterations=1)  # unit weights both times
+    two = stabilize.stabilize(sol, ["ONSA", "WTZR"], one_it)
+    assert not two.theta[:3].any() and two.theta[3:].all()  # translations only
+    one = stabilize.stabilize(sol, ["ONSA"], one_it)
+    assert not one.theta[:5].any() and one.theta[5] != 0  # Z translation only
+    # the condition holds: re-stabilizing the result finds nothing left to fix
+    again = stabilize.stabilize(
+        one.solution, ["ONSA"], stabilize.StabilizeConfig(iterations=1)
+    )
+    assert abs(again.theta[5]) < 1e-9
+    again2 = stabilize.stabilize(
+        two.solution, ["ONSA", "WTZR"], stabilize.StabilizeConfig(iterations=1)
+    )
+    np.testing.assert_allclose(again2.theta[3:], 0.0, atol=1e-9)
 
 
 def test_numpy_only() -> None:

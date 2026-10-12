@@ -22,6 +22,7 @@ import dataclasses
 import gzip
 import re
 from pathlib import Path
+from typing import NamedTuple
 
 import numpy as np
 import numpy.typing as npt
@@ -31,6 +32,7 @@ from geo_dataread.stabilize import StabilizeConfig
 
 __all__ = [
     "OrgPosition",
+    "OrgSetup",
     "match_sinex_rows",
     "read_org_positions",
     "read_org_setup",
@@ -42,6 +44,21 @@ _ROW = re.compile(
     r"^\s*\d+\.\s+(\S{8})\s+([XYZ]) coordinate\s+\(m\)\s+(\S+)\s+(\S+)\s+(\S+)"
 )
 _ORG_TYPES = ("xrot", "yrot", "zrot", "xtran", "ytran", "ztran", "scale")
+# commands with no effect on position stabilization of a daily SINEX: the
+# a priori files are already folded into the SINEX apriori column, the rest
+# concern velocities
+_BENIGN = {"apr_file", "vel_org", "cnd_hgtv", "stab_min"}
+_MODELLED = {"use_site", "pos_org", "stab_ite", "cnd_hgtv", "stab_min"}
+
+
+class OrgSetup(NamedTuple):
+    """The glorg stabilization set-up of an org file."""
+
+    reference: list[str]  # use_site codes, in order
+    config: StabilizeConfig
+    unsupported: tuple[
+        str, ...
+    ]  # commands stabilize() does not model (equate, force, …)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -82,8 +99,14 @@ def read_org_positions(path: str | Path) -> dict[str, OrgPosition]:
     return out
 
 
-def read_org_setup(path: str | Path) -> tuple[list[str], StabilizeConfig]:
-    """Reference codes and stabilization settings from the GLORG command echo."""
+def read_org_setup(path: str | Path) -> OrgSetup:
+    """Reference codes and stabilization settings from the GLORG command echo.
+
+    Commands :func:`~geo_dataread.stabilize.stabilize` does not model
+    (``equate``, ``force``, ``constrain``, ``first_eqf``, …) are returned in
+    ``unsupported`` — a non-empty list means the reproduction may not match
+    that glorg run.
+    """
     lines = _lines(path)
     try:
         start = next(
@@ -93,6 +116,7 @@ def read_org_setup(path: str | Path) -> tuple[list[str], StabilizeConfig]:
         raise ValueError(f"{path}: no GLORG command file summary") from None
     codes: list[str] = []
     cfg: dict[str, object] = {}
+    unsupported: list[str] = []
     for line in lines[start + 2 :]:
         if line.startswith("----"):
             break
@@ -100,6 +124,8 @@ def read_org_setup(path: str | Path) -> tuple[list[str], StabilizeConfig]:
         if not tok or tok[0].startswith("#"):
             continue
         key, args = tok[0].lower(), tok[1:]
+        if key not in _MODELLED | _BENIGN:
+            unsupported.append(key)
         if key == "use_site":
             for a in args:
                 if a.lower() == "clear":
@@ -122,7 +148,11 @@ def read_org_setup(path: str | Path) -> tuple[list[str], StabilizeConfig]:
                 cfg["use_ratio"] = float(args[2])
         elif key == "stab_min" and len(args) >= 3:
             cfg["min_rms"], cfg["min_dh"], cfg["min_dne"] = map(float, args[:3])
-    return list(dict.fromkeys(codes)), StabilizeConfig(**cfg)  # type: ignore[arg-type]
+    return OrgSetup(
+        list(dict.fromkeys(codes)),
+        StabilizeConfig(**cfg),  # type: ignore[arg-type]
+        tuple(dict.fromkeys(unsupported)),
+    )
 
 
 def match_sinex_rows(sol: SinexSolution, org: dict[str, OrgPosition]) -> dict[str, int]:
