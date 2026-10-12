@@ -51,10 +51,11 @@ def test_gz_and_open_pos_times(tmp_path: Path) -> None:
         gzip.open(tmp_path / "AKUR.imo.final_itr08.pos.gz", "wb") as fo,
     ):
         shutil.copyfileobj(fi, fo)
-    yearf, data, ddata = pos.open_pos_times("akur", tmp_path)
+    yearf, data, ddata = pos.open_pos_times("akur", tmp_path, ref="tssum")
     s = pos.read_pos(FIX / "AKUR.imo.final_itr08.pos")
     assert data.shape == ddata.shape == (3, 5)
     np.testing.assert_array_equal(data, s.dneu.T)
+    np.testing.assert_array_equal(ddata, s.sneu.T)
     np.testing.assert_array_equal(yearf, s.yearf)
 
 
@@ -113,3 +114,97 @@ def test_numpy_only() -> None:
     assert not [
         ln for ln in imports if "pandas" in ln or "gps_parser" in ln or "gps_read" in ln
     ]
+
+
+# --- N/E/U from X/Y/Z (pos_local, 2026-10-11) ---------------------------------
+
+
+def _akur() -> pos.PosSeries:
+    return pos.read_pos(FIX / "AKUR.imo.final_itr08.pos")
+
+
+def test_pos_local_globk_reproduces_tssum_columns() -> None:
+    # tssum's dN/dE/dU = glorg Loc. convention from the header reference;
+    # equal to its 0.01 mm print resolution, sigmas likewise
+    s = _akur()
+    out, ref = pos.pos_local(s, s.ref_xyz, junctions=(), convention="globk")
+    np.testing.assert_allclose(out.d, s.dneu, atol=2e-5)
+    assert out.cov is not None
+    sig = np.sqrt(np.diagonal(out.cov, axis1=1, axis2=2))
+    np.testing.assert_allclose(sig, s.sneu, atol=2e-5)
+    np.testing.assert_array_equal(ref, s.ref_xyz)
+
+
+def test_pos_local_reference_modes() -> None:
+    s = _akur()
+    first, ref = pos.pos_local(s, "first", junctions=())
+    np.testing.assert_allclose(first.d[0], 0.0, atol=1e-9)
+    np.testing.assert_array_equal(ref, s.xyz[0])
+    wmean, _ = pos.pos_local(s, junctions=())
+    # least-squares mean as reference: the weighted residuals balance out
+    assert wmean.cov is not None
+    w = np.linalg.inv(np.asarray(wmean.cov, dtype=float))
+    np.testing.assert_allclose(
+        np.einsum("nij,nj->i", w, wmean.d), 0.0, atol=1e-6 * np.abs(w).max()
+    )
+    # every reference gives the same displacement differences
+    np.testing.assert_allclose(
+        np.diff(first.d, axis=0), np.diff(wmean.d, axis=0), atol=1e-9
+    )
+    with pytest.raises(ValueError, match="ref must be"):
+        pos.pos_local(s, "middle", junctions=())
+
+
+def test_pos_local_apriori_from_coord_file(tmp_path: Path) -> None:
+    s = _akur()
+    apr = s.xyz[2] + [0.01, -0.02, 0.03]
+    coord = tmp_path / "station_coord.xyz"
+    coord.write_text(
+        f" 1.0 2.0 3.0 REYK\n {apr[0]:.5f} {apr[1]:.5f} {apr[2]:.5f} AKUR\n"
+    )
+    got = pos.apriori_xyz("akur", coord)
+    assert got is not None
+    np.testing.assert_allclose(got, apr, atol=1e-5)
+    assert pos.apriori_xyz("NONE", coord) is None
+    out, ref = pos.pos_local(s, "apriori", junctions=(), coord_file=coord)
+    assert ref is not None
+    np.testing.assert_allclose(ref, apr, atol=1e-5)
+    # not listed: falls back to the least-squares mean
+    other = tmp_path / "other.xyz"
+    other.write_text(" 1.0 2.0 3.0 REYK\n")
+    _, ref2 = pos.pos_local(s, "apriori", junctions=(), coord_file=other)
+    _, ref3 = pos.pos_local(s, "wmean", junctions=())
+    np.testing.assert_array_equal(ref2, ref3)
+
+
+def test_pos_local_applies_junction_offsets_along_up() -> None:
+    from geo_dataread.globk_tot import JunctionOffset
+
+    s = _akur()
+    cut = float(s.yearf[2])
+    rule = JunctionOffset("AKUR", "U", cut, 1.093, "test")
+    plain, ref = pos.pos_local(s, "first", junctions=())
+    assert ref is not None
+    fixed, _ = pos.pos_local(s, ref, junctions={"AKUR": [rule]})
+    np.testing.assert_allclose(fixed.d[:2, 2] - plain.d[:2, 2], 1.093, atol=1e-6)
+    np.testing.assert_allclose(fixed.d[:2, :2], plain.d[:2, :2], atol=1e-6)
+    np.testing.assert_array_equal(fixed.d[2:], plain.d[2:])
+    np.testing.assert_array_equal(fixed.cov, plain.cov)
+    d = pos.junction_dlocal(s.yearf, [rule])
+    assert d[:2, 2].tolist() == [1.093, 1.093] and not d[2:].any()
+
+
+def test_getData_pos_reference_stays_zero(tmp_path: Path) -> None:
+    from geo_dataread.gps_read import getData, openGlobkTimes
+
+    s = _akur()
+    y, data, _, off = getData(  # type: ignore[no-untyped-call]
+        "AKUR", Dir=str(FIX), tType="POS", ref_position=s.ref_xyz, uncert=1e3
+    )
+    out, _ = pos.pos_local(s, s.ref_xyz)
+    np.testing.assert_allclose(data, out.d.T * 1000, atol=1e-9)  # mm
+    np.testing.assert_array_equal(off, np.zeros(3))
+    with pytest.raises(ValueError, match="POS.? only"):
+        openGlobkTimes(  # type: ignore[no-untyped-call]
+            "AKUR", Dir=str(FIX), tType="TOT", ref_position="wmean"
+        )
