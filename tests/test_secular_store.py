@@ -237,7 +237,7 @@ class TestFrameGuard:
         from geo_dataread import detrend_estimate as de
 
         monkeypatch.setattr(
-            "geofunc.geofunc.plateDict", lambda: {"ELDC": "NOAM"}, raising=False
+            "geo_dataread.station_catalog.plate_table", lambda: {"ELDC": "NOAM"}
         )
         lookup = de.secular_lookup(self._store(tmp_path, "EURA"), "ELDC")
         with pytest.raises(RuntimeError, match="referenced to 'EURA'"):
@@ -247,7 +247,7 @@ class TestFrameGuard:
         from geo_dataread import detrend_estimate as de
 
         monkeypatch.setattr(
-            "geofunc.geofunc.plateDict", lambda: {"ELDC": "NOAM"}, raising=False
+            "geo_dataread.station_catalog.plate_table", lambda: {"ELDC": "NOAM"}
         )
         lookup = de.secular_lookup(self._store(tmp_path, "NOAM"), "ELDC")
         assert lookup("SVAR_X").frame == "NOAM"
@@ -269,6 +269,6 @@ class TestFrameGuard:
             ),
         )
         monkeypatch.setattr(
-            "geofunc.geofunc.plateDict", lambda: {"ELDC": "NOAM"}, raising=False
+            "geo_dataread.station_catalog.plate_table", lambda: {"ELDC": "NOAM"}
         )
         assert de.secular_lookup(path, "ELDC")("SKSH").frame is None

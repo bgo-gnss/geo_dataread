@@ -5,30 +5,33 @@ from __future__ import print_function
 
 def xyzDict():
     """
-    Extract xyz goordinate dictionary from global coordinate file defined by cparser
+    {station: [X, Y, Z]} from the a-priori coordinate file (postprocess.cfg coordFile)
     """
 
-    import cparser as cp
+    from gps_parser import ConfigParser
 
     xyzDict = {}
-
-    f = open(cp.Parser().getPostprocessConfig()["coordfile"], "r")
-    xyzDict.update(
-        dict([[line.split()[3], map(float, line.split()[0:3])] for line in f])
-    )
+    with open(ConfigParser().getPostProcessConfig("coordFile")) as f:
+        for line in f:
+            tok = line.split()
+            if len(tok) >= 4:
+                xyzDict[tok[3]] = [float(v) for v in tok[:3]]
 
     return xyzDict
 
 
 def llh(sta, radians=False):
     """
-    convert xyz coordinates of a GPS station (assuming ITRF2008) llh coordinates
+    (longitude, latitude, ellipsoidal height) of a GPS station from its
+    a-priori ITRF2008 coordinate (GRS80)
     """
 
-    import pyproj as proj
-    import geofunc.geo as geo
+    import numpy as np
+    from geofunc import local
 
-    return proj.transform(geo.itrf2008, geo.lonlat, *xyzDict()[sta], radians=radians)
+    g = local.ecef_to_geodetic(xyzDict()[sta])
+    lon, lat = (g.lon, g.lat) if radians else (np.degrees(g.lon), np.degrees(g.lat))
+    return float(lon), float(lat), float(g.h)
 
 
 def simpleDisp(sta, start, end):
