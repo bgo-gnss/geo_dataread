@@ -6,18 +6,26 @@ using the day's own glorg reference list and settings, and either
 
 - the SINEX a priori (``--frame itrf2008``: glorg's own frame — reproduces
   the archived ``.pos``), or
-- a GLOBK apr + eq pair (``--frame igb14``: the IGS realization of ITRF2014
-  from the GAMIT tables, with renames and post-seismic terms resolved at the
-  day's epoch by :mod:`geo_dataread.globk_apr`).
+- a GLOBK apr + eq pair from the GAMIT tables, with renames and non-secular
+  terms resolved at the day's epoch by :mod:`geo_dataread.globk_apr`:
+  ``--frame igb14`` (IGb14, the IGS realization of ITRF2014) or
+  ``--frame igb20`` (IGb20, the IGS realization of ITRF2020).
 
-``--to itrf2020`` then moves every position (and covariance) with the EPSG
-time-dependent Helmert ITRF2014→ITRF2020 at its epoch (geofunc.frames; this
-is "IGb14 → ITRF2020 via EPSG Helmert", not IGS20). Output: one PBO ``.pos``
+``--to itrf2020`` (with ``--frame igb14``) instead moves every IGb14
+position (and covariance) with the EPSG time-dependent Helmert
+ITRF2014→ITRF2020 at its epoch (geofunc.frames). Output: one PBO ``.pos``
 per station (:func:`geo_dataread.pos.write_pos`) and ``days.<prod-id>.csv``
 with one line per day (reference sites used/dropped, post-fit RMS,
 parameters). File names carry the product id, so the frames can share one
 directory with tssum's ``imo.daily_itr08`` set (``update_pos.sh`` leaves
 other product ids alone).
+
+A day with fewer than ``--min-ref`` (3) usable reference sites is not
+written: one or two sites only fix translations, and on the days without
+any global site (the Icelandic network alone) the whole day sits decimetres
+off. ``--update`` re-makes only the days in ``--start``…``--end`` and folds
+them into the existing files (:func:`geo_dataread.pos.merge_pos`); a re-made
+day replaces its old rows, a rejected one removes them.
 
 Writes only under ``--out``; the archive is read-only.
 """
@@ -47,7 +55,12 @@ GAMIT_TABLES = Path(os.environ.get("GG_TABLES", Path.home() / "gg" / "tables"))
 FRAMES = {
     "itrf2008": None,
     "igb14": ("igb14_comb.apr", "igb14_comb.eq"),
+    "igb20": ("igb20_comb.apr", "igb20_comb.eq"),
 }
+LABELS = {"itrf2008": "ITRF2008", "igb14": "IGb14", "igb20": "IGb20"}
+MIN_REF = 3
+_REJECTED = "rejected: "
+CSV_HEAD = "date,n_ref,dropped,post_rms_mm,xrot,yrot,zrot,xtran,ytran,ztran,error\n"
 
 
 @dataclasses.dataclass
@@ -93,9 +106,17 @@ def _apr(
 
 
 def realign_day(
-    snx: Path, frame: str = "itrf2008", tables: Path = GAMIT_TABLES
+    snx: Path,
+    frame: str = "itrf2008",
+    tables: Path = GAMIT_TABLES,
+    min_ref: int = MIN_REF,
 ) -> DayResult:
-    """Stabilize one archived day in ``frame`` (see the module docstring)."""
+    """Stabilize one archived day in ``frame`` (see the module docstring).
+
+    Fewer than ``min_ref`` reference sites left after the a priori look-up
+    (or after the outlier screen) gives a result with no sites and an
+    ``error`` starting ``"rejected: "``.
+    """
     sol = sinex.read_sinex(snx)
     setup = org.read_org_setup(Path(str(snx).replace(".SNX.gz", ".org.gz")))
     when = sol.mean_epoch
@@ -107,8 +128,13 @@ def realign_day(
     if ext is not None:
         apriori, skipped = globk_apr.apriori_xyz(codes, when, *ext)
         dropped = sorted(skipped)
+    usable = len(codes) - len(dropped)
+    if usable < min_ref:
+        return _rejected(when, usable, dropped, min_ref)
     st = stabilize.stabilize(sol, codes, setup.config, apriori=apriori)
     last = st.iterations[-1]
+    if len(last.sites) < min_ref:
+        return _rejected(when, len(last.sites), dropped, min_ref, last.post_rms)
     est, cov = st.solution.estimate, st.solution.cov
     sites: dict[str, tuple[FloatArray, FloatArray]] = {}
     for i in np.flatnonzero(sol.ptype == "STAX"):
@@ -122,9 +148,20 @@ def realign_day(
     )
 
 
-def _safe(snx: Path, frame: str, tables: Path) -> DayResult:
+def _rejected(
+    when: datetime.datetime,
+    n: int,
+    dropped: Sequence[str],
+    min_ref: int,
+    rms: float = float("nan"),
+) -> DayResult:
+    msg = f"{_REJECTED}{n} reference site(s), need {min_ref}"
+    return DayResult(when, {}, n, tuple(dropped), rms, np.full(6, np.nan), msg)
+
+
+def _safe(snx: Path, frame: str, tables: Path, min_ref: int = MIN_REF) -> DayResult:
     try:
-        return realign_day(snx, frame, tables)
+        return realign_day(snx, frame, tables, min_ref)
     except Exception as e:  # noqa: BLE001 - one bad day must not stop a 30-year batch
         day = datetime.datetime.strptime(snx.name[11:18], "%Y%j")
         return DayResult(
@@ -151,6 +188,23 @@ def _to_itrf2020(
             rows[k] = (t, out.d, out.cov)
 
 
+def _csv_row(r: DayResult) -> str:
+    th = ",".join(f"{v:.5f}" for v in r.theta)
+    return f"{r.epoch:%Y-%m-%d},{r.n_ref},{' '.join(r.dropped)},{r.post_rms * 1e3:.3f},{th},{r.error}\n"
+
+
+def _write_days(path: Path, rows: dict[str, str], update: bool) -> None:
+    """``days.<prod>.csv``: one line per day; ``update`` keeps the other days."""
+    old: dict[str, str] = {}
+    if update and path.exists():
+        for ln in path.read_text().splitlines(keepends=True)[1:]:
+            old[ln.split(",", 1)[0]] = ln
+    old.update(rows)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(CSV_HEAD + "".join(old[d] for d in sorted(old)))
+    tmp.replace(path)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
         prog="gps-realign", description=__doc__.split("\n\n")[0]
@@ -166,6 +220,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     ap.add_argument("--out", type=Path, required=True)
     ap.add_argument("--prod-id", help="default imo.daily_<frame>")
     ap.add_argument("--stations", nargs="*", help="write only these codes")
+    ap.add_argument(
+        "--min-ref",
+        type=int,
+        default=MIN_REF,
+        help=f"fewest reference sites for a day to be written (default {MIN_REF})",
+    )
+    ap.add_argument(
+        "--update",
+        action="store_true",
+        help="fold the re-made days into the existing files instead of rewriting them",
+    )
     ap.add_argument("-j", "--jobs", type=int, default=os.cpu_count() or 1)
     a = ap.parse_args(argv)
     if a.to and a.frame != "igb14":
@@ -175,47 +240,54 @@ def main(argv: Sequence[str] | None = None) -> int:
     if not days:
         print("no archived days in range", file=sys.stderr)
         return 1
-    label = {"itrf2008": "ITRF2008", "igb14": "IGb14"}[a.frame]
-    if a.to:
-        label = "ITRF2020 (IGb14 + EPSG Helmert)"
+    label = "ITRF2020 (IGb14 + EPSG Helmert)" if a.to else LABELS[a.frame]
     prod = a.prod_id or f"imo.daily_{a.to or a.frame}"
     keep = {s.upper() for s in a.stations} if a.stations else None
 
     series: dict[str, list[tuple[datetime.datetime, FloatArray, FloatArray]]] = {}
+    csv: dict[str, str] = {}
+    redone: set[str] = set()  # YYYYMMDD of the days re-made or rejected
     a.out.mkdir(parents=True, exist_ok=True)
-    # named per product so several frames can share one pos_dir
-    with (
-        open(a.out / f"days.{prod}.csv", "w") as log,
-        cf.ProcessPoolExecutor(a.jobs) as pool,
-    ):
-        log.write(
-            "date,n_ref,dropped,post_rms_mm,xrot,yrot,zrot,xtran,ytran,ztran,error\n"
-        )
-        jobs = [pool.submit(_safe, d, a.frame, a.tables) for d in days]
+    with cf.ProcessPoolExecutor(a.jobs) as pool:
+        jobs = [pool.submit(_safe, d, a.frame, a.tables, a.min_ref) for d in days]
         for n, fut in enumerate(cf.as_completed(jobs), 1):
             r = fut.result()
-            th = ",".join(f"{v:.5f}" for v in r.theta)
-            log.write(
-                f"{r.epoch:%Y-%m-%d},{r.n_ref},{' '.join(r.dropped)},{r.post_rms * 1e3:.3f},{th},{r.error}\n"
-            )
+            csv[f"{r.epoch:%Y-%m-%d}"] = _csv_row(r)
+            if not r.error or r.error.startswith(_REJECTED):
+                redone.add(f"{r.epoch:%Y%m%d}")
             for c, (x, cv) in r.sites.items():
                 if keep is None or c in keep:
                     series.setdefault(c, []).append((r.epoch, x, cv))
             if n % 500 == 0:
                 print(f"{n}/{len(days)} days", file=sys.stderr)
+    # named per product so several frames can share one pos_dir
+    _write_days(a.out / f"days.{prod}.csv", csv, a.update)
     if a.to:
         _to_itrf2020(series)
     for c, rows in sorted(series.items()):
         rows.sort(key=lambda r: r[0])
-        pos.write_pos(
-            a.out / f"{c}.{prod}.pos",
+        target = a.out / f"{c}.{prod}.pos"
+        old = pos.read_pos(target) if a.update and target.exists() else None
+        out = pos.write_pos(
+            target.with_suffix(".new") if old is not None else target,
             c,
             np.array([np.datetime64(r[0], "s") for r in rows]),
             np.array([r[1] for r in rows]),
             np.array([r[2] for r in rows]),
             frame=label,
+            ref_xyz=None if old is None else old.ref_xyz,
         )
-    print(f"{len(days)} days → {len(series)} stations in {a.out}", file=sys.stderr)
+        if old is not None:
+            pos.merge_pos(target, out, sorted(redone))
+    if a.update:  # stations with nothing new may still lose a rejected day
+        for f in a.out.glob(f"*.{prod}.pos"):
+            if f.name.split(".")[0] not in series:
+                pos.merge_pos(f, None, redone)
+    what = "updated" if a.update else "written"
+    print(
+        f"{len(days)} days ({len(redone)} re-made) → {len(series)} stations {what} in {a.out}",
+        file=sys.stderr,
+    )
     return 0
 
 

@@ -87,3 +87,51 @@ def test_later_files_override(tmp_path: Path, files) -> None:  # type: ignore[no
     (tmp_path / "b.apr").write_text(" REYK_GPS 1.0 2.0 3.0 0 0 0 2010.0\n")
     apr = ga.read_apr([files[0], tmp_path / "b.apr"])
     np.testing.assert_array_equal(apr["REYK_GPS"].xyz, [1.0, 2.0, 3.0])
+
+
+def test_terms_differing_only_in_tau_are_kept(tmp_path: Path) -> None:
+    # IGb14 style: one EXP per component, same event, each with its own tau
+    (tmp_path / "c.apr").write_text(
+        f" GOL2_3PS {X0[0]:.5f} {X0[1]:.5f} {X0[2]:.5f} 0 0 0 2010.0\n"
+        " EXTENDED GOL2_3PS EXP 2012 01 01 00 00 200.0  0.00000 -0.01000  0.00000\n"
+        " EXTENDED GOL2_3PS EXP 2012 01 01 00 00 400.0  0.02000  0.00000  0.00000\n"
+        " EXTENDED GOL2_3PS EXP 2012 01 01 00 00  50.0  0.00000  0.00000  0.00500\n"
+    )
+    s = ga.read_apr(tmp_path / "c.apr")["GOL2_3PS"]
+    assert len(s.terms) == 3
+    when = datetime.datetime(2012, 1, 1) + datetime.timedelta(days=100)
+    dneu = np.array(
+        [
+            0.02 * (1 - np.exp(-100 / 400)),
+            -0.01 * (1 - np.exp(-100 / 200)),
+            0.005 * (1 - np.exp(-100 / 50)),
+        ]
+    )
+    g = local.ecef_to_geodetic(s.xyz)
+    np.testing.assert_allclose(
+        s.at(when), s.xyz + local.local_to_ecef(dneu, g.lat, g.lon).d, atol=1e-12
+    )
+
+
+def test_periodic_terms(tmp_path: Path) -> None:
+    # IGb20 style: annual + semi-annual, N/E/U cos/sin pairs, at every epoch
+    (tmp_path / "d.apr").write_text(
+        f" HOFN_GPS {X0[0]:.5f} {X0[1]:.5f} {X0[2]:.5f} 0 0 0 2015.0\n"
+        " EXTENDED HOFN_GPS PERIODIC 2015 01 01 00 00 365.250 0.001 0.002 0.003 0.004 0.005 0.006 note\n"
+        " EXTENDED HOFN_GPS PERIODIC 2015 01 01 00 00 182.625 -0.001 0 0 0 0 0.002\n"
+    )
+    s = ga.read_apr(tmp_path / "d.apr")["HOFN_GPS"]
+    assert [t.kind for t in s.terms] == ["PERIODIC", "PERIODIC"]
+    g = local.ecef_to_geodetic(s.xyz)
+    for days in (-300.0, 0.0, 91.3125, 1000.0):  # before the start too
+        when = datetime.datetime(2015, 1, 1) + datetime.timedelta(days=days)
+        a1, a2 = 2 * np.pi * days / 365.25, 2 * np.pi * days / 182.625
+        dneu = np.cos(a1) * np.array([0.001, 0.003, 0.005]) + np.sin(a1) * np.array(
+            [0.002, 0.004, 0.006]
+        )
+        dneu += np.cos(a2) * np.array([-0.001, 0, 0]) + np.sin(a2) * np.array(
+            [0, 0, 0.002]
+        )
+        np.testing.assert_allclose(
+            s.at(when), s.xyz + local.local_to_ecef(dneu, g.lat, g.lon).d, atol=1e-12
+        )
