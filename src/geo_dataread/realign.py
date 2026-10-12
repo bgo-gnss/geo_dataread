@@ -68,7 +68,12 @@ FRAMES: dict[str, tuple[str, str, str] | None] = {
     "igb14": ("igb14_comb.apr", "igb14_comb.eq", "igb14_comb.stab_site"),
     "igb20": ("igb20_comb.apr", "igb20_comb.eq", "igb20_comb.stab_site"),
 }
-LABELS = {"itrf2008": "ITRF2008", "igb14": "IGb14", "igb20": "IGb20"}
+LABELS = {
+    "itrf2008": "ITRF2008",
+    "igb14": "IGb14",
+    # igs14-processed h-files on igs20-based coordinates: see the module docstring
+    "igb20": "IGb20 (experimental)",
+}
 MIN_REF = 3
 _REJECTED = "rejected: "
 CSV_HEAD = "date,n_ref,dropped,post_rms_mm,xrot,yrot,zrot,xtran,ytran,ztran,error\n"

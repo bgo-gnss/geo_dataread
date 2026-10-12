@@ -89,7 +89,7 @@ POS_PRODUCTS: dict[str, tuple[str, str]] = {
     "imo.daily_itr08": ("ITRF2008", "ITRF2008"),
     "imo.daily_igb14": ("IGb14", "ITRF2014"),
     "imo.daily_itrf2020": ("ITRF2020", "ITRF2020"),
-    "imo.daily_igb20": ("IGb20", "ITRF2020"),
+    "imo.daily_igb20": ("IGb20 (experimental)", "ITRF2020"),
 }
 
 
