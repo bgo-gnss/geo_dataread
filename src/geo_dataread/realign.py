@@ -6,10 +6,21 @@ using the day's own glorg reference list and settings, and either
 
 - the SINEX a priori (``--frame itrf2008``: glorg's own frame — reproduces
   the archived ``.pos``), or
-- a GLOBK apr + eq pair from the GAMIT tables, with renames and non-secular
-  terms resolved at the day's epoch by :mod:`geo_dataread.globk_apr`:
-  ``--frame igb14`` (IGb14, the IGS realization of ITRF2014) or
-  ``--frame igb20`` (IGb20, the IGS realization of ITRF2020).
+- a GLOBK apr + eq + stab_site set from the GAMIT tables, as MIT's
+  ``glorg.cmd`` pairs them, with renames and non-secular terms resolved at
+  the day's epoch by :mod:`geo_dataread.globk_apr`: ``--frame igb14``
+  (IGb14, the IGS realization of ITRF2014) or ``--frame igb20`` (IGb20, the
+  IGS realization of ITRF2020). The reference sites are the day's own glorg
+  list (IMO leaves out e.g. REYK/HOFN, which MIT's lists carry) restricted to
+  the segments on the frame's ``stab_site`` list.
+
+Frame consistency: the loose h-files carry the antenna model (ANTEX) and
+orbits they were processed with (okada: BASELINE mode, IGS orbits held
+fixed). Per the SINEX ``SITE/GPS_PHASE_CENTER`` blocks: igs05/igs08 to
+2016, mostly igs08 2017-2020, igs14 from 2021; orbits IGb08 to 2016, IGS14 /
+IGb14 2017 - week 2238, IGS20/IGb20 from week 2239 (2022-12). Only
+ITRF2008 (to 2016) and IGb14 (2021 - 2022-11) are fully consistent; igb20 on
+igs14-processed h-files mixes conventions (experimental).
 
 ``--to itrf2020`` (with ``--frame igb14``) instead moves every IGb14
 position (and covariance) with the EPSG time-dependent Helmert
@@ -52,10 +63,10 @@ FloatArray = npt.NDArray[np.float64]
 
 DEFAULT_ARCHIVE = Path("/mnt_data/okada/D/SNX")
 GAMIT_TABLES = Path(os.environ.get("GG_TABLES", Path.home() / "gg" / "tables"))
-FRAMES = {
+FRAMES: dict[str, tuple[str, str, str] | None] = {
     "itrf2008": None,
-    "igb14": ("igb14_comb.apr", "igb14_comb.eq"),
-    "igb20": ("igb20_comb.apr", "igb20_comb.eq"),
+    "igb14": ("igb14_comb.apr", "igb14_comb.eq", "igb14_comb.stab_site"),
+    "igb20": ("igb20_comb.apr", "igb20_comb.eq", "igb20_comb.stab_site"),
 }
 LABELS = {"itrf2008": "ITRF2008", "igb14": "IGb14", "igb20": "IGb20"}
 MIN_REF = 3
@@ -85,14 +96,11 @@ def archive_days(archive: Path, start: datetime.date, end: datetime.date) -> lis
     return out
 
 
-_APR_CACHE: dict[
-    tuple[str, str], tuple[dict[str, globk_apr.AprSite], list[globk_apr.Rename]]
-] = {}
+_Tables = tuple[dict[str, globk_apr.AprSite], list[globk_apr.Rename], tuple[str, ...]]
+_APR_CACHE: dict[tuple[str, str], _Tables] = {}
 
 
-def _apr(
-    frame: str, tables: Path
-) -> tuple[dict[str, globk_apr.AprSite], list[globk_apr.Rename]] | None:
+def _apr(frame: str, tables: Path) -> _Tables | None:
     files = FRAMES[frame]
     if files is None:
         return None
@@ -101,6 +109,7 @@ def _apr(
         _APR_CACHE[key] = (
             globk_apr.read_apr(tables / files[0]),
             globk_apr.read_renames(tables / files[1]),
+            globk_apr.read_stab_site(tables / files[2]),
         )
     return _APR_CACHE[key]
 
@@ -126,7 +135,8 @@ def realign_day(
     ext = _apr(frame, tables)
     apriori = None
     if ext is not None:
-        apriori, skipped = globk_apr.apriori_xyz(codes, when, *ext)
+        apr, renames, stab = ext
+        apriori, skipped = globk_apr.apriori_xyz(codes, when, apr, renames, stab)
         dropped = sorted(skipped)
     usable = len(codes) - len(dropped)
     if usable < min_ref:

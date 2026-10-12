@@ -27,7 +27,13 @@ What a GLOBK run would use as a site's a priori position at an epoch:
    365.25 days from the a priori epoch (a decimal year, converted to a date
    within its own calendar year).
 
-:func:`apriori_xyz` strings these together for a list of codes.
+:func:`apriori_xyz` strings these together for a list of codes. With the
+frame's ``stab_site`` list (:func:`read_stab_site`, e.g. MIT's
+``igb14_comb.stab_site``) it also leaves out a reference site whose name at
+the epoch — the segment between discontinuities — is not on that list, as
+glorg's ``stab_site`` would: entries match as name prefixes (``ONSA_2``
+matches ``ONSA_2PS``); the alternatives of a ``A/B/C`` hierarchy entry
+are all accepted.
 """
 
 from __future__ import annotations
@@ -50,6 +56,8 @@ __all__ = [
     "decimal_year_to_datetime",
     "read_apr",
     "read_renames",
+    "read_stab_site",
+    "in_stab_site",
     "site_name",
 ]
 
@@ -209,16 +217,42 @@ def read_apr(paths: str | Path | Iterable[str | Path]) -> dict[str, AprSite]:
     }
 
 
+def read_stab_site(paths: str | Path | Iterable[str | Path]) -> tuple[str, ...]:
+    """Name prefixes of the ``stab_site`` lines (``-`` removals and ``R`` limits unsupported)."""
+    files = [paths] if isinstance(paths, (str, Path)) else list(paths)
+    out: list[str] = []
+    for p in files:
+        for line in _lines(p):
+            tok = line.split("!")[0].split("#")[0].split()
+            if not tok or tok[0].lower() not in ("stab_site", "use_site"):
+                continue
+            for t in tok[1:]:
+                if t.lower() == "clear":
+                    out.clear()
+                elif t.startswith("-") or t.upper() == "R":
+                    raise ValueError(f"{p}: unsupported stab_site form {t!r}")
+                else:
+                    out.extend(a.upper() for a in t.split("/") if a)
+    return tuple(dict.fromkeys(out))
+
+
+def in_stab_site(name: str, entries: Sequence[str]) -> bool:
+    """Is the GLOBK name on a ``stab_site`` list (prefix match, as glorg)?"""
+    return any(name.startswith(e) for e in entries)
+
+
 def apriori_xyz(
     codes: Iterable[str],
     when: datetime.datetime,
     apr: dict[str, AprSite],
     renames: Sequence[Rename],
+    stab_site: Sequence[str] | None = None,
 ) -> tuple[dict[str, FloatArray], dict[str, str]]:
     """A priori X/Y/Z of each code at ``when``, and why the others have none.
 
     Returns ``(positions, skipped)``: ``skipped[code]`` is ``"excluded"``
-    (renamed to ``…XCL``) or ``"no apr <NAME>"``.
+    (renamed to ``…XCL``), ``"not stab_site <NAME>"`` (with ``stab_site``)
+    or ``"no apr <NAME>"``.
     """
     pos: dict[str, FloatArray] = {}
     skipped: dict[str, str] = {}
@@ -226,6 +260,8 @@ def apriori_xyz(
         name = site_name(code, when, renames)
         if name.endswith("XCL"):
             skipped[code] = "excluded"
+        elif stab_site is not None and not in_stab_site(name, stab_site):
+            skipped[code] = f"not stab_site {name}"
         elif name not in apr:
             skipped[code] = f"no apr {name}"
         else:

@@ -135,3 +135,27 @@ def test_periodic_terms(tmp_path: Path) -> None:
         np.testing.assert_allclose(
             s.at(when), s.xyz + local.local_to_ecef(dneu, g.lat, g.lon).d, atol=1e-12
         )
+
+
+def test_stab_site_segments(tmp_path: Path, files) -> None:  # type: ignore[no-untyped-def]
+    (tmp_path / "s.stab_site").write_text(
+        "# MIT style: the segments fit for the frame\n"
+        " stab_site REYK_G  ! only the first segment\n"
+        " stab_site AREQ/SCRZ HOFN_3\n"
+    )
+    stab = ga.read_stab_site(tmp_path / "s.stab_site")
+    assert stab == ("REYK_G", "AREQ", "SCRZ", "HOFN_3")
+    assert ga.in_stab_site("REYK_GPS", stab) and not ga.in_stab_site("REYK_2PS", stab)
+    apr, ren = ga.read_apr(files[0]), ga.read_renames(files[1])
+    pos, skipped = ga.apriori_xyz(
+        ["REYK"], datetime.datetime(2011, 1, 1), apr, ren, stab
+    )
+    assert set(pos) == {"REYK"}
+    # from 2012 REYK is REYK_2PS: not on the list, whatever the apr has
+    pos, skipped = ga.apriori_xyz(
+        ["REYK"], datetime.datetime(2012, 6, 1), apr, ren, stab
+    )
+    assert pos == {} and skipped == {"REYK": "not stab_site REYK_2PS"}
+    (tmp_path / "bad").write_text(" stab_site -ONSA\n")
+    with pytest.raises(ValueError, match="unsupported"):
+        ga.read_stab_site(tmp_path / "bad")
