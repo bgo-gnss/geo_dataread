@@ -208,3 +208,66 @@ def test_getData_pos_reference_stays_zero(tmp_path: Path) -> None:
         openGlobkTimes(  # type: ignore[no-untyped-call]
             "AKUR", Dir=str(FIX), tType="TOT", ref_position="wmean"
         )
+
+
+# --- product ids (pos_id, 2026-10-12) ------------------------------------------
+
+
+def test_pos_product_names() -> None:
+    assert pos.pos_product(None) == pos.DEFAULT_PROD_ID == "imo.daily_itr08"
+    assert pos.pos_product("igb14") == pos.pos_product("ITRF2014") == "imo.daily_igb14"
+    assert pos.pos_product("itrf2020") == "imo.daily_itrf2020"
+    assert pos.pos_product("itrf2008") == "imo.daily_itr08"
+    assert pos.pos_product("xyz.final_foo") == "xyz.final_foo"
+    assert {
+        pos.POS_PRODUCTS[pos.pos_product(n)][1] for n in ("itr08", "igb14", "itrf2020")
+    } == {
+        "ITRF2008",
+        "ITRF2014",
+        "ITRF2020",
+    }
+
+
+def test_openGlobkTimes_picks_the_product(tmp_path: Path) -> None:
+    from geo_dataread.gps_read import openGlobkTimes
+
+    src = (FIX / "AKUR.imo.final_itr08.pos").read_text()
+    (tmp_path / "AKUR.imo.daily_itr08.pos").write_text(src)
+    # same file shifted 1 m in X, under the IGb14 product id
+    lines = src.splitlines()
+    k = next(i for i, ln in enumerate(lines) if ln.startswith(" 2026"))
+    shifted = []
+    for ln in lines[k:]:
+        tok = ln.split()
+        tok[3] = f"{float(tok[3]) + 1.0:.5f}"
+        shifted.append(" " + " ".join(tok))
+    (tmp_path / "AKUR.imo.daily_igb14.pos").write_text(
+        "\n".join(lines[:k] + shifted) + "\n"
+    )
+    _, d08, _ = openGlobkTimes(
+        "AKUR", Dir=str(tmp_path), tType="POS", ref_position="first"
+    )  # type: ignore[no-untyped-call]
+    _, d14, _ = openGlobkTimes(
+        "AKUR", Dir=str(tmp_path), tType="POS", ref_position="first", pos_id="igb14"
+    )  # type: ignore[no-untyped-call]
+    np.testing.assert_allclose(d14, d08, atol=1e-6)  # relative to each own first epoch
+    _, a08, _ = openGlobkTimes(
+        "AKUR",
+        Dir=str(tmp_path),
+        tType="POS",
+        ref_position=pos.read_pos(tmp_path / "AKUR.imo.daily_itr08.pos").xyz[0],
+    )  # type: ignore[no-untyped-call]
+    _, a14, _ = openGlobkTimes(
+        "AKUR",
+        Dir=str(tmp_path),
+        tType="POS",
+        ref_position=pos.read_pos(tmp_path / "AKUR.imo.daily_itr08.pos").xyz[0],
+        pos_id="imo.daily_igb14",
+    )  # type: ignore[no-untyped-call]
+    assert (
+        np.abs(a14 - a08).max() > 0.5
+    )  # the 1 m shift shows against a common reference
+    with pytest.raises(FileNotFoundError):
+        openGlobkTimes("AKUR", Dir=str(tmp_path), tType="POS", pos_id="itrf2020")  # type: ignore[no-untyped-call]
+    with pytest.raises(ValueError, match="POS.? only"):
+        openGlobkTimes("AKUR", Dir=str(tmp_path), tType="TOT", pos_id="igb14")  # type: ignore[no-untyped-call]
