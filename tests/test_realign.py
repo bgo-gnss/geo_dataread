@@ -82,3 +82,85 @@ def test_archive_days(tmp_path: Path) -> None:
         tmp_path, datetime.date(2014, 5, 30), datetime.date(2014, 5, 31)
     )
     assert [p.name[11:18] for p in got] == ["2014150", "2014151"]
+
+
+def _series(tmp_path: Path, name: str, days: list[str], dx: float = 0.0) -> Path:
+    t = np.array([f"{d}T11:59:45" for d in days], dtype="datetime64[s]")
+    x = np.array([[2587384.0, -1043034.0, 5716564.0]] * len(days))
+    x[:, 0] += np.arange(len(days)) * 1e-3 + dx
+    c = np.broadcast_to(np.diag([1e-6, 2e-6, 4e-6]), (len(days), 3, 3))
+    return pos.write_pos(tmp_path / name, "REYK", t, x, c, frame="IGb14")
+
+
+def test_merge_pos_replaces_days_and_keeps_the_rest(tmp_path: Path) -> None:
+    path = _series(tmp_path, "R.pos", ["2024-04-01", "2024-04-02", "2024-04-03"])
+    before = path.read_text().splitlines()
+    ref = pos.read_pos(path).ref_xyz
+    t = np.array(["2024-04-02T11:59:45", "2024-04-04T11:59:45"], dtype="datetime64[s]")
+    x = np.array([[2587384.5, -1043034.0, 5716564.0]] * 2)
+    c = np.broadcast_to(np.diag([1e-6, 2e-6, 4e-6]), (2, 3, 3))
+    new = pos.write_pos(tmp_path / "R.new", "REYK", t, x, c, frame="IGb14", ref_xyz=ref)
+    pos.merge_pos(path, new, ["20240402", "20240404"])
+    after = path.read_text().splitlines()
+    got = pos.read_pos(path)
+    assert [str(e)[:10] for e in got.epochs] == [
+        "2024-04-01",
+        "2024-04-02",
+        "2024-04-03",
+        "2024-04-04",
+    ]
+    assert got.xyz[1, 0] == 2587384.5 and not new.exists()
+    # untouched days are byte for byte the old rows, the header follows the merge
+    assert after[-4] == before[-3] and after[-2] == before[-1]
+    assert got.header["Last Epoch"] == "20240404 115900"
+    np.testing.assert_array_equal(got.ref_xyz, ref)
+    # dropping without new rows, and dropping the last rows removes the file
+    pos.merge_pos(path, None, ["20240401"])
+    assert pos.read_pos(path).header["First Epoch"] == "20240402 115900"
+    assert pos.merge_pos(path, None, ["20240402", "20240403", "20240404"]) is None
+    assert not path.exists()
+
+
+def _archive(tmp_path: Path) -> Path:
+    arch = tmp_path / "arch" / "2014"
+    arch.mkdir(parents=True)
+    for suffix in (".SNX.gz", ".org.gz"):
+        src = Path(str(SNX).replace(".SNX.gz", suffix))
+        (arch / src.name).symlink_to(src)
+    return arch.parent
+
+
+def test_main_update_and_rejected_days(tmp_path: Path) -> None:
+    arch, out = _archive(tmp_path), tmp_path / "pos"
+    day = ["--start", "2014-05-30", "--end", "2014-05-30", "--archive", str(arch)]
+    common = [*day, "--frame", "itrf2008", "--out", str(out), "-j", "1"]
+    assert realign.main([*common, "--stations", "REYK", "HOFN"]) == 0
+    reyk = out / "REYK.imo.daily_itrf2008.pos"
+    assert pos.read_pos(reyk).xyz.shape == (1, 3)
+    # an older day kept in the file is not touched by an update of 2014-05-30
+    old = pos.read_pos(reyk)
+    keep = pos.write_pos(
+        tmp_path / "k.pos",
+        "REYK",
+        np.array(["2014-05-29T11:59:45"], dtype="datetime64[s]"),
+        old.xyz,
+        old.cov_xyz(),
+        frame="ITRF2008",
+        ref_xyz=old.ref_xyz,
+    )
+    pos.merge_pos(reyk, keep, [])
+    first = reyk.read_text().splitlines()[-2]
+    assert realign.main([*common, "--stations", "REYK", "HOFN", "--update"]) == 0
+    assert reyk.read_text().splitlines()[-2] == first
+    assert len(pos.read_pos(reyk).epochs) == 2
+    # the day rejected: its rows go, HOFN (only that day) disappears
+    assert realign.main([*common, "--update", "--min-ref", "999"]) == 0
+    assert [str(e)[:10] for e in pos.read_pos(reyk).epochs] == ["2014-05-29"]
+    assert not (out / "HOFN.imo.daily_itrf2008.pos").exists()
+    log = (out / "days.imo.daily_itrf2008.csv").read_text().splitlines()
+    assert len(log) == 2 and "rejected: 49 reference site(s), need 999" in log[1]
+
+
+def test_too_few_reference_sites_rejected() -> None:
+    r = realign.realign_day(SNX, "itrf2008", min_ref=48)
+    assert r.sites == {} and r.error.startswith("rejected: 47")

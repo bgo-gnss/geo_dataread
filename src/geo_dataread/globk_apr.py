@@ -12,14 +12,28 @@ What a GLOBK run would use as a site's a priori position at an epoch:
    contains the epoch, in file order.
 3. :func:`read_apr` — ``NAME X Y Z Vx Vy Vz EPOCH …`` rows (later files and
    later rows override earlier ones, like successive ``apr_file`` commands)
-   plus ``EXTENDED NAME EXP|LOG yyyy mm dd hh mm tau_days dN dE dU``
-   post-seismic terms (amplitudes N/E/U [m], rotated to X/Y/Z at the
-   a priori position, as ``nonsec_util.f`` does).
+   plus the ``EXTENDED`` non-secular terms, as GLOBK's ``nonsec_util.f``:
+
+   - ``EXTENDED NAME EXP|LOG yyyy mm dd hh mm tau_days dN dE dU``
+     (post-seismic; zero before the start);
+   - ``EXTENDED NAME PERIODIC yyyy mm dd hh mm period_days Nc Ns Ec Es Uc Us``
+     (cos/sin amplitudes of ``2π(t − start)/period``, at every epoch).
+
+   Amplitudes are N/E/U [m], rotated to X/Y/Z at the a priori position. A
+   term repeating the (type, start, tau/period) of an earlier one replaces
+   it; IGb14 gives one term per component with its own tau, so the tau is
+   part of that key.
 4. :meth:`AprSite.at` — ``X + V·Δt + Σ terms`` with ``Δt`` in Julian years of
    365.25 days from the a priori epoch (a decimal year, converted to a date
    within its own calendar year).
 
-:func:`apriori_xyz` strings these together for a list of codes.
+:func:`apriori_xyz` strings these together for a list of codes. With the
+frame's ``stab_site`` list (:func:`read_stab_site`, e.g. MIT's
+``igb14_comb.stab_site``) it also leaves out a reference site whose name at
+the epoch — the segment between discontinuities — is not on that list, as
+glorg's ``stab_site`` would: entries match as name prefixes (``ONSA_2``
+matches ``ONSA_2PS``); the alternatives of a ``A/B/C`` hierarchy entry
+are all accepted.
 """
 
 from __future__ import annotations
@@ -42,6 +56,8 @@ __all__ = [
     "decimal_year_to_datetime",
     "read_apr",
     "read_renames",
+    "read_stab_site",
+    "in_stab_site",
     "site_name",
 ]
 
@@ -79,10 +95,10 @@ class Rename:
 
 @dataclasses.dataclass(frozen=True)
 class NonSecular:
-    kind: str  # "EXP" | "LOG"
+    kind: str  # "EXP" | "LOG" | "PERIODIC"
     start: datetime.datetime
-    tau_days: float
-    neu: FloatArray  # amplitudes N, E, U [m]
+    tau_days: float  # decay time, or the period of a PERIODIC term
+    neu: FloatArray  # N, E, U [m]; PERIODIC: Nc, Ns, Ec, Es, Uc, Us
 
 
 @dataclasses.dataclass(frozen=True)
@@ -101,6 +117,10 @@ class AprSite:
             dneu = np.zeros(3)
             for t in self.terms:
                 days = (when - t.start).total_seconds() / _DAY
+                if t.kind == "PERIODIC":
+                    arg = 2.0 * np.pi * days / t.tau_days
+                    dneu += np.cos(arg) * t.neu[0::2] + np.sin(arg) * t.neu[1::2]
+                    continue
                 if days < 0:
                     continue
                 if t.kind == "EXP":
@@ -158,22 +178,25 @@ def read_apr(paths: str | Path | Iterable[str | Path]) -> dict[str, AprSite]:
     """``{name: AprSite}`` from GLOBK apr files (later entries override)."""
     files = [paths] if isinstance(paths, (str, Path)) else list(paths)
     rows: dict[str, AprSite] = {}
-    # (kind, start) keyed: a repeated term replaces the earlier one (decode_nonsut)
-    terms: dict[str, dict[tuple[str, datetime.datetime], NonSecular]] = {}
+    # a repeated (kind, start, tau) replaces the earlier term (decode_nonsec)
+    terms: dict[str, dict[tuple[str, datetime.datetime, float], NonSecular]] = {}
     for p in files:
         for line in _lines(p):
             if not line.startswith(" ") or not line.strip():
                 continue
             tok = line.split()
             if tok[0].upper() == "EXTENDED":
-                if len(tok) >= 12 and tok[2].upper() in ("EXP", "LOG"):
+                kind = tok[2].upper() if len(tok) > 2 else ""
+                n = {"EXP": 3, "LOG": 3, "PERIODIC": 6}.get(kind)
+                if n is not None and len(tok) >= 9 + n:
                     term = NonSecular(
-                        tok[2].upper(),
+                        kind,
                         _stamp(tok[3:8]),
                         float(tok[8]),
-                        np.array([float(v) for v in tok[9:12]]),
+                        np.array([float(v) for v in tok[9 : 9 + n]]),
                     )
-                    terms.setdefault(tok[1].upper(), {})[term.kind, term.start] = term
+                    key = (term.kind, term.start, term.tau_days)
+                    terms.setdefault(tok[1].upper(), {})[key] = term
                 continue
             if len(tok) < 8:
                 continue
@@ -194,16 +217,42 @@ def read_apr(paths: str | Path | Iterable[str | Path]) -> dict[str, AprSite]:
     }
 
 
+def read_stab_site(paths: str | Path | Iterable[str | Path]) -> tuple[str, ...]:
+    """Name prefixes of the ``stab_site`` lines (``-`` removals and ``R`` limits unsupported)."""
+    files = [paths] if isinstance(paths, (str, Path)) else list(paths)
+    out: list[str] = []
+    for p in files:
+        for line in _lines(p):
+            tok = line.split("!")[0].split("#")[0].split()
+            if not tok or tok[0].lower() not in ("stab_site", "use_site"):
+                continue
+            for t in tok[1:]:
+                if t.lower() == "clear":
+                    out.clear()
+                elif t.startswith("-") or t.upper() == "R":
+                    raise ValueError(f"{p}: unsupported stab_site form {t!r}")
+                else:
+                    out.extend(a.upper() for a in t.split("/") if a)
+    return tuple(dict.fromkeys(out))
+
+
+def in_stab_site(name: str, entries: Sequence[str]) -> bool:
+    """Is the GLOBK name on a ``stab_site`` list (prefix match, as glorg)?"""
+    return any(name.startswith(e) for e in entries)
+
+
 def apriori_xyz(
     codes: Iterable[str],
     when: datetime.datetime,
     apr: dict[str, AprSite],
     renames: Sequence[Rename],
+    stab_site: Sequence[str] | None = None,
 ) -> tuple[dict[str, FloatArray], dict[str, str]]:
     """A priori X/Y/Z of each code at ``when``, and why the others have none.
 
     Returns ``(positions, skipped)``: ``skipped[code]`` is ``"excluded"``
-    (renamed to ``…XCL``) or ``"no apr <NAME>"``.
+    (renamed to ``…XCL``), ``"not stab_site <NAME>"`` (with ``stab_site``)
+    or ``"no apr <NAME>"``.
     """
     pos: dict[str, FloatArray] = {}
     skipped: dict[str, str] = {}
@@ -211,6 +260,8 @@ def apriori_xyz(
         name = site_name(code, when, renames)
         if name.endswith("XCL"):
             skipped[code] = "excluded"
+        elif stab_site is not None and not in_stab_site(name, stab_site):
+            skipped[code] = f"not stab_site {name}"
         elif name not in apr:
             skipped[code] = f"no apr {name}"
         else:

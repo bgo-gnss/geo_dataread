@@ -42,7 +42,7 @@ import datetime
 import gzip
 from pathlib import Path
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from typing import TYPE_CHECKING, Literal
 
 import numpy as np
@@ -62,6 +62,7 @@ __all__ = [
     "PosSeries",
     "apriori_xyz",
     "junction_dlocal",
+    "merge_pos",
     "open_pos_times",
     "pos_local",
     "pos_path",
@@ -88,6 +89,7 @@ POS_PRODUCTS: dict[str, tuple[str, str]] = {
     "imo.daily_itr08": ("ITRF2008", "ITRF2008"),
     "imo.daily_igb14": ("IGb14", "ITRF2014"),
     "imo.daily_itrf2020": ("ITRF2020", "ITRF2020"),
+    "imo.daily_igb20": ("IGb20", "ITRF2020"),
 }
 
 
@@ -95,7 +97,8 @@ def pos_product(name: str | None) -> str:
     """Full product id from a short name: ``"igb14"`` → ``"imo.daily_igb14"``.
 
     ``None`` is the default product. Accepts ``itr08``/``itrf2008``,
-    ``igb14``/``itrf2014`` and ``itrf2020``, or any full id (containing a dot).
+    ``igb14``/``itrf2014``, ``itrf2020`` (IGb14 + EPSG Helmert) and ``igb20``,
+    or any full id (containing a dot).
     """
     if name is None:
         return DEFAULT_PROD_ID
@@ -516,3 +519,50 @@ def write_pos(
     tmp.write_text("\n".join(head + rows) + "\n")
     tmp.replace(out)
     return out
+
+
+def merge_pos(
+    path: str | Path, new: str | Path | None, replace: Iterable[str]
+) -> Path | None:
+    """Fold the rows of ``new`` into the ``.pos`` at ``path`` (in place).
+
+    Rows of ``path`` whose date (``YYYYMMDD``) is in ``replace`` are dropped,
+    every row of ``new`` (``None``: none) is added, and the rows are re-sorted.
+    Rows outside ``replace`` keep their text byte for byte; the header is
+    ``new``'s (write it with ``ref_xyz`` = the old reference so dN/dE/dU stay
+    comparable), else the old one, with the first/last epoch of the merged
+    series. Without ``path``, ``new`` is moved there; a merge leaving no rows
+    removes the file (returns ``None``). ``new`` is consumed.
+    """
+    path = Path(path)
+    if new is not None and not path.exists():
+        return Path(Path(new).replace(path))
+    head, old = _split_rows(path.read_text().splitlines(), path)
+    rows: list[str] = []
+    if new is not None:
+        head, rows = _split_rows(Path(new).read_text().splitlines(), Path(new))
+        Path(new).unlink()
+    gone = set(replace)
+    merged = sorted(
+        [ln for ln in old if ln.split()[0] not in gone] + rows,
+        key=lambda ln: ln.split()[:2],
+    )
+    if not merged:
+        path.unlink()
+        return None
+    for k, ln in enumerate(head):
+        if ln.startswith("First Epoch"):
+            head[k] = "First Epoch   : " + " ".join(merged[0].split()[:2])
+        elif ln.startswith("Last Epoch"):
+            head[k] = "Last Epoch    : " + " ".join(merged[-1].split()[:2])
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text("\n".join(head + merged) + "\n")
+    tmp.replace(path)
+    return path
+
+
+def _split_rows(lines: list[str], path: Path) -> tuple[list[str], list[str]]:
+    for i, line in enumerate(lines):
+        if line.startswith("*YYYYMMDD"):
+            return lines[: i + 1], [ln for ln in lines[i + 1 :] if ln.strip()]
+    raise PosError(f"{path}: not a PBO .pos file")
