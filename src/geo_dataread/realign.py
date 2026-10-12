@@ -13,8 +13,11 @@ using the day's own glorg reference list and settings, and either
 ``--to itrf2020`` then moves every position (and covariance) with the EPSG
 time-dependent Helmert ITRF2014→ITRF2020 at its epoch (geofunc.frames; this
 is "IGb14 → ITRF2020 via EPSG Helmert", not IGS20). Output: one PBO ``.pos``
-per station (:func:`geo_dataread.pos.write_pos`) and ``days.csv`` with one
-line per day (reference sites used/dropped, post-fit RMS, parameters).
+per station (:func:`geo_dataread.pos.write_pos`) and ``days.<prod-id>.csv``
+with one line per day (reference sites used/dropped, post-fit RMS,
+parameters). File names carry the product id, so the frames can share one
+directory with tssum's ``imo.daily_itr08`` set (``update_pos.sh`` leaves
+other product ids alone).
 
 Writes only under ``--out``; the archive is read-only.
 """
@@ -180,7 +183,11 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     series: dict[str, list[tuple[datetime.datetime, FloatArray, FloatArray]]] = {}
     a.out.mkdir(parents=True, exist_ok=True)
-    with open(a.out / "days.csv", "w") as log, cf.ProcessPoolExecutor(a.jobs) as pool:
+    # named per product so several frames can share one pos_dir
+    with (
+        open(a.out / f"days.{prod}.csv", "w") as log,
+        cf.ProcessPoolExecutor(a.jobs) as pool,
+    ):
         log.write(
             "date,n_ref,dropped,post_rms_mm,xrot,yrot,zrot,xtran,ytran,ztran,error\n"
         )
