@@ -10,7 +10,7 @@ import sys
 from collections import OrderedDict
 from typing import Optional
 
-import geofunc.geofunc as gf
+
 import numpy as np
 import pandas as pd
 from gps_analysis import baseline as ga_baseline
@@ -20,6 +20,7 @@ from gps_analysis import preprocess as ga_preprocess
 from gps_analysis.models import TrajectoryParams
 from gps_parser import ConfigParser
 
+from geo_dataread import station_catalog
 from geo_dataread.globk_join import select_min_sigma_indices
 
 from gtimes.timefunc import (
@@ -1291,29 +1292,24 @@ def iprep(yearf, data, Ddata, uncert=20.0, offset=None):
 def _remove_plate_velocity(sta, yearf, data, plate=None, reference="ITRF2008", scale=1):
     """Subtract secular plate motion from the horizontal components in place.
 
-    Single shared implementation of the plate-velocity removal that was
-    duplicated verbatim between the two production paths (refactor-B
-    slice 5): ``getData`` (plot path — data already in mm after ``iprep``,
-    so ``scale=1000`` converts ``gf.plateVelo``'s m/yr) and ``gamittoNEU``
-    (.NEU path — data still in m, ``scale=1``; the m→mm conversion happens
-    afterwards as caller unit policy). Bit-identical behavior is pinned by
-    the ``getdata_*`` / ``real_getdata_*`` plate cases and the
-    ``neu_*`` / ``neufile_*`` / ``real_neu_*`` / ``real_neufile_*`` golden
-    masters.
+    Single shared implementation of the plate-velocity removal for the two
+    production paths: ``getData`` (plot path — data already in mm after
+    ``iprep``, so ``scale=1000`` converts the m/yr velocity) and
+    ``gamittoNEU`` (.NEU path — data still in m, ``scale=1``). Pinned by the
+    ``getdata_*`` / ``real_getdata_*`` plate cases and the ``neu_*`` /
+    ``neufile_*`` / ``real_neu_*`` / ``real_neufile_*`` golden masters.
 
-    Note the long-standing axis swap relative to ``gf.plateVelo``'s
-    documented (N, E, U) column order: data row 0 gets velocity column 1
-    and data row 1 gets velocity column 0 — preserved verbatim from both
-    legacy call sites (which agreed with each other).
+    The velocity comes from :func:`station_catalog.plate_velocity_neu` in
+    N, E, U order (``geofunc.plates``), so row 0 gets N and row 1 gets E
+    directly. (The former ``gf.plateVelo`` returned E, N, U, which is why
+    this function used to swap the columns.)
 
     Args:
         sta: station four-letter name (plate velocity is looked up per station)
         yearf: fractional-year time array; motion accumulates from ``yearf[0]``
         data: 3xN component array; rows 0 and 1 are modified IN PLACE
-        plate: explicit tectonic plate forwarded to ``gf.plateVelo``
-            (default None = per-station plate lookup)
-        reference: reference frame forwarded to ``gf.plateVelo``.
-            Default="ITRF2008"
+        plate: explicit tectonic plate (default None = per-station lookup)
+        reference: plate-motion model frame. Default="ITRF2008"
         scale: unit factor applied to the velocity — 1 for the m-unit .NEU
             path, 1000 for the mm-unit plot path
 
@@ -1321,9 +1317,9 @@ def _remove_plate_velocity(sta, yearf, data, plate=None, reference="ITRF2008", s
         data: the same (mutated) array, for assignment-style call sites
 
     """
-    plateVel = gf.plateVelo([sta], plate, reference=reference)
-    data[0, :] = data[0, :] - plateVel[0, 1] * scale * (yearf - yearf[0])
-    data[1, :] = data[1, :] - plateVel[0, 0] * scale * (yearf - yearf[0])
+    vel = station_catalog.plate_velocity_neu(sta, plate, reference=reference)
+    data[0, :] = data[0, :] - vel[0] * scale * (yearf - yearf[0])
+    data[1, :] = data[1, :] - vel[1] * scale * (yearf - yearf[0])
     return data
 
 
