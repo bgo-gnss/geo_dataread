@@ -1341,7 +1341,7 @@ def _check_frame(entry: Any, *, borrower: str, code: str) -> None:
 
     A plate-frame velocity means nothing without the plate model that was
     removed to make it, and ``gps_read.getData(ref="plate")`` removes a
-    PER-STATION one keyed by :func:`geofunc.geofunc.plateDict`.  Around
+    PER-STATION one keyed by :func:`geo_dataread.station_catalog.plate_table`.  Around
     Svartsengi that assignment is mixed — SENG/SKSH/ELDC/THOB are NOAM while
     GRIV/AUSV/VMOS/SUDV and their neighbours are EURA — and the two frames
     differ by the full spreading rate: measured 2026-08-26 on SENG's own
@@ -1362,9 +1362,9 @@ def _check_frame(entry: Any, *, borrower: str, code: str) -> None:
     if not frame:
         return
     try:
-        from geofunc.geofunc import plateDict
+        from geo_dataread.station_catalog import plate_table
 
-        assigned = plateDict().get(borrower)
+        assigned = plate_table().get(borrower)
     except Exception:  # noqa: BLE001 - no plate file reachable: cannot check
         return
     if assigned is None or str(assigned).upper() == str(frame).upper():

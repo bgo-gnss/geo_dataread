@@ -30,20 +30,24 @@ def test_duplicate_site_resolves_to_last_row(tmp_path: Path) -> None:
     np.testing.assert_array_equal(sc.station_xyz("HESA", f), [4.0, 5.0, 6.0])
 
 
-@pytest.mark.parametrize("sta", ["HOFN", "REYK", "SENG"])
-@pytest.mark.parametrize("reference", ["ITRF2008", "ITRF2014"])
+# N, E, U [m/yr] from the legacy plateVelo chain (platePoles → rotpole → eccell,
+# E,N,U rows reordered), frozen 2026-10-12 before geofunc.geo retired
+LEGACY = {
+    ("HOFN", "ITRF2008"): (0.016562758572750195, 0.008435024581705248, 4.360223801871254e-05),
+    ("HOFN", "ITRF2014"): (0.016489647873740628, 0.008779640598814921, 4.3409770677845364e-05),
+    ("REYK", "ITRF2008"): (0.018530986455884538, -0.009111887907600187, 4.895682345376907e-05),
+    ("REYK", "ITRF2014"): (0.019573082710926074, -0.008660304101246363, 5.170992688414283e-05),
+    ("SENG", "ITRF2008"): (0.018458507369191354, -0.009245774352904567, 4.910679146803832e-05),
+    ("SENG", "ITRF2014"): (0.019500126792532407, -0.008797269812110655, 5.187790328049527e-05),
+}  # fmt: skip
+
+
+@pytest.mark.parametrize(("sta", "reference"), list(LEGACY))
 def test_matches_the_legacy_plateVelo_chain(sta: str, reference: str) -> None:
-    # geofunc.geofunc.plateVelo = platePoles → rotpole → eccell (rows E, N, U)
-    geo = pytest.importorskip("geofunc.geo")
-    x = sc.station_xyz(sta, COORD)
-    assert x is not None
-    w = geo.platePoles(sc.station_plate(sta, PLATE), reference=reference)
-    llh = np.array(geo.itrf08towgs84.transform(*x, radians=True))
-    enu = geo.eccell(llh, geo.rotpole(w, x))
     neu = sc.plate_velocity_neu(
         sta, reference=reference, coord_file=COORD, plate_file=PLATE
     )
-    np.testing.assert_allclose(neu, enu[[1, 0, 2]], atol=1e-12)
+    np.testing.assert_allclose(neu, LEGACY[sta, reference], atol=1e-12)
 
 
 def test_explicit_plate_and_missing_station() -> None:
