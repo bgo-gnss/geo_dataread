@@ -70,6 +70,7 @@ __all__ = [
     "merge_pos",
     "open_pos_times",
     "pos_local",
+    "product_junctions",
     "pos_frame",
     "pos_path",
     "POS_PRODUCTS",
@@ -398,6 +399,32 @@ def _default_junctions(sta: str) -> tuple[JunctionOffset, ...]:
     return rules.get(sta.upper(), ())
 
 
+#: frames whose ``.pos`` products are built from okada's GAMIT h-files: the
+#: reviewed junction offsets (``junction_offsets.csv``) correct okada's processing
+#: (e.g. GUSK's stale 1.093 m station.info height before 2023), so they apply to
+#: these only. itrf20 and the 8 h sets come from gamit-p01's processing, whose
+#: station.info has the right heights; a junction applied there makes the step.
+OKADA_FRAMES = ("itrf08", "itrf14")
+
+
+def product_junctions(prod_id: str) -> Sequence[JunctionOffset] | None:
+    """Junction rules for a product: the deployed ones (None) or none (``()``).
+
+    None (= :func:`pos_local`'s default, the deployed catalog) for okada's
+    products — and for any id that is not a frame product, as before; ``()``
+    for products processed elsewhere (itrf20, the 8 h sessions).
+    """
+    try:
+        frame = pos_frame(prod_id)
+    except ValueError:
+        return None
+    if frame in OKADA_FRAMES and not _RENAMED.get(prod_id, prod_id).startswith(
+        "imo.08hr"
+    ):
+        return None
+    return ()
+
+
 def pos_local(
     s: PosSeries,
     ref: ReferenceMode | npt.ArrayLike = "wmean",
@@ -469,7 +496,9 @@ def open_pos_times(
     ``ref``, ``convention``). ``ref="tssum"`` gives tssum's own columns.
     """
     s = read_pos(pos_path(sta, directory, prod_id))
-    out, _ = pos_local(s, ref, convention=convention)
+    out, _ = pos_local(
+        s, ref, junctions=product_junctions(prod_id), convention=convention
+    )
     sig = np.sqrt(np.diagonal(out.cov, axis1=-2, axis2=-1))  # type: ignore[arg-type]
     return s.yearf, out.d.T.copy(), sig.T.copy()
 
