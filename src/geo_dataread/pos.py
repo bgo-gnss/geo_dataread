@@ -72,6 +72,7 @@ __all__ = [
     "pos_local",
     "product_junctions",
     "pos_frame",
+    "frame_name",
     "pos_path",
     "POS_PRODUCTS",
     "pos_product",
@@ -87,11 +88,12 @@ FloatArray = npt.NDArray[np.float64]
 DEFAULT_POS_DIR = "/mnt_data/okada/D/SNX/pos"
 #: the reference frames a ``.pos`` set comes in, and the frame of the plate-motion
 #: model removed from it (``--ref plate``). itrf14 is IGb14 and itrf20 is IGb20,
-#: the IGS's GNSS realizations of those ITRFs.
+#: the IGS's GNSS realizations of those ITRFs; the labels (plot titles) name
+#: the ITRF only.
 FRAMES: dict[str, tuple[str, str]] = {
     "itrf08": ("ITRF2008", "ITRF2008"),
-    "itrf14": ("ITRF2014 (IGb14)", "ITRF2014"),
-    "itrf20": ("ITRF2020 (IGb20)", "ITRF2020"),
+    "itrf14": ("ITRF2014", "ITRF2014"),
+    "itrf20": ("ITRF2020", "ITRF2020"),
 }
 #: solution session → the ``<series>`` part of the product id (also tssum's
 #: solution-type column, ``24hrs``/``08hrs``)
@@ -169,9 +171,19 @@ def pos_frame(name: str | None) -> str:
         return _FRAME_ALIASES[name.lower()]
     except KeyError:
         raise ValueError(
-            f"unknown frame {name!r}; one of {', '.join(FRAMES)} "
-            "(or itrf2008/igb14/itrf2014/igb20/itrf2020)"
+            f"unknown frame {name!r}; one of itrf2008, itrf2014, itrf2020 "
+            "(or itrf08/itrf14/itrf20, igb14/igb20)"
         ) from None
+
+
+def frame_name(name: str | None) -> str:
+    """Full user-facing frame name: ``"itrf14"``/``"igb14"`` → ``"itrf2014"``.
+
+    The short keys (``itrf14``) stay inside product ids and file names of the
+    .pos sets, where tssum's 15-character limit leaves no room; figure names,
+    titles, logs and help use this full name.
+    """
+    return FRAMES[pos_frame(name)][1].lower()
 
 
 def pos_product(name: str | None, session: str = DEFAULT_SESSION) -> str:

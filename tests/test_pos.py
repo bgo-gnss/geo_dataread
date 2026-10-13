@@ -312,3 +312,12 @@ def test_junctions_only_for_okadas_products() -> None:
     assert pos.product_junctions("imo.08hr_itrf20") == ()
     assert pos.product_junctions("imo.final_igb20") == ()
     assert pos.product_junctions("xyz.other_thing") is None
+
+
+def test_frame_name_is_the_full_itrf_name():
+    from geo_dataread.pos import frame_name
+
+    assert frame_name("itrf14") == "itrf2014"
+    assert frame_name("igb20") == "itrf2020"
+    assert frame_name("imo.24hr_itrf08") == "itrf2008"
+    assert frame_name("itrf2014") == "itrf2014"
