@@ -323,9 +323,9 @@ def pos_local(
     s: PosSeries,
     ref: ReferenceMode | npt.ArrayLike = "wmean",
     *,
-    junctions: Sequence[JunctionOffset]
-    | Mapping[str, Sequence[JunctionOffset]]
-    | None = None,
+    junctions: (
+        Sequence[JunctionOffset] | Mapping[str, Sequence[JunctionOffset]] | None
+    ) = None,
     convention: local.Convention = "geodetic",
     coord_file: str | Path | None = None,
 ) -> tuple[local.Local, FloatArray | None]:
@@ -498,7 +498,7 @@ def write_pos(
         f"Last Epoch    : {stamp[-1][0]} {stamp[-1][1]}",
         f"Release Date  : {released:%Y%m%d %H%M%S}",
         f"XYZ Reference position : {ref[0]:15.5f}{ref[1]:15.5f}{ref[2]:15.5f} ({frame})",
-        f"NEU Reference position : {deg(g0.lat):16.10f}{deg(g0.lon) % 360:15.10f}{g0.h:10.5f} ({frame}/WGS84)",
+        f"NEU Reference position : {deg(g0.lat):16.10f}{deg(g0.lon) % 360:16.10f}{g0.h:11.5f} ({frame}/WGS84)",
         _FIELDS,
     ]
     rows = []
