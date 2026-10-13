@@ -49,7 +49,7 @@ geo_dataread/
 │   ├── globk_apr.py      # GLOBK .apr (pos+vel+epoch, EXTENDED EXP/LOG post-seismic in NEU) + eq rename (8-char chains, 4-char code, _XCL) readers → apriori_xyz(codes, epoch) (numpy only)
 │   ├── realign.py        # gps-realign: loose archive → stabilize per day in itrf2008 (glorg frame, reproduces tssum .pos) or igb14 (GAMIT tables apr/eq), optional --to itrf2020 (EPSG Helmert w/ cov) → per-station .pos + days.csv
 │   ├── org.py            # glorg .org reader: read_org_positions (final XYZ/adj/σ), read_org_setup (use_site codes + pos_org/stab_ite/cnd_hgtv → StabilizeConfig), match_sinex_rows (code + nearest apriori; _GPS/_nPS suffix ≠ SINEX soln) (numpy only)
-│   ├── pos.py            # numpy-only PBO .pos reader (tssum output, okada /D/SNX/pos): PosSeries (XYZ/NEU + σ + correlations, GLOBK yearf); openGlobkTimes(tType="POS") reads it in place of mb_ files
+│   ├── pos.py            # numpy-only PBO .pos reader (tssum output, okada /D/SNX/pos): PosSeries (XYZ/NEU + σ + correlations, GLOBK yearf); openGlobkTimes(tType="POS") reads it in place of mb_ files; POS_PRODUCTS = imo.daily_itr08 (okada) / imo.daily_igb14 (realign) / imo.final_igb20 (gamit-p01 finals, alias igb20 = itrf2020)
 │   ├── station_catalog.py # platefile/coordFile lookups + plate_velocity_neu (N,E,U via geofunc.plates; replaces gf.plateVelo's E,N,U + the swap in _remove_plate_velocity) (typed)
 │   ├── gps_write.py      # cleaned .NEU writer: gamittoNEU→gamittoFile, union-drop + .prov.json sidecar; steps.csv→step_epochs + protect_windows.csv (unrest lever) + outlier_overrides.csv (per-station levers incl. per-component min_outlier floor [N,E,U]); degrade → _cleaned.DEGRADED.NEU (typed, mypy-strict)
 │   ├── gps_displ.py      # displacements / station-relative motion
@@ -145,7 +145,7 @@ gps-estimate-detrend ... # entry: geo_dataread.detrend_estimate:main — batch d
 
 ---
 
-*Last reviewed: 2026-10-12 (stabilize/org: glorg stabilization on the loose SINEX; station_catalog: plate velocity via geofunc.plates). Previous 2026-10-10 (pos.py: .pos reader + tType="POS"; write_pos 2026-10-12). Previous 2026-10-09 (baseline_noise + sinex modules; baseline() opt-in rho=/sigma_scale=). Previous 2026-08-26 (re-anchoring now covers BOTH hold kinds:
+*Last reviewed: 2026-10-13 (pos: products = itr08/igb14/final_igb20; itrf2020 now names gamit-p01's IGb20). Previous 2026-10-12 (stabilize/org: glorg stabilization on the loose SINEX; station_catalog: plate velocity via geofunc.plates). Previous 2026-10-10 (pos.py: .pos reader + tType="POS"; write_pos 2026-10-12). Previous 2026-10-09 (baseline_noise + sinex modules; baseline() opt-in rho=/sigma_scale=). Previous 2026-08-26 (re-anchoring now covers BOTH hold kinds:
 `donor:` (a finished record in detrend_params.json) carried the donor's datum
 exactly as `store:` did — measured, THOB holding SENG via donor: sat
 +75.3/-34.3/-124.6 mm off its own data and ignored --anchor-window entirely.

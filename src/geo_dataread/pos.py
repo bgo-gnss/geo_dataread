@@ -82,14 +82,25 @@ DEFAULT_PROD_ID = "imo.daily_itr08"
 #: :func:`pos_path` falls back to it when looking for the default id
 LEGACY_PROD_ID = "imo.final_itr08"
 
-#: product id → (frame label, plate-motion-model frame). ``imo.daily_itr08`` is
-#: tssum's set from the okada archive; the other two come from ``gps-realign``
-#: (laptop only), all side by side in ``pos_dir``.
+#: product id → (frame label, plate-motion-model frame), side by side in ``pos_dir``:
+#: ``imo.daily_itr08`` is tssum's set from the okada archive (1995 →);
+#: ``imo.daily_igb14`` the same archive re-aligned to IGb14 by ``gps-realign``
+#: (laptop); ``imo.final_igb20`` tssum's set from the daily SINEX combined from
+#: gamit-p01's IGS20-processed final h-files (2017 →, laptop). IGb20 is the IGS's
+#: GNSS realization of ITRF2020, so that is the ITRF2020 product.
 POS_PRODUCTS: dict[str, tuple[str, str]] = {
     "imo.daily_itr08": ("ITRF2008", "ITRF2008"),
     "imo.daily_igb14": ("IGb14", "ITRF2014"),
-    "imo.daily_itrf2020": ("ITRF2020", "ITRF2020"),
-    "imo.daily_igb20": ("IGb20 (experimental)", "ITRF2020"),
+    "imo.final_igb20": ("IGb20 (ITRF2020)", "ITRF2020"),
+}
+#: short names → product id (any other short name ``x`` is ``imo.daily_x``)
+_ALIASES = {
+    "itr08": "imo.daily_itr08",
+    "itrf2008": "imo.daily_itr08",
+    "igb14": "imo.daily_igb14",
+    "itrf2014": "imo.daily_igb14",
+    "igb20": "imo.final_igb20",
+    "itrf2020": "imo.final_igb20",
 }
 
 
@@ -97,15 +108,14 @@ def pos_product(name: str | None) -> str:
     """Full product id from a short name: ``"igb14"`` → ``"imo.daily_igb14"``.
 
     ``None`` is the default product. Accepts ``itr08``/``itrf2008``,
-    ``igb14``/``itrf2014``, ``itrf2020`` (IGb14 + EPSG Helmert) and ``igb20``,
-    or any full id (containing a dot).
+    ``igb14``/``itrf2014`` and ``igb20``/``itrf2020`` (gamit-p01's IGb20), or
+    any full id (containing a dot).
     """
     if name is None:
         return DEFAULT_PROD_ID
     if "." in name:
         return name
-    alias = {"itrf2008": "itr08", "itrf2014": "igb14"}.get(name.lower(), name.lower())
-    return f"imo.daily_{alias}"
+    return _ALIASES.get(name.lower(), f"imo.daily_{name.lower()}")
 
 
 #: how :func:`pos_local` picks the reference position: a station a-priori

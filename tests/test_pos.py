@@ -216,7 +216,7 @@ def test_getData_pos_reference_stays_zero(tmp_path: Path) -> None:
 def test_pos_product_names() -> None:
     assert pos.pos_product(None) == pos.DEFAULT_PROD_ID == "imo.daily_itr08"
     assert pos.pos_product("igb14") == pos.pos_product("ITRF2014") == "imo.daily_igb14"
-    assert pos.pos_product("itrf2020") == "imo.daily_itrf2020"
+    assert pos.pos_product("itrf2020") == pos.pos_product("IGb20") == "imo.final_igb20"
     assert pos.pos_product("itrf2008") == "imo.daily_itr08"
     assert pos.pos_product("xyz.final_foo") == "xyz.final_foo"
     assert {

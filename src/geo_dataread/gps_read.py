@@ -714,7 +714,7 @@ def openGlobkTimes(
         convention: POS only — ``"geodetic"`` (default, true local level)
             or ``"globk"`` (glorg ``Loc.``, the convention of the TOT files).
         pos_id: POS only — which product in ``Dir``: ``None`` (the default
-            ``imo.daily_itr08``), a short name (``"igb14"``, ``"itrf2020"``)
+            ``imo.daily_itr08``), a short name (``"igb14"``, ``"igb20"``)
             or a full id (:func:`geo_dataread.pos.pos_product`).
 
     returns:
@@ -1701,7 +1701,7 @@ def getData(
             the first samples).
         convention: tType="POS" only — "geodetic" or "globk".
         pos_id: tType="POS" only — product in Dir (default imo.daily_itr08;
-            "igb14", "itrf2020" or a full id). Plate removal then uses that
+            "igb14", "igb20"/"itrf2020" or a full id). Plate removal then uses that
             frame's plate-motion model (ITRF2008 / ITRF2014 / ITRF2020).
 
     Returns:
