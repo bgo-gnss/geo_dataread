@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import datetime
+import re
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 from geo_dataread import org, pos, realign, sinex, stabilize
 
@@ -37,6 +39,24 @@ def test_write_pos_reproduces_a_tssum_file(tmp_path: Path) -> None:
     np.testing.assert_allclose(got.sneu, src.sneu, atol=2e-5)
     np.testing.assert_allclose(got.ref_xyz, src.ref_xyz, atol=6e-6)
     assert got.header["Format Version"] == "1.1.1"
+    # the reference lines have tssum's layout, column for column (the NEU
+    # reference's last digits differ: tssum takes it from another epoch)
+    for key in ("XYZ Reference position", "NEU Reference position"):
+        want = next(ln for ln in AKUR.read_text().splitlines() if ln.startswith(key))
+        line = next(ln for ln in out.read_text().splitlines() if ln.startswith(key))
+        assert re.sub(r"\d", "0", line) == re.sub(r"\d", "0", want)
+
+
+def test_write_pos_reference_height_over_1000_m(tmp_path: Path) -> None:
+    # AMC2 (1911 m): a 10-wide height ran into the longitude, unreadable
+    x = np.array([[-1248596.38009, -4819428.20400, 3976505.92963]])
+    t = np.array(["2025-01-01T12:00"], dtype="datetime64[m]")
+    c = np.eye(3)[None] * 1e-6
+    got = pos.read_pos(
+        pos.write_pos(tmp_path / "A.pos", "AMC2", t, x, c, frame="IGb20")
+    )
+    assert got.ref_llh[2] == pytest.approx(1911.384, abs=1e-3)
+    assert got.ref_llh[1] == pytest.approx(255.4754, abs=1e-4)
 
 
 def test_write_pos_truncates_to_the_minute_and_sorts(tmp_path: Path) -> None:
