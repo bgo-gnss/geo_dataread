@@ -155,7 +155,7 @@ def test_main_update_and_rejected_days(tmp_path: Path) -> None:
     day = ["--start", "2014-05-30", "--end", "2014-05-30", "--archive", str(arch)]
     common = [*day, "--frame", "itrf2008", "--out", str(out), "-j", "1"]
     assert realign.main([*common, "--stations", "REYK", "HOFN"]) == 0
-    reyk = out / "REYK.imo.daily_itrf2008.pos"
+    reyk = out / "REYK.imo.realign_itrf2008.pos"
     assert pos.read_pos(reyk).xyz.shape == (1, 3)
     # an older day kept in the file is not touched by an update of 2014-05-30
     old = pos.read_pos(reyk)
@@ -176,8 +176,8 @@ def test_main_update_and_rejected_days(tmp_path: Path) -> None:
     # the day rejected: its rows go, HOFN (only that day) disappears
     assert realign.main([*common, "--update", "--min-ref", "999"]) == 0
     assert [str(e)[:10] for e in pos.read_pos(reyk).epochs] == ["2014-05-29"]
-    assert not (out / "HOFN.imo.daily_itrf2008.pos").exists()
-    log = (out / "days.imo.daily_itrf2008.csv").read_text().splitlines()
+    assert not (out / "HOFN.imo.realign_itrf2008.pos").exists()
+    log = (out / "days.imo.realign_itrf2008.csv").read_text().splitlines()
     assert len(log) == 2 and "rejected: 49 reference site(s), need 999" in log[1]
 
 

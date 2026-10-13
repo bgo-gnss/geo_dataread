@@ -71,12 +71,20 @@ def test_pos_path_prefers_new_id_then_legacy(tmp_path: Path) -> None:
     legacy = tmp_path / f"AKUR.{pos.LEGACY_PROD_ID}.pos"
     shutil.copy(FIX / "AKUR.imo.final_itr08.pos", legacy)
     assert pos.pos_path("akur", tmp_path) == legacy
+    okada = tmp_path / "AKUR.imo.daily_itr08.pos"  # okada's cron still writes it
+    shutil.copy(legacy, okada)
+    assert pos.pos_path("AKUR", tmp_path) == okada
     new = tmp_path / f"AKUR.{pos.DEFAULT_PROD_ID}.pos"
     shutil.copy(legacy, new)
     assert pos.pos_path("AKUR", tmp_path) == new
-    # an explicit id gets no fallback
+    # the laptop's sets under their earlier names, asked for by old or new id
+    igb14 = tmp_path / "AKUR.imo.daily_igb14.pos"
+    shutil.copy(legacy, igb14)
+    assert pos.pos_path("AKUR", tmp_path, prod_id="imo.24hr_itrf14") == igb14
+    assert pos.pos_path("AKUR", tmp_path, prod_id="imo.daily_igb14") == igb14
+    # an id with no earlier names gets no fallback
     with pytest.raises(FileNotFoundError):
-        pos.pos_path("AKUR", tmp_path, prod_id="imo.rapid_itr08")
+        pos.pos_path("AKUR", tmp_path, prod_id="imo.08hr_itrf20")
 
 
 def test_openGlobkTimes_pos_scheme() -> None:
@@ -214,11 +222,20 @@ def test_getData_pos_reference_stays_zero(tmp_path: Path) -> None:
 
 
 def test_pos_product_names() -> None:
-    assert pos.pos_product(None) == pos.DEFAULT_PROD_ID == "imo.daily_itr08"
-    assert pos.pos_product("igb14") == pos.pos_product("ITRF2014") == "imo.daily_igb14"
-    assert pos.pos_product("itrf2020") == pos.pos_product("IGb20") == "imo.final_igb20"
-    assert pos.pos_product("itrf2008") == "imo.daily_itr08"
+    assert pos.pos_product(None) == pos.DEFAULT_PROD_ID == "imo.24hr_itrf08"
+    assert pos.pos_product("igb14") == pos.pos_product("ITRF2014") == "imo.24hr_itrf14"
+    assert pos.pos_product("itrf14") == "imo.24hr_itrf14"
+    assert pos.pos_product("itrf2020") == pos.pos_product("IGb20") == "imo.24hr_itrf20"
+    assert pos.pos_product("itrf20", session="8h") == "imo.08hr_itrf20"
+    assert pos.pos_product("itrf2008") == pos.pos_product("itr08") == "imo.24hr_itrf08"
+    # earlier ids map to the new ones; any other full id passes through
+    assert pos.pos_product("imo.daily_igb14") == "imo.24hr_itrf14"
+    assert pos.pos_product("imo.final_igb20") == "imo.24hr_itrf20"
     assert pos.pos_product("xyz.final_foo") == "xyz.final_foo"
+    assert pos.pos_frame("imo.daily_itr08") == "itrf08"
+    assert pos.pos_frame("imo.08hr_itrf20") == "itrf20"
+    with pytest.raises(ValueError, match="unknown frame"):
+        pos.pos_product("wgs84")
     assert {
         pos.POS_PRODUCTS[pos.pos_product(n)][1] for n in ("itr08", "igb14", "itrf2020")
     } == {
@@ -226,6 +243,18 @@ def test_pos_product_names() -> None:
         "ITRF2014",
         "ITRF2020",
     }
+
+
+def test_tssum_id_and_width() -> None:
+    # tssum keeps 15 characters for the file name and reads chars 17-21 as
+    # the solution type it writes in the last column
+    for f in pos.FRAMES:
+        for sess in pos.SESSIONS:
+            assert len(pos.product_id(f, sess)) == 15
+    assert pos.tssum_id("imo.24hr_itrf14") == "imo.24hr_itrf14+24hrs"
+    assert pos.tssum_id("imo.08hr_itrf20") == "imo.08hr_itrf20+08hrs"
+    with pytest.raises(ValueError, match="15 characters"):
+        pos.tssum_id("imo.24hrs_itrf14")
 
 
 def test_openGlobkTimes_picks_the_product(tmp_path: Path) -> None:

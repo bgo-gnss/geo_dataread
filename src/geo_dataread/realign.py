@@ -28,8 +28,10 @@ ITRF2014→ITRF2020 at its epoch (geofunc.frames). Output: one PBO ``.pos``
 per station (:func:`geo_dataread.pos.write_pos`) and ``days.<prod-id>.csv``
 with one line per day (reference sites used/dropped, post-fit RMS,
 parameters). File names carry the product id, so the frames can share one
-directory with tssum's ``imo.daily_itr08`` set (``update_pos.sh`` leaves
-other product ids alone).
+directory with tssum's ``imo.24hr_itrf08`` / ``imo.24hr_itrf20`` sets
+(``update_pos.sh`` leaves other product ids alone): ``--frame igb14`` writes
+the ITRF2014 product ``imo.24hr_itrf14``, the other choices write
+``imo.realign_<frame>`` unless ``--prod-id`` is given.
 
 A day with fewer than ``--min-ref`` (3) usable reference sites is not
 written: one or two sites only fix translations, and on the days without
@@ -233,7 +235,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     ap.add_argument("--archive", type=Path, default=DEFAULT_ARCHIVE)
     ap.add_argument("--tables", type=Path, default=GAMIT_TABLES)
     ap.add_argument("--out", type=Path, required=True)
-    ap.add_argument("--prod-id", help="default imo.daily_<frame>")
+    ap.add_argument(
+        "--prod-id",
+        help="default imo.24hr_itrf14 for --frame igb14 (the ITRF2014 .pos "
+        "product), else imo.realign_<frame> (experiments, kept apart from the "
+        "itrf08/itrf20 products)",
+    )
     ap.add_argument("--stations", nargs="*", help="write only these codes")
     ap.add_argument(
         "--min-ref",
@@ -256,7 +263,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         print("no archived days in range", file=sys.stderr)
         return 1
     label = "ITRF2020 (IGb14 + EPSG Helmert)" if a.to else LABELS[a.frame]
-    prod = a.prod_id or f"imo.daily_{a.to or a.frame}"
+    if a.prod_id:
+        prod = a.prod_id
+    elif a.frame == "igb14" and not a.to:
+        prod = pos.product_id("itrf14")
+    else:
+        prod = f"imo.realign_{a.to or a.frame}"
     keep = {s.upper() for s in a.stations} if a.stations else None
 
     series: dict[str, list[tuple[datetime.datetime, FloatArray, FloatArray]]] = {}
@@ -291,6 +303,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             np.array([r[2] for r in rows]),
             frame=label,
             ref_xyz=None if old is None else old.ref_xyz,
+            soln="24hrs",
         )
         if old is not None:
             pos.merge_pos(target, out, sorted(redone))

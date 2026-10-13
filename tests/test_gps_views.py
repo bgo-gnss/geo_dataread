@@ -427,6 +427,45 @@ def test_frame_mismatch_is_a_hard_error(view_env, seng_record, tmp_path):
         )
 
 
+def test_series_frame_tags_each_reference_frame():
+    # ITRF2008 (TOT) keeps the original tag, so the deployed records still apply
+    assert gps_views.series_frame() == gps_views.PLATE_REMOVED_FRAME
+    assert gps_views.series_frame("itrf2008") == "plate_removed"
+    assert gps_views.series_frame("igb14") == "plate_removed@itrf14"
+    assert gps_views.series_frame("imo.24hr_itrf20") == "plate_removed@itrf20"
+    assert gps_views.series_frame("imo.08hr_itrf20") == "plate_removed@itrf20"
+
+
+def test_params_path_for_frame():
+    p = Path("/cfg/detrend_params.json")
+    assert gps_views.params_path_for_frame(p) == p
+    assert gps_views.params_path_for_frame(p, "itrf08") == p
+    assert gps_views.params_path_for_frame(p, "igb14") == Path(
+        "/cfg/detrend_params.itrf14.json"
+    )
+    assert gps_views.params_path_for_frame(p, "itrf20") == Path(
+        "/cfg/detrend_params.itrf20.json"
+    )
+
+
+def test_tot_record_refused_on_another_frame(view_env, seng_record, tmp_path):
+    # an ITRF2008 (TOT) record must not detrend an itrf14 series; the default
+    # frame of a TOT read is ITRF2008, so the same record still applies there
+    path = tmp_path / "itrf08.json"
+    rec = dict(seng_record, frame=gps_views.PLATE_REMOVED_FRAME)
+    path.write_text(json.dumps({"schema_version": 1, "stations": {"SENG": rec}}))
+    df = gps_views.read_gps_view("SENG", view="detrended", params=path, Dir=TOT)
+    assert df.attrs["gps_view"]["frame"] == "plate_removed"
+    with pytest.raises(ValueError, match="frame mismatch"):
+        gps_views.read_gps_view(
+            "SENG",
+            view="detrended",
+            params=path,
+            frame=gps_views.series_frame("itrf14"),
+            Dir=TOT,
+        )
+
+
 # ---------------------------------------------------------------------------
 # document reader validation
 # ---------------------------------------------------------------------------

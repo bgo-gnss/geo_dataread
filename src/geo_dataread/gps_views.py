@@ -68,6 +68,26 @@ record, and the ``ref="detrend"`` read paths pass it to
 dead code — a record tagged for any other frame was applied silently.
 """
 
+
+def series_frame(frame: str | None = None) -> str:
+    """Frame tag of a plate-removed series in reference frame ``frame``.
+
+    Detrend parameters belong to one reference frame (and its plate-motion
+    model): the TOT/ITRF2008 records keep the original tag
+    :data:`PLATE_REMOVED_FRAME`, the other ``.pos`` frames are tagged
+    ``plate_removed@<frame>`` (``itrf14``, ``itrf20``), so the §2.5 guard
+    refuses a record fitted in one frame on a series of another.
+
+    Args:
+        frame: ``itrf08`` (default, TOT and okada's ``.pos``), ``itrf14``,
+            ``itrf20`` or an alias (:func:`geo_dataread.pos.pos_frame`).
+    """
+    from geo_dataread.pos import pos_frame
+
+    key = pos_frame(frame)
+    return PLATE_REMOVED_FRAME if key == "itrf08" else f"{PLATE_REMOVED_FRAME}@{key}"
+
+
 VIEWS = ("raw", "cleaned", "detrended")
 """Valid values of the first-class ``view`` toggle."""
 
@@ -103,7 +123,7 @@ _COMPONENTS = ("north", "east", "up")
 # ---------------------------------------------------------------------------
 
 
-def default_params_path() -> Path | None:
+def default_params_path(frame: str | None = None) -> Path | None:
     """Resolve the deployed ``detrend_params.json`` path via gps_parser.
 
     Resolution order (design §3.3 wiring key):
@@ -111,6 +131,9 @@ def default_params_path() -> Path | None:
     1. ``postprocess.cfg`` ``[FILES] detrend_params`` (resolved against
        the gpsconfig dir by :meth:`gps_parser.ConfigParser.getPostProcessConfig`);
     2. ``<gpsconfig dir>/detrend_params.json`` (the deploy target default).
+
+    That is the ITRF2008 (TOT) document. Another reference frame has its own,
+    next to it: ``detrend_params.<frame>.json`` (``itrf14``, ``itrf20``).
 
     Returns:
         The resolved path (which may not exist yet — deployment of the
@@ -123,13 +146,27 @@ def default_params_path() -> Path | None:
         logger.warning("no gpsconfig available; cannot resolve %s", PARAMS_FILENAME)
         return None
     try:
-        return Path(str(config.getPostProcessConfig("detrend_params")))
+        path = Path(str(config.getPostProcessConfig("detrend_params")))
     except Exception:
         # additive key not deployed yet - fall back to the gpsconfig dir
         config_path = getattr(config, "config_path", None)
-        if config_path:
-            return Path(str(config_path)) / PARAMS_FILENAME
-        return None
+        if not config_path:
+            return None
+        path = Path(str(config_path)) / PARAMS_FILENAME
+    return params_path_for_frame(path, frame)
+
+
+def params_path_for_frame(path: str | Path, frame: str | None = None) -> Path:
+    """The parameter document of ``frame`` next to the ITRF2008 one at ``path``.
+
+    ``detrend_params.json`` → ``detrend_params.itrf14.json`` for ``itrf14``;
+    ``itrf08``/None leave ``path`` as it is.
+    """
+    from geo_dataread.pos import pos_frame
+
+    p = Path(path)
+    key = pos_frame(frame)
+    return p if key == "itrf08" else p.with_name(f"{p.stem}.{key}{p.suffix}")
 
 
 def read_detrend_params(path: str | Path | None = None) -> dict[str, Any]:
@@ -1071,10 +1108,12 @@ def detect_view_outliers(
     # slice stays independently mergeable.
     comp_abort = np.atleast_1d(
         np.asarray(
-            getattr(detection, "component_abort", None)
-            if getattr(detection, "component_abort", None) is not None
-            and np.size(getattr(detection, "component_abort")) > 0
-            else np.full(y2d.shape[0], bool(detection.excess_flag_abort)),
+            (
+                getattr(detection, "component_abort", None)
+                if getattr(detection, "component_abort", None) is not None
+                and np.size(getattr(detection, "component_abort")) > 0
+                else np.full(y2d.shape[0], bool(detection.excess_flag_abort))
+            ),
             dtype=np.bool_,
         )
     )
@@ -1429,6 +1468,7 @@ def read_gps_view(
     Dir: str | None = None,
     tType: str = "TOT",
     uncert: float = 15,
+    pos_id: str | None = None,
 ) -> pd.DataFrame:
     """Read one station's GPS series in a chosen view (the toggle).
 
@@ -1510,10 +1550,16 @@ def read_gps_view(
             flagging, these force flagging of known-bad points the
             detector would otherwise protect. A missing / unreadable
             catalog degrades gracefully (warn + no exclusions).
-        frame: Series frame tag for the record integrity check.
+        frame: Series frame tag for the record integrity check. Default:
+            the tag of the series' reference frame (:func:`series_frame` —
+            ITRF2008 for TOT, the ``pos_id`` product's frame for POS), so a
+            record fitted in another frame is refused.
         Dir: Series directory override (as :func:`gps_read.getData`).
         tType: GLOBK scheme (as :func:`gps_read.getData`).
         uncert: Maximum formal uncertainty kept [mm] (as ``getData``).
+        pos_id: ``tType="POS"`` only — the ``.pos`` product (frame), as
+            :func:`gps_read.getData`. ``params`` then defaults to that
+            frame's document (:func:`default_params_path`).
 
     Returns:
         DataFrame indexed by datetime with the legacy columns
@@ -1540,6 +1586,12 @@ def read_gps_view(
             "plate-removed processing frame (design §0.5, plate-first)"
         )
 
+    ref_frame = pos_id if tType == "POS" else None
+    if frame is None:
+        frame = series_frame(ref_frame)
+    if params is None and series_frame(ref_frame) != PLATE_REMOVED_FRAME:
+        params = default_params_path(ref_frame)
+
     yearf, data, Ddata, _offset = gps_read.getData(  # type: ignore[no-untyped-call]
         sta,
         fstart=_to_yearf(start),
@@ -1548,13 +1600,12 @@ def read_gps_view(
         Dir=Dir,
         tType=tType,
         uncert=uncert,
+        **({"pos_id": pos_id} if pos_id is not None else {}),
     )
     if yearf is None or len(yearf) == 0:
         raise ValueError(f"no data for station {sta}")
 
-    df = gps_read.convGlobktopandas(  # type: ignore[no-untyped-call]
-        yearf, data, Ddata
-    )
+    df = gps_read.convGlobktopandas(yearf, data, Ddata)  # type: ignore[no-untyped-call]
 
     attrs: dict[str, Any] = {
         "station": sta,
