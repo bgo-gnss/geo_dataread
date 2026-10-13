@@ -1259,6 +1259,61 @@ def compare_with_prior(
     return {"d_rate": d_rate, "d_annual_amp": d_annual}
 
 
+def prior_window(
+    settings: StationFitSettings, prior: Mapping[str, Any] | None
+) -> StationFitSettings:
+    """Take the prior-frame record's fit window when the catalog has none.
+
+    A window chosen in ``gps-detrend-workbench`` (``window_source``
+    ``workbench-cli…``) is stored only on the record, not in
+    ``fit_windows.csv``, so a re-fit in another frame would otherwise fall
+    back to the whole series (SENG: 2015.48–2019.97 curated, 2015.48–now
+    re-fitted — through the Svartsengi unrest). A catalog window always wins.
+    """
+    if prior is None or settings.window_source != "defaults":
+        return settings
+    src = str((prior.get("refs") or {}).get("window_source") or "")
+    win = prior.get("window")
+    if not src.startswith("workbench-cli") or not win or len(win) != 2:
+        return settings
+    return dataclasses.replace(
+        settings,
+        segments=((float(win[0]), float(win[1])),),
+        window_source=f"prior-frame record ({src})",
+    )
+
+
+def prior_rate_report(d_rates: Mapping[str, Sequence[float]]) -> list[str]:
+    """Summary of rate differences from the prior frame, and the outliers.
+
+    The plate-motion models of two ITRFs differ, so every station's rate
+    shifts by about the same amount (ITRF2014 − ITRF2008 ≈ −1 mm/yr N around
+    Iceland). That network median is reported, and a station is warned about
+    only when it departs from it by more than :data:`PRIOR_RATE_WARN`.
+    """
+    if not d_rates:
+        return []
+    a = np.array(list(d_rates.values()), dtype=np.float64)
+    med = np.median(a, axis=0)
+    out = [
+        "prior: rate difference from the prior frame, network median "
+        + " ".join(f"{c} {m:+.2f}" for c, m in zip("NEU", med))
+        + f" mm/yr over {len(a)} station(s)"
+    ]
+    for sta, d in sorted(d_rates.items()):
+        big = [
+            f"{c} {x - m:+.2f}"
+            for c, x, m, lim in zip("NEU", d, med, PRIOR_RATE_WARN)
+            if abs(x - m) > lim
+        ]
+        if big:
+            out.append(
+                f"warning: {sta}: rate differs from the prior frame by "
+                f"{', '.join(big)} mm/yr beyond the network median"
+            )
+    return out
+
+
 def prior_fallback(
     sta: str,
     prior: Mapping[str, Any],
@@ -1771,7 +1826,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             from gps_parser import ConfigParser
 
             args.pos_dir = str(
-                Path(str(ConfigParser().getPostProcessConfig("pos_dir"))).expanduser()
+                Path(str(ConfigParser().getPostProcessDir("pos_dir"))).expanduser()
             )
         if args.out is None:
             args.out = params_path_for_frame(Path("detrend_params.json"), pos_frame)
@@ -1804,12 +1859,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
 
     records: dict[str, dict[str, Any]] = {}
+    d_rates: dict[str, list[float]] = {}
     n_errors = 0
     for station in args.stations:
         sta = station.upper()
         settings = resolve_fit_settings(
             sta, catalog, defaults, catalog_source=catalog_source
         )
+        settings = prior_window(settings, prior_doc.get(sta))
         entry = station_models.get(sta)
         result = estimate_station(
             sta,
@@ -1867,17 +1924,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "frame": prior.get("frame"),
                     **cmp_,
                 }
-                big = [
-                    f"{c} {d:+.2f}"
-                    for c, d, lim in zip("NEU", cmp_["d_rate"], PRIOR_RATE_WARN)
-                    if abs(d) > lim
-                ]
-                if big:
-                    print(
-                        f"warning: {sta}: rate differs from the prior frame by "
-                        f"{', '.join(big)} mm/yr",
-                        file=sys.stderr,
-                    )
+                d_rates[sta] = cmp_["d_rate"]
         if result.status == "error":
             n_errors += 1
         elif result.record is not None:
@@ -1887,6 +1934,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             # only witness — the new value is still used.
             for msg in _donor_drift(sta, result.record, args.donor_params):
                 print(f"warning: {msg}", file=sys.stderr)
+
+    for msg in prior_rate_report(d_rates):
+        print(msg, file=sys.stderr if msg.startswith("warning") else sys.stdout)
 
     doc = build_document(records, frame=frame_tag, generated_at=stamp)
     args.out.parent.mkdir(parents=True, exist_ok=True)

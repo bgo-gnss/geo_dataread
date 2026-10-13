@@ -1009,9 +1009,9 @@ class TestStagePlansReachTheBatch:
         for c, comp in enumerate(run2["components"]):
             donor_params = drifted["stations"]["OLAC"]["components"][c]["params"]
             assert comp["params"][1] == donor_params[1], "donor rate did not propagate"
-            assert comp["params"][0] != donor_params[0], (
-                "the donor's datum crossed into the borrower"
-            )
+            assert (
+                comp["params"][0] != donor_params[0]
+            ), "the donor's datum crossed into the borrower"
 
         # and once run 2's record is deployed, an unchanged donor is silent
         drifted["stations"]["DYNG"] = run2
@@ -1298,3 +1298,27 @@ class TestFrames:
         # detrending this frame's series with it leaves it flat
         flat = apply_detrend(rec, t, y)
         assert np.abs(np.median(flat, axis=1)).max() < 0.2
+
+    def test_prior_window_only_for_workbench_windows(self) -> None:
+        prior = {
+            "window": [2015.5, 2019.9],
+            "refs": {"window_source": "workbench-cli(+defaults)"},
+        }
+        got = de.prior_window(_settings(), prior)
+        assert got.segments == ((2015.5, 2019.9),)
+        assert got.window_source.startswith("prior-frame record")
+        # a catalog window wins; a defaults prior window is not a choice
+        cat = _settings(window=(2018.0, None), window_source="fit_windows.csv")
+        assert de.prior_window(cat, prior) is cat
+        plain = {"window": [2015.5, 2026.5], "refs": {"window_source": "defaults"}}
+        assert de.prior_window(_settings(), plain).segments == ((None, None),)
+        assert de.prior_window(_settings(), None).segments == ((None, None),)
+
+    def test_prior_rate_report_is_relative_to_the_network(self) -> None:
+        d = {"A": [-1.0, -0.3, 0.2], "B": [-0.9, -0.4, 0.3], "C": [-1.1, 2.0, 0.1]}
+        msgs = de.prior_rate_report(d)
+        assert "network median N -1.00 E -0.30 U +0.20" in msgs[0]
+        assert (
+            len(msgs) == 2 and msgs[1].startswith("warning: C") and "E +2.30" in msgs[1]
+        )
+        assert de.prior_rate_report({}) == []
