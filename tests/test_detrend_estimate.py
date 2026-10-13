@@ -1209,3 +1209,92 @@ class TestPerStationModelsReachTheBatch:
         _out, extra = self._env(tmp_path, monkeypatch)
         cfg = self._yaml(tmp_path, {"DYNG": {"terms": ["log@2021.0"]}})
         assert main(["DYNG", *self._swap(extra, cfg)]) == 2
+
+
+# ---------------------------------------------------------------------------
+# Reference frames: .pos series, the prior-frame comparison and fallback
+# ---------------------------------------------------------------------------
+
+
+class TestFrames:
+    def _record(self, tmp_path: Path, **kw: Any) -> dict[str, Any]:
+        t, y, sigma = _synthetic_series(**kw)
+        rec = station_record_from_arrays(
+            "DYNG",
+            t,
+            y,
+            sigma,
+            settings=_settings(),
+            protect_windows=(),
+            outlier_overrides=_empty_overrides(tmp_path),
+        )
+        assert rec is not None
+        return rec
+
+    def test_pos_frame_reads_pos_and_tags_record(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        seen: dict[str, Any] = {}
+        t, y, sigma = _synthetic_series()
+
+        def fake(sta: str, **kw: Any) -> tuple[Any, Any, Any, Any]:
+            seen.update(kw)
+            return t, y, sigma, 0.0
+
+        monkeypatch.setattr(gps_read, "getData", fake)
+        res = estimate_station(
+            "DYNG",
+            settings=_settings(),
+            protect_windows=tmp_path / "no_protect.csv",
+            outlier_overrides=_empty_overrides(tmp_path),
+            pos_frame="igb14",
+            pos_dir=str(tmp_path),
+        )
+        assert res.status == "estimated" and res.record is not None
+        assert seen["tType"] == "POS" and seen["pos_id"] == "imo.24hr_itrf14"
+        assert seen["ref"] == "plate" and seen["Dir"] == str(tmp_path)
+        assert res.record["frame"] == "plate_removed@itrf14"
+        assert res.record["refs"]["data"] == ".pos imo.24hr_itrf14"
+
+    def test_compare_with_prior(self, tmp_path: Path) -> None:
+        a = self._record(tmp_path)
+        b = self._record(tmp_path, seed=8)
+        cmp_ = de.compare_with_prior(a, b)
+        assert cmp_ is not None
+        # the same signal fitted twice: rates and annual amplitudes agree
+        np.testing.assert_allclose(cmp_["d_rate"], 0.0, atol=0.1)
+        np.testing.assert_allclose(cmp_["d_annual_amp"], 0.0, atol=0.2)
+        b2 = json.loads(json.dumps(b))
+        b2["components"][2]["params"][b2["param_names"].index("rate")] += 3.0
+        assert de.compare_with_prior(a, b2)["d_rate"][2] == pytest.approx(
+            cmp_["d_rate"][2] - 3.0
+        )
+        assert de.compare_with_prior(a, {"param_names": ["offset"]}) is None
+
+    def test_prior_fallback_reanchors_and_never_carries_the_datum(
+        self, tmp_path: Path
+    ) -> None:
+        prior = self._record(tmp_path)
+        t, y, sigma = _synthetic_series(seed=9)
+        y = y + np.array([[10.0], [-20.0], [30.0]])  # another frame's datum
+        rec = de.prior_fallback(
+            "DYNG",
+            prior,
+            t,
+            y,
+            sigma,
+            frame="plate_removed@itrf14",
+            source="detrend_params.json",
+            reason="[error] window too short",
+        )
+        assert rec["frame"] == "plate_removed@itrf14"
+        assert rec["borrowed"]["prior_frame"] == prior["frame"]
+        names = rec["param_names"]
+        i0, ir = names.index("offset"), names.index("rate")
+        for c, shift in enumerate((10.0, -20.0, 30.0)):
+            p, q = rec["components"][c]["params"], prior["components"][c]["params"]
+            assert p[ir] == q[ir]  # rate verbatim
+            assert p[i0] - q[i0] == pytest.approx(shift, abs=0.2)  # datum re-anchored
+        # detrending this frame's series with it leaves it flat
+        flat = apply_detrend(rec, t, y)
+        assert np.abs(np.median(flat, axis=1)).max() < 0.2

@@ -1086,8 +1086,15 @@ def estimate_station(
     lookup_donor: Any | None = None,
     lookup_secular: Any | None = None,
     terms: Sequence[str] | None = None,
+    pos_frame: str | None = None,
+    pos_dir: str | None = None,
 ) -> StationResult:
     """Read one station's local plate-removed TOT series and estimate it.
+
+    With ``pos_frame`` (``itrf08``/``itrf14``/``itrf20``) the series is the
+    ``.pos`` product of that frame in ``pos_dir`` instead
+    (``getData(tType="POS")``), and the record is tagged with the frame
+    (:func:`geo_dataread.gps_views.series_frame`) so it applies only there.
 
     The per-station driver step: :func:`geo_dataread.gps_read.getData`
     (``ref="plate"``, ``tType="TOT"``, ``Dir=tot_dir``) then
@@ -1111,11 +1118,9 @@ def estimate_station(
     the batch did not read would let a re-run silently revert a curated
     station to single-stage science.
     """
-    from geo_dataread import gps_read  # deferred: gps_read lazily imports back
-
     try:
-        yearf, data, ddata, _offset = gps_read.getData(  # type: ignore[no-untyped-call]
-            sta, ref="plate", Dir=tot_dir, tType="TOT", uncert=uncert
+        yearf, data, ddata = read_plate_series(
+            sta, tot_dir=tot_dir, uncert=uncert, pos_frame=pos_frame, pos_dir=pos_dir
         )
     except Exception as exc:  # noqa: BLE001 - per-station isolation, reported
         return StationResult(sta, "error", f"read failed: {exc}")
@@ -1123,6 +1128,16 @@ def estimate_station(
         return StationResult(sta, "error", "no data (getData returned empty)")
 
     refs: dict[str, Any] = {"tot_dir": tot_dir, "uncert": uncert}
+    if pos_frame is not None:
+        from geo_dataread.gps_views import series_frame
+        from geo_dataread.pos import pos_product
+
+        frame = series_frame(pos_frame)
+        refs = {
+            "data": f".pos {pos_product(pos_frame)}",
+            "pos_dir": pos_dir,
+            "uncert": uncert,
+        }
     try:
         record = station_record_from_arrays(
             sta,
@@ -1168,6 +1183,121 @@ def estimate_station(
         f"method {record['detrend_method']}"
     )
     return StationResult(sta, "estimated", detail, record=record)
+
+
+def read_plate_series(
+    sta: str,
+    *,
+    tot_dir: str | None = None,
+    uncert: int = UNCERT,
+    pos_frame: str | None = None,
+    pos_dir: str | None = None,
+) -> tuple[Any, Any, Any]:
+    """``(yearf, data, ddata)`` of the plate-removed series the estimator fits.
+
+    TOT (``tot_dir``) by default; with ``pos_frame`` the ``.pos`` product of
+    that frame in ``pos_dir``, plate removal in the frame's plate model.
+    """
+    from geo_dataread import gps_read  # deferred: gps_read lazily imports back
+
+    if pos_frame is None:
+        yearf, data, ddata, _offset = gps_read.getData(  # type: ignore[no-untyped-call]
+            sta, ref="plate", Dir=tot_dir, tType="TOT", uncert=uncert
+        )
+    else:
+        from geo_dataread.pos import pos_product
+
+        yearf, data, ddata, _offset = gps_read.getData(  # type: ignore[no-untyped-call]
+            sta,
+            ref="plate",
+            Dir=pos_dir,
+            tType="POS",
+            uncert=uncert,
+            pos_id=pos_product(pos_frame),
+        )
+    return yearf, data, ddata
+
+
+#: |rate difference| [mm/yr] N, E, U between a record and its prior-frame
+#: record above which the comparison is reported as a warning
+PRIOR_RATE_WARN = (1.0, 1.0, 2.0)
+
+
+def compare_with_prior(
+    record: Mapping[str, Any], prior: Mapping[str, Any]
+) -> dict[str, Any] | None:
+    """Rate and seasonal differences of a record from its prior-frame record.
+
+    Both records are the same station fitted in two reference frames; after
+    each frame's own plate model is removed their rates and seasonals should
+    agree to well under a mm/yr, so a large difference marks a frame or
+    processing problem rather than motion. ``None`` when either record has no
+    ``rate`` (by name) or the components differ.
+    """
+    names, pnames = list(record.get("param_names") or ()), list(
+        prior.get("param_names") or ()
+    )
+    if "rate" not in names or "rate" not in pnames:
+        return None
+    comps, pcomps = record.get("components") or [], prior.get("components") or []
+    if len(comps) != len(pcomps):
+        return None
+
+    def amp(params: Sequence[float], nm: list[str], cos: str, sin: str) -> float:
+        if cos in nm and sin in nm:
+            return float(np.hypot(params[nm.index(cos)], params[nm.index(sin)]))
+        return float("nan")
+
+    d_rate, d_annual = [], []
+    for c, pc in zip(comps, pcomps):
+        p, q = c["params"], pc["params"]
+        d_rate.append(float(p[names.index("rate")] - q[pnames.index("rate")]))
+        d_annual.append(
+            amp(p, names, "cos_annual", "sin_annual")
+            - amp(q, pnames, "cos_annual", "sin_annual")
+        )
+    return {"d_rate": d_rate, "d_annual_amp": d_annual}
+
+
+def prior_fallback(
+    sta: str,
+    prior: Mapping[str, Any],
+    yearf: Any,
+    data: Any,
+    ddata: Any,
+    *,
+    frame: str,
+    source: str,
+    reason: str,
+) -> dict[str, Any]:
+    """A record for ``sta`` in ``frame`` from its record in another frame.
+
+    For a station whose fit in the new frame fails (too short a series, a
+    gate, a donor not yet fitted there): rate, curvature and seasonal terms
+    are the prior frame's verbatim; the datum is NEVER carried across — it is
+    re-anchored on this frame's own series
+    (:func:`gps_analysis.detrend.reanchor_record`, the guard against the
+    2026-09 datum leak), and the prior's step terms are dropped (their sizes
+    depend on the frame's antenna model). ``borrowed`` says so.
+    """
+    from gps_analysis.detrend import reanchor_record
+
+    rec, anchor = reanchor_record(
+        prior,
+        np.asarray(yearf, dtype=np.float64),
+        np.asarray(data, dtype=np.float64),
+        np.asarray(ddata, dtype=np.float64),
+    )
+    rec["frame"] = frame
+    rec["borrowed"] = {
+        "from": sta,
+        "source": source,
+        "prior_frame": prior.get("frame"),
+        "terms": "rate+seasonal (datum re-anchored, steps dropped)",
+        "reason": reason,
+        "anchor": anchor,
+    }
+    return rec
 
 
 def _package_version(dist: str) -> str:
@@ -1467,8 +1597,31 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument(
         "--out",
         type=Path,
-        default=Path("detrend_params.json"),
-        help="output document path (default: ./detrend_params.json)",
+        default=None,
+        help="output document path (default: ./detrend_params.json, or "
+        "./detrend_params.<frame>.json with --frame itrf14/itrf20)",
+    )
+    parser.add_argument(
+        "--frame",
+        default=None,
+        help="fit the .pos series of this reference frame (itrf08, itrf14, "
+        "itrf20 or an alias) instead of TOT; the records are tagged with the "
+        "frame so they apply only to that frame's series",
+    )
+    parser.add_argument(
+        "--pos-dir",
+        default=None,
+        help="--frame: the .pos directory (default: config pos_dir)",
+    )
+    parser.add_argument(
+        "--prior-params",
+        type=Path,
+        default=None,
+        help="the same stations' parameters in ANOTHER frame (e.g. the "
+        "ITRF2008 detrend_params.json): each new record is compared with it "
+        f"(rate differences above {PRIOR_RATE_WARN} mm/yr N/E/U are warned), "
+        "and a station whose fit fails here takes its rate + seasonals from "
+        "it, re-anchored on this frame's series (never its datum)",
     )
     parser.add_argument(
         "--fit-catalog",
@@ -1600,6 +1753,46 @@ def main(argv: Sequence[str] | None = None) -> int:
             f"what was committed.",
             file=sys.stderr,
         )
+    pos_frame = None
+    if args.frame is not None:
+        from geo_dataread.gps_views import (
+            default_params_path,
+            params_path_for_frame,
+            series_frame,
+        )
+        from geo_dataread.pos import pos_frame as _pos_frame
+
+        try:
+            pos_frame = _pos_frame(args.frame)
+        except ValueError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+        if args.pos_dir is None:
+            from gps_parser import ConfigParser
+
+            args.pos_dir = str(
+                Path(str(ConfigParser().getPostProcessConfig("pos_dir"))).expanduser()
+            )
+        if args.out is None:
+            args.out = params_path_for_frame(Path("detrend_params.json"), pos_frame)
+        if args.donor_params is None:
+            # a donor hold borrows within the frame: that frame's document
+            dp = default_params_path(pos_frame)
+            args.donor_params = dp if dp is not None and dp.is_file() else None
+        frame_tag = series_frame(pos_frame)
+        print(
+            f"frame {pos_frame}: .pos from {args.pos_dir}, records tagged {frame_tag!r}"
+        )
+    else:
+        frame_tag = FRAME
+    if args.out is None:
+        args.out = Path("detrend_params.json")
+    prior_doc: dict[str, Any] = {}
+    if args.prior_params is not None:
+        from geo_dataread.gps_views import read_detrend_params
+
+        prior_doc = read_detrend_params(args.prior_params)["stations"]
+        print(f"prior: {len(prior_doc)} station record(s) from {args.prior_params}")
     donor_lookup = _deployed_donor_lookup(args.donor_params)
     defaults = FitDefaults(
         min_span_years=args.min_span_years,
@@ -1634,8 +1827,57 @@ def main(argv: Sequence[str] | None = None) -> int:
             fitted_at=stamp,
             stage_plan=stage_plans.get(sta),
             lookup_donor=donor_lookup,
+            pos_frame=pos_frame,
+            pos_dir=args.pos_dir,
         )
         print(f"{sta}: [{result.status}] {result.detail}")
+        prior = prior_doc.get(sta)
+        # an outlier-stage abort ("skipped") wants a review, not a fallback
+        if result.status == "error" and prior is not None:
+            try:
+                t, y, dy = read_plate_series(
+                    sta,
+                    tot_dir=args.tot_dir,
+                    uncert=args.uncert,
+                    pos_frame=pos_frame,
+                    pos_dir=args.pos_dir,
+                )
+                rec = prior_fallback(
+                    sta,
+                    prior,
+                    t,
+                    y,
+                    dy,
+                    frame=frame_tag,
+                    source=str(args.prior_params),
+                    reason=f"[{result.status}] {result.detail}",
+                )
+            except Exception as exc:  # noqa: BLE001 - reported, batch goes on
+                print(f"{sta}: prior fallback failed too ({exc})")
+            else:
+                result = StationResult(
+                    sta, "estimated", "from the prior frame", record=rec
+                )
+                print(f"{sta}: [prior] rate + seasonals from {prior.get('frame')!r}")
+        elif result.record is not None and prior is not None:
+            cmp_ = compare_with_prior(result.record, prior)
+            if cmp_ is not None:
+                result.record.setdefault("refs", {})["prior"] = {
+                    "source": str(args.prior_params),
+                    "frame": prior.get("frame"),
+                    **cmp_,
+                }
+                big = [
+                    f"{c} {d:+.2f}"
+                    for c, d, lim in zip("NEU", cmp_["d_rate"], PRIOR_RATE_WARN)
+                    if abs(d) > lim
+                ]
+                if big:
+                    print(
+                        f"warning: {sta}: rate differs from the prior frame by "
+                        f"{', '.join(big)} mm/yr",
+                        file=sys.stderr,
+                    )
         if result.status == "error":
             n_errors += 1
         elif result.record is not None:
@@ -1646,7 +1888,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             for msg in _donor_drift(sta, result.record, args.donor_params):
                 print(f"warning: {msg}", file=sys.stderr)
 
-    doc = build_document(records, generated_at=stamp)
+    doc = build_document(records, frame=frame_tag, generated_at=stamp)
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
     print(f"wrote {len(records)} station record(s) -> {args.out}")
