@@ -54,9 +54,14 @@ if TYPE_CHECKING:
     from geo_dataread.globk_tot import JunctionOffset
 
 __all__ = [
+    "DEFAULT_FRAME",
     "DEFAULT_POS_DIR",
     "DEFAULT_PROD_ID",
+    "DEFAULT_SESSION",
+    "FRAMES",
+    "LEGACY_IDS",
     "LEGACY_PROD_ID",
+    "SESSIONS",
     "REFERENCE_MODES",
     "PosError",
     "PosSeries",
@@ -65,9 +70,12 @@ __all__ = [
     "merge_pos",
     "open_pos_times",
     "pos_local",
+    "pos_frame",
     "pos_path",
     "POS_PRODUCTS",
     "pos_product",
+    "product_id",
+    "tssum_id",
     "read_pos",
     "write_pos",
 ]
@@ -76,46 +84,106 @@ FloatArray = npt.NDArray[np.float64]
 
 #: okada's archive as seen through the read-only mount on the laptop
 DEFAULT_POS_DIR = "/mnt_data/okada/D/SNX/pos"
-#: product id ``tssum`` writes into the file name (``<SITE>.<prod_id>.pos``)
-DEFAULT_PROD_ID = "imo.daily_itr08"
-#: the id the files had until 2026-10-11 (its "final" was a label, not the orbits);
-#: :func:`pos_path` falls back to it when looking for the default id
-LEGACY_PROD_ID = "imo.final_itr08"
-
-#: product id → (frame label, plate-motion-model frame), side by side in ``pos_dir``:
-#: ``imo.daily_itr08`` is tssum's set from the okada archive (1995 →);
-#: ``imo.daily_igb14`` the same archive re-aligned to IGb14 by ``gps-realign``
-#: (laptop); ``imo.final_igb20`` tssum's set from the daily SINEX combined from
-#: gamit-p01's IGS20-processed final h-files (2017 →, laptop). IGb20 is the IGS's
-#: GNSS realization of ITRF2020, so that is the ITRF2020 product.
-POS_PRODUCTS: dict[str, tuple[str, str]] = {
-    "imo.daily_itr08": ("ITRF2008", "ITRF2008"),
-    "imo.daily_igb14": ("IGb14", "ITRF2014"),
-    "imo.final_igb20": ("IGb20 (ITRF2020)", "ITRF2020"),
+#: the reference frames a ``.pos`` set comes in, and the frame of the plate-motion
+#: model removed from it (``--ref plate``). itrf14 is IGb14 and itrf20 is IGb20,
+#: the IGS's GNSS realizations of those ITRFs.
+FRAMES: dict[str, tuple[str, str]] = {
+    "itrf08": ("ITRF2008", "ITRF2008"),
+    "itrf14": ("ITRF2014 (IGb14)", "ITRF2014"),
+    "itrf20": ("ITRF2020 (IGb20)", "ITRF2020"),
 }
-#: short names → product id (any other short name ``x`` is ``imo.daily_x``)
-_ALIASES = {
-    "itr08": "imo.daily_itr08",
-    "itrf2008": "imo.daily_itr08",
-    "igb14": "imo.daily_igb14",
-    "itrf2014": "imo.daily_igb14",
-    "igb20": "imo.final_igb20",
-    "itrf2020": "imo.final_igb20",
-}
+#: solution session → the ``<series>`` part of the product id (also tssum's
+#: solution-type column, ``24hrs``/``08hrs``)
+SESSIONS: dict[str, str] = {"24h": "24hr", "8h": "08hr"}
+DEFAULT_FRAME = "itrf08"
+DEFAULT_SESSION = "24h"
 
 
-def pos_product(name: str | None) -> str:
-    """Full product id from a short name: ``"igb14"`` → ``"imo.daily_igb14"``.
+def product_id(frame: str = DEFAULT_FRAME, session: str = DEFAULT_SESSION) -> str:
+    """``imo.<session>_<frame>``: ``("itrf14", "24h")`` → ``"imo.24hr_itrf14"``.
 
-    ``None`` is the default product. Accepts ``itr08``/``itrf2008``,
-    ``igb14``/``itrf2014`` and ``igb20``/``itrf2020`` (gamit-p01's IGb20), or
-    any full id (containing a dot).
+    15 characters, the width tssum keeps; tssum is run with
+    :func:`tssum_id` so its solution-type column says the session.
     """
+    if frame not in FRAMES:
+        raise ValueError(f"unknown frame {frame!r}; one of {', '.join(FRAMES)}")
+    if session not in SESSIONS:
+        raise ValueError(f"unknown session {session!r}; one of {', '.join(SESSIONS)}")
+    return f"imo.{SESSIONS[session]}_{frame}"
+
+
+def tssum_id(prod_id: str) -> str:
+    """The id to give tssum: ``imo.24hr_itrf14`` → ``imo.24hr_itrf14+24hrs``.
+
+    tssum names the files after the first 15 characters and takes characters
+    17–21 as the solution type, written in the last column of every row.
+    """
+    if len(prod_id) != 15:
+        raise ValueError(f"{prod_id!r}: a tssum product id has 15 characters")
+    return f"{prod_id}+{prod_id[4:8]}s"
+
+
+#: product id → (frame label, plate-motion-model frame), side by side in ``pos_dir``
+POS_PRODUCTS: dict[str, tuple[str, str]] = {
+    product_id(f, s): FRAMES[f] for f in FRAMES for s in SESSIONS
+}
+#: product id written into the file name (``<SITE>.<prod_id>.pos``) by default
+DEFAULT_PROD_ID = product_id()
+#: earlier names of the same sets, tried in order when the new name has no file:
+#: okada's cron still writes ``imo.daily_itr08`` (``imo.final_itr08`` until
+#: 2026-10-11); the laptop's sets were ``imo.daily_igb14`` / ``imo.final_igb20``
+#: until 2026-10-13
+LEGACY_IDS: dict[str, tuple[str, ...]] = {
+    "imo.24hr_itrf08": ("imo.daily_itr08", "imo.final_itr08"),
+    "imo.24hr_itrf14": ("imo.daily_igb14",),
+    "imo.24hr_itrf20": ("imo.final_igb20",),
+}
+LEGACY_PROD_ID = "imo.final_itr08"
+_RENAMED = {old: new for new, olds in LEGACY_IDS.items() for old in olds}
+#: short names → frame
+_FRAME_ALIASES = {
+    "itrf08": "itrf08",
+    "itr08": "itrf08",
+    "itrf2008": "itrf08",
+    "itrf14": "itrf14",
+    "igb14": "itrf14",
+    "itrf2014": "itrf14",
+    "itrf20": "itrf20",
+    "igb20": "itrf20",
+    "itrf2020": "itrf20",
+}
+
+
+def pos_frame(name: str | None) -> str:
+    """Frame key of a short name, frame or product id: ``"igb14"`` → ``"itrf14"``."""
     if name is None:
-        return DEFAULT_PROD_ID
+        return DEFAULT_FRAME
     if "." in name:
-        return name
-    return _ALIASES.get(name.lower(), f"imo.daily_{name.lower()}")
+        pid = _RENAMED.get(name, name)
+        frame = pid.rsplit("_", 1)[-1]
+        if frame not in FRAMES:
+            raise ValueError(f"{name!r}: not a frame product ({', '.join(FRAMES)})")
+        return frame
+    try:
+        return _FRAME_ALIASES[name.lower()]
+    except KeyError:
+        raise ValueError(
+            f"unknown frame {name!r}; one of {', '.join(FRAMES)} "
+            "(or itrf2008/igb14/itrf2014/igb20/itrf2020)"
+        ) from None
+
+
+def pos_product(name: str | None, session: str = DEFAULT_SESSION) -> str:
+    """Full product id from a frame name: ``"igb14"`` → ``"imo.24hr_itrf14"``.
+
+    ``None`` is the default product. Accepts the frames ``itrf08``/``itrf14``/
+    ``itrf20`` and their aliases (``itr08``/``itrf2008``, ``igb14``/``itrf2014``,
+    ``igb20``/``itrf2020``), or any full id (containing a dot; an earlier name
+    is mapped to its new one).
+    """
+    if name is not None and "." in name:
+        return _RENAMED.get(name, name)
+    return product_id(pos_frame(name), session)
 
 
 #: how :func:`pos_local` picks the reference position: a station a-priori
@@ -273,11 +341,12 @@ def pos_path(
 ) -> Path:
     """``<directory>/<STA>.<prod_id>.pos`` (or ``.pos.gz``); FileNotFoundError if none exists.
 
-    With the default ``prod_id``, a file under :data:`LEGACY_PROD_ID` is used
-    when there is none under the new id (a ``.pos`` set built before the rename).
+    When there is none under ``prod_id``, a file under one of its earlier names
+    (:data:`LEGACY_IDS`) is used: okada's set, and sets built before a rename.
     """
     d = Path(directory) if directory is not None else Path(DEFAULT_POS_DIR)
-    ids = [prod_id] + ([LEGACY_PROD_ID] if prod_id == DEFAULT_PROD_ID else [])
+    prod_id = _RENAMED.get(prod_id, prod_id)
+    ids = [prod_id, *LEGACY_IDS.get(prod_id, ())]
     for pid in ids:
         for name in (f"{sta.upper()}.{pid}.pos", f"{sta.upper()}.{pid}.pos.gz"):
             if (d / name).is_file():
