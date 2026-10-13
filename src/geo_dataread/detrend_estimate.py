@@ -1283,35 +1283,51 @@ def prior_window(
     )
 
 
-def prior_rate_report(d_rates: Mapping[str, Sequence[float]]) -> list[str]:
+def prior_rate_report(
+    d_rates: Mapping[str, Sequence[float]],
+    groups: Mapping[str, str] | None = None,
+) -> list[str]:
     """Summary of rate differences from the prior frame, and the outliers.
 
     The plate-motion models of two ITRFs differ, so every station's rate
-    shifts by about the same amount (ITRF2014 − ITRF2008 ≈ −1 mm/yr N around
-    Iceland). That network median is reported, and a station is warned about
-    only when it departs from it by more than :data:`PRIOR_RATE_WARN`.
+    shifts by about the same amount — per PLATE: the series has its own
+    plate's model removed, and the ITRF2008→ITRF2014 change of the North
+    American model moves NOAM stations by −1.06 mm/yr N (IQR 0.13) while
+    EURA stations move +0.03 (measured on the 2026-10-13 itrf14 fit). So the
+    median is taken per group (``groups``: station → plate, e.g.
+    :func:`geo_dataread.station_catalog.plate_table`; ungrouped stations
+    form one group), reported, and a station is warned about only when it
+    departs from its group's median by more than :data:`PRIOR_RATE_WARN`.
     """
     if not d_rates:
         return []
-    a = np.array(list(d_rates.values()), dtype=np.float64)
-    med = np.median(a, axis=0)
-    out = [
-        "prior: rate difference from the prior frame, network median "
-        + " ".join(f"{c} {m:+.2f}" for c, m in zip("NEU", med))
-        + f" mm/yr over {len(a)} station(s)"
-    ]
-    for sta, d in sorted(d_rates.items()):
-        big = [
-            f"{c} {x - m:+.2f}"
-            for c, x, m, lim in zip("NEU", d, med, PRIOR_RATE_WARN)
-            if abs(x - m) > lim
-        ]
-        if big:
-            out.append(
-                f"warning: {sta}: rate differs from the prior frame by "
-                f"{', '.join(big)} mm/yr beyond the network median"
-            )
-    return out
+    by: dict[str, list[str]] = {}
+    for sta in d_rates:
+        key = str((groups or {}).get(sta) or "all")
+        by.setdefault(key, []).append(sta)
+    out: list[str] = []
+    warn: list[str] = []
+    for key in sorted(by):
+        stas = by[key]
+        a = np.array([d_rates[s] for s in stas], dtype=np.float64)
+        med = np.median(a, axis=0)
+        out.append(
+            f"prior: rate difference from the prior frame, {key} median "
+            + " ".join(f"{c} {m:+.2f}" for c, m in zip("NEU", med))
+            + f" mm/yr over {len(a)} station(s)"
+        )
+        for sta in stas:
+            big = [
+                f"{c} {x - m:+.2f}"
+                for c, x, m, lim in zip("NEU", d_rates[sta], med, PRIOR_RATE_WARN)
+                if abs(x - m) > lim
+            ]
+            if big:
+                warn.append(
+                    f"warning: {sta}: rate differs from the prior frame by "
+                    f"{', '.join(big)} mm/yr beyond the {key} median"
+                )
+    return out + sorted(warn)
 
 
 def prior_fallback(
@@ -1935,7 +1951,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             for msg in _donor_drift(sta, result.record, args.donor_params):
                 print(f"warning: {msg}", file=sys.stderr)
 
-    for msg in prior_rate_report(d_rates):
+    try:
+        from geo_dataread.station_catalog import plate_table
+
+        plates: Mapping[str, str] | None = {k: str(v) for k, v in plate_table().items()}
+    except Exception:  # noqa: BLE001 - no plate file: one network median
+        plates = None
+    for msg in prior_rate_report(d_rates, plates):
         print(msg, file=sys.stderr if msg.startswith("warning") else sys.stdout)
 
     doc = build_document(records, frame=frame_tag, generated_at=stamp)

@@ -1317,8 +1317,24 @@ class TestFrames:
     def test_prior_rate_report_is_relative_to_the_network(self) -> None:
         d = {"A": [-1.0, -0.3, 0.2], "B": [-0.9, -0.4, 0.3], "C": [-1.1, 2.0, 0.1]}
         msgs = de.prior_rate_report(d)
-        assert "network median N -1.00 E -0.30 U +0.20" in msgs[0]
+        assert "all median N -1.00 E -0.30 U +0.20" in msgs[0]
         assert (
             len(msgs) == 2 and msgs[1].startswith("warning: C") and "E +2.30" in msgs[1]
         )
         assert de.prior_rate_report({}) == []
+
+    def test_prior_rate_report_per_plate(self) -> None:
+        # NOAM shifts -1 mm/yr N between the frames, EURA does not: one
+        # network median would flag every EURA station
+        d = {
+            "N1": [-1.0, 0.0, 0.0],
+            "N2": [-1.1, 0.0, 0.0],
+            "N3": [-1.05, 0.0, 0.0],
+            "E1": [0.0, 0.0, 0.0],
+            "E2": [0.1, 0.0, 0.0],
+        }
+        plates = {"N1": "NOAM", "N2": "NOAM", "N3": "NOAM", "E1": "EURA", "E2": "EURA"}
+        msgs = de.prior_rate_report(d, plates)
+        assert [m for m in msgs if m.startswith("warning")] == []
+        assert any("NOAM median N -1.05" in m for m in msgs)
+        assert any("EURA median N +0.05" in m for m in msgs)

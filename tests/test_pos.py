@@ -300,3 +300,15 @@ def test_openGlobkTimes_picks_the_product(tmp_path: Path) -> None:
         openGlobkTimes("AKUR", Dir=str(tmp_path), tType="POS", pos_id="itrf2020")  # type: ignore[no-untyped-call]
     with pytest.raises(ValueError, match="POS.? only"):
         openGlobkTimes("AKUR", Dir=str(tmp_path), tType="TOT", pos_id="igb14")  # type: ignore[no-untyped-call]
+
+
+def test_junctions_only_for_okadas_products() -> None:
+    # GUSK's stale-height junction corrects okada's processing; gamit-p01's
+    # itrf20 and 8 h series never had the error, so the rule must not apply
+    assert pos.product_junctions("imo.24hr_itrf08") is None
+    assert pos.product_junctions("imo.daily_itr08") is None
+    assert pos.product_junctions("imo.24hr_itrf14") is None
+    assert pos.product_junctions("imo.24hr_itrf20") == ()
+    assert pos.product_junctions("imo.08hr_itrf20") == ()
+    assert pos.product_junctions("imo.final_igb20") == ()
+    assert pos.product_junctions("xyz.other_thing") is None
