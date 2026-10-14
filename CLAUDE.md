@@ -41,7 +41,7 @@ geo_dataread/
 ├── src/geo_dataread/
 │   ├── __init__.py
 │   ├── gps_read.py       # ~1660 LOC — main GPS time-series reader (slice-4 purge + slice-6 read_join)
-│   ├── gps_views.py      # apply-on-read views: raw|cleaned|detrended toggle (typed, mypy-strict)
+│   ├── gps_views.py      # apply-on-read views: raw|cleaned|detrended toggle; window_datum_shift = the constant between a windowed getData read and the full-span one a record is fitted to (typed, mypy-strict)
 │   ├── baseline.py       # baselines A−B: split_baseline, match_epochs (by day), baseline() → Baseline incl. both ends referenced alike, check_same_view. NUMPY ONLY (a test pins it) so gps_api can reuse it; feed it read_gps_view output
 │   ├── baseline_noise.py # BaselineNoiseRecord (ρ(d) law + station σ scale k + median k + window/provenance) → $GPS_API_STORE/noise/baseline_noise.json (atomic write; NOT the config tree); fit_baseline_noise, own_shared_fraction, pair_inputs (own ρ ≥60 consecutive days, else ρ(d)); gps-baseline-noise refits from TOT (stations.cfg lat/lon → geofunc.local)
 │   ├── sinex.py          # numpy-only SINEX reader (full covariance); geometry via geofunc.local
@@ -145,7 +145,7 @@ gps-estimate-detrend ... # entry: geo_dataread.detrend_estimate:main — batch d
 
 ---
 
-*Last reviewed: 2026-10-13 (pos: products = itr08/igb14/final_igb20; itrf2020 now names gamit-p01's IGb20). Previous 2026-10-12 (stabilize/org: glorg stabilization on the loose SINEX; station_catalog: plate velocity via geofunc.plates). Previous 2026-10-10 (pos.py: .pos reader + tType="POS"; write_pos 2026-10-12). Previous 2026-10-09 (baseline_noise + sinex modules; baseline() opt-in rho=/sigma_scale=). Previous 2026-08-26 (re-anchoring now covers BOTH hold kinds:
+*Last reviewed: 2026-10-14 (gps_views.window_datum_shift, for gpsplot ts --model). Previous 2026-10-13 (pos: products = itr08/igb14/final_igb20; itrf2020 now names gamit-p01's IGb20). Previous 2026-10-12 (stabilize/org: glorg stabilization on the loose SINEX; station_catalog: plate velocity via geofunc.plates). Previous 2026-10-10 (pos.py: .pos reader + tType="POS"; write_pos 2026-10-12). Previous 2026-10-09 (baseline_noise + sinex modules; baseline() opt-in rho=/sigma_scale=). Previous 2026-08-26 (re-anchoring now covers BOTH hold kinds:
 `donor:` (a finished record in detrend_params.json) carried the donor's datum
 exactly as `store:` did — measured, THOB holding SENG via donor: sat
 +75.3/-34.3/-124.6 mm off its own data and ignored --anchor-window entirely.
