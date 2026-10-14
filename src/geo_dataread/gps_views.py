@@ -1178,6 +1178,7 @@ def apply_stored_detrend(
     terms: str = "all",
     frame: str | None = None,
     data_unit: str = "mm",
+    groups: str | Sequence[str] | None = None,
 ) -> FloatArray:
     """Subtract a stored trajectory record from a series (pure view).
 
@@ -1193,6 +1194,10 @@ def apply_stored_detrend(
         data: Observations, shape (C, N) or (N,).
         terms: ``"all"`` | ``"secular"`` | ``"periodic"`` — partial views
             from the SAME stored parameters (design §4.2).
+        groups: Instead of ``terms``, staged group names
+            (``gps_analysis.select_record_groups``): ``"secular"`` there is
+            offset + rate WITHOUT the steps, so ``("secular", "periodic")``
+            removes rate + seasonals and keeps the step offsets.
         frame: Series frame tag; a mismatch with the record's frame is a
             hard error (design §2.5 — refuse, don't fudge).
         data_unit: ``"mm"`` (production record unit) or ``"m"`` (the .NEU
@@ -1206,11 +1211,12 @@ def apply_stored_detrend(
     y = np.asarray(data, dtype=np.float64)
     if data_unit == "m":
         detrended_mm = apply_detrend(
-            record, yearf, y * 1000.0, terms=terms, frame=frame
+            record, yearf, y * 1000.0, terms=terms, frame=frame, groups=groups
         )
         return np.asarray(detrended_mm / 1000.0, dtype=np.float64)
     return np.asarray(
-        apply_detrend(record, yearf, y, terms=terms, frame=frame), dtype=np.float64
+        apply_detrend(record, yearf, y, terms=terms, frame=frame, groups=groups),
+        dtype=np.float64,
     )
 
 
