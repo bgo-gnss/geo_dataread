@@ -1343,6 +1343,58 @@ def remove_declared_steps(
     return out, prov
 
 
+def window_datum_shift(
+    sta: str,
+    *,
+    fstart: float | None,
+    fend: float | None,
+    ref: str = "plate",
+    Dir: str | None = None,
+    tType: str = "TOT",
+    uncert: float = 15,
+    **pos_kw: Any,
+) -> FloatArray:
+    """How far a windowed ``getData`` series sits from the full-span one.
+
+    ``getData`` zeroes every series on its first kept samples and anchors
+    the plate motion at its first epoch, both inside the requested window.
+    A stored detrend record is fitted to the FULL span, so it lines up with
+    a windowed series only after this constant is subtracted:
+    ``window = full − shift`` at every common epoch, per component. Both
+    series come from the same reader, so the shift is exact (no fit): this
+    returns the median of ``full − window`` over the common epochs.
+
+    Args:
+        sta: Station four-letter name.
+        fstart, fend: The window, as passed to ``getData``.
+        ref, Dir, tType, uncert, **pos_kw: As ``getData``; the same values
+            the windowed series was read with.
+
+    Returns:
+        ``(3,)`` shift [mm], N/E/U; zeros when there is no window.
+
+    Raises:
+        ValueError: when either read is empty or they share no epoch.
+    """
+    if fstart is None and fend is None:
+        return np.zeros(3)
+    from geo_dataread import gps_read  # deferred: gps_read lazily imports back
+
+    kw = dict(ref=ref, Dir=Dir, tType=tType, uncert=uncert, **pos_kw)
+    t_full, d_full, _, _ = gps_read.getData(sta, fstart=None, fend=None, **kw)  # type: ignore[no-untyped-call]
+    t_win, d_win, _, _ = gps_read.getData(sta, fstart=fstart, fend=fend, **kw)  # type: ignore[no-untyped-call]
+    if t_full is None or t_win is None or len(t_win) == 0:
+        raise ValueError(f"{sta}: no data to align the window [{fstart}, {fend}]")
+    _, i, j = np.intersect1d(t_full, t_win, return_indices=True)
+    if len(i) == 0:
+        raise ValueError(f"{sta}: the window shares no epoch with the full series")
+    diff = (
+        np.asarray(d_full, dtype=np.float64)[:, i]
+        - np.asarray(d_win, dtype=np.float64)[:, j]
+    )
+    return np.asarray(np.nanmedian(diff, axis=1), dtype=np.float64)
+
+
 def _match_declared_step(epoch: float, declared: Mapping[float, Any]) -> Any:
     """The declared step whose epoch matches ``epoch`` within 1e-3 yr."""
     best = None

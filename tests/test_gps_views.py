@@ -619,3 +619,50 @@ def test_remove_declared_steps_no_kinds_is_a_noop(view_env, seng_plate, tmp_path
     out, prov = gps_views.remove_declared_steps("SENG", yearf, data, kinds=[])
     assert prov["removed"] == [] and prov["applied"] is False
     np.testing.assert_array_equal(out, data)
+
+
+# ---------------------------------------------------------------------------
+# window_datum_shift: a windowed read vs the full-span one
+# ---------------------------------------------------------------------------
+
+
+def test_window_datum_shift_is_the_constant_between_reads(view_env, seng_plate):
+    """A windowed getData series is the full one minus a per-component
+    constant (zeroed and plate-anchored at the window start); the shift is
+    that constant, exactly."""
+    t_full, d_full, _ = seng_plate
+    t_win, d_win, _, _ = gpsr.getData("SENG", fstart=2018.0, ref="plate", Dir=TOT)
+    shift = gps_views.window_datum_shift(
+        "SENG", fstart=2018.0, fend=None, ref="plate", Dir=TOT
+    )
+    assert shift.shape == (3,) and np.all(np.abs(shift) > 1.0)
+    _, i, j = np.intersect1d(t_full, t_win, return_indices=True)
+    np.testing.assert_allclose(d_win[:, j], d_full[:, i] - shift[:, None], atol=1e-9)
+
+
+def test_window_datum_shift_no_window_is_zero(view_env):
+    np.testing.assert_array_equal(
+        gps_views.window_datum_shift("SENG", fstart=None, fend=None, Dir=TOT),
+        np.zeros(3),
+    )
+
+
+def test_window_datum_shift_aligns_a_full_span_record(view_env, seng_record):
+    """The point of the shift: a record fitted on the full read, evaluated
+    on a windowed one, lines up once the shift is subtracted."""
+    t_win, d_win, _, _ = gpsr.getData(
+        "SENG", fstart=2018.5, fend=2019.9, ref="plate", Dir=TOT
+    )
+    shift = gps_views.window_datum_shift(
+        "SENG", fstart=2018.5, fend=2019.9, ref="plate", Dir=TOT
+    )
+    model = np.asarray(evaluate_record(seng_record, t_win))
+    resid = d_win - (model - shift[:, None])
+    assert np.all(np.abs(np.nanmedian(resid, axis=1)) < 3.0)
+    unaligned = d_win - model
+    assert np.max(np.abs(np.nanmedian(unaligned, axis=1))) > 10.0
+
+
+def test_window_datum_shift_disjoint_window_raises(view_env):
+    with pytest.raises(ValueError, match="no data"):
+        gps_views.window_datum_shift("SENG", fstart=1990.0, fend=1991.0, Dir=TOT)
