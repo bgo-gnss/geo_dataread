@@ -28,10 +28,15 @@ one takes the stored k(T) table's (:func:`load_k_table`), else
 :data:`DEFAULT_K`; ``sigma_method`` says which. Never a median of the run:
 a record depends on its station, the settings and the table alone.
 
-Refusals (``refused``, no rate): fewer than 5 epochs, less than 80 % of
-the window spanned, a declared step inside the window (``allow_steps``
-turns that into a flag), a failed background removal, no record when one
-is required. The model is always a line: a seasonal cannot be estimated
+Gates, two tiers. Refused outright: a declared step inside the window
+(``allow_steps`` turns that into a flag), a failed read or background
+removal, fewer than 2 epochs, no record when one is required. Standard
+tier: ≥ 5 epochs covering ≥ 80 % of the window (each daily epoch covering
+its day; against the data end when the data stop inside the window). Short
+tier (``tier="short"``): failing only those, a part (horizontal pair, up)
+stands when its |v|/σ reaches ``short_snr`` (``short_snr_pair`` on two
+epochs); see ``docs/velocity-product.md``. The view is ``declared`` by
+default: the raw series less the declared blunder epochs, no detection. The model is always a line: a seasonal cannot be estimated
 inside a window shorter than ~2.5 yr, it is removed from the record or not
 at all.
 
@@ -63,7 +68,12 @@ from typing import Any
 
 import numpy as np
 import numpy.typing as npt
-from gps_analysis.rate_quality import NONLINEAR_F, SHORT_SNR, SHORT_SNR_PAIR
+from gps_analysis.rate_quality import (
+    NONLINEAR_F,
+    NONLINEAR_MAX_DAYS,
+    SHORT_SNR,
+    SHORT_SNR_PAIR,
+)
 from gtimes.timefunc import TimetoYearf
 
 SCHEMA_VERSION = 2
@@ -858,7 +868,9 @@ def estimate_station_velocity(
         else:
             flags.append(f"short:n={n}")
     if refused is None and wr is not None:
-        comps = [name for name, f in zip("NEU", wr.f_quadratic, strict=True)
+        # the F threshold is calibrated up to 61 d only
+        long_window = t_len * 365.25 > NONLINEAR_MAX_DAYS + 0.5
+        comps = [] if long_window else [name for name, f in zip("NEU", wr.f_quadratic, strict=True)
                  if np.isfinite(rate_a["NEU".index(name)]) and f >= NONLINEAR_F]  # fmt: skip
         if comps:
             flags.append(f"nonlinear:{''.join(comps)}")

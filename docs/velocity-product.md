@@ -96,7 +96,8 @@ threshold (`--short-snr-pair 8` takes them at ~10 false per 10⁴). The 2024
 inflation reaches 5 only over ~10–14 days.
 
 *Nonlinear flag* (`nonlinear:NEU`): the F of a quadratic against the line
-≥ 50 in a component (`gps_analysis.NONLINEAR_F`). Quiet p99 is 23–42 at
+≥ 50 in a component (`gps_analysis.NONLINEAR_F`), in windows of 61 days or
+less (`NONLINEAR_MAX_DAYS`: calibrated only that far). Quiet p99 is 23–42 at
 7–61 d, 80 at 91 d; post-dike 14–30 d windows reach 30–310. A flag, not a
 refusal: the rate of a decaying pulse is a mean, not a rate. χ²/ν was not
 used: it depends on the component and on `-u` (quiet p99 N 10, E 16, U 2.5).
