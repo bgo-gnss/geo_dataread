@@ -59,7 +59,7 @@ def test_nan_epochs_drop_per_component_and_from_the_gates():
 
 
 def test_gates_refuse_all_three_rates():
-    t, y, s = _series(years=0.05)  # 19 epochs
+    t, y, s = _series(years=0.01)  # 4 epochs
     wr = vel.velocity_from_arrays(t, y, s, (t[0], t[0] + 0.25))
     assert any(r.startswith("n_obs") for r in wr.reasons)
     assert any(r.startswith("cover") for r in wr.reasons)
@@ -76,14 +76,42 @@ def test_a_step_inside_refuses_unless_allowed():
     assert wr.reasons == () and wr.steps_in_window == (step,)
 
 
-def test_network_k_is_the_median_of_own_scales_only():
-    recs = [
-        _record(k=(2.0, 3.0, 4.0)),
-        _record(k=(4.0, 5.0, 6.0)),
-        _record(k=(9.0, 9.0, 9.0), sigma_method="default_k"),
-    ]
-    np.testing.assert_allclose(vel.network_k(recs), [3.0, 4.0, 5.0])
-    assert vel.network_k([_record(sigma_method="default_k")]) is None
+def _table(frame="itrf2014"):
+    return {
+        "schema": vel.K_TABLE_SCHEMA, "frame": frame, "series": "imo.24hr_itrf14",
+        "residuals": {
+            "all": {"days": [7, 365], "k": [[1.5, 1.5, 1.5], [5.0, 4.0, 6.0]],
+                    "n_stations": [10, 8]},
+            "secular": {"days": [7], "k": [[2.0, 2.0, 2.0]], "n_stations": [10]},
+        },
+    }  # fmt: skip
+
+
+def test_table_k_interpolates_by_residual():
+    t = _table()
+    np.testing.assert_allclose(vel.table_k(t, "all", 7 / 365.25), [1.5, 1.5, 1.5])
+    np.testing.assert_allclose(vel.table_k(t, "all", 2.0), [5.0, 4.0, 6.0])
+    np.testing.assert_allclose(vel.table_k(t, "secular", 1.0), [2.0, 2.0, 2.0])
+    assert vel.table_k({"residuals": {}}, "all", 1.0) is None
+
+
+def test_load_k_table_checks_schema_and_frame(tmp_path):
+    path = tmp_path / "k.json"
+    path.write_text(json.dumps(_table()))
+    table, source = vel.load_k_table(vel.VelocitySettings(k_table=str(path)))
+    assert table["frame"] == "itrf2014" and source.startswith(f"{path}#sha256:")
+    path.write_text(json.dumps(_table(frame="itrf2020")))
+    with pytest.raises(ValueError, match="frame"):
+        vel.load_k_table(vel.VelocitySettings(k_table=str(path)))
+    assert vel.load_k_table(vel.VelocitySettings(k_table="none")) == (None, None)
+    with pytest.raises(FileNotFoundError):
+        vel.load_k_table(vel.VelocitySettings(k_table=str(tmp_path / "nope.json")))
+
+
+def test_k_residual_keeps_the_seasonal_for_plate():
+    assert vel.K_RESIDUAL == {
+        "plate-periodic": "all", "background": "all", "plate": "secular",
+    }  # fmt: skip
 
 
 def test_window_bounds_take_whole_days():
@@ -172,7 +200,7 @@ def _have_pos(sta: str) -> bool:
 @pytest.mark.skipif(not _have_pos("NYLA"), reason="no local NYLA itrf2014 .pos")
 @pytest.mark.usefixtures("_deployed_config_reachable")
 def test_nyla_two_month_window_reads_its_own_k_and_refuses_a_step():
-    st = vel.VelocitySettings(ref="plate-periodic")
+    st = vel.VelocitySettings(ref="plate-periodic", k_table="none")
     r = vel.estimate_station_velocity("NYLA", dt.date(2026, 8, 15),
                                       dt.date(2026, 10, 15), st)  # fmt: skip
     assert r.accepted and r.frame == "itrf2014" and r.plate == "NOAM"
@@ -187,13 +215,52 @@ def test_nyla_two_month_window_reads_its_own_k_and_refuses_a_step():
 
 @pytest.mark.skipif(not _have_pos("THOB"), reason="no local THOB itrf2014 .pos")
 @pytest.mark.usefixtures("_deployed_config_reachable")
-def test_a_station_without_record_falls_back_to_plate_or_is_refused():
+def test_a_station_without_record_falls_back_to_plate_or_is_refused(tmp_path):
     win = (dt.date(2026, 8, 15), dt.date(2026, 10, 15))
-    r = vel.estimate_station_velocity("THOB", *win, vel.VelocitySettings())
+    r = vel.estimate_station_velocity(
+        "THOB", *win, vel.VelocitySettings(k_table="none")
+    )
     assert r.ref == "plate" and r.ref_requested == "plate-periodic"
     assert "fallback:plate" in r.flags and "background:none" in r.flags
-    assert r.sigma_method == "default_k"
+    assert r.sigma_method == "default_k" and r.k == (5.0, 5.0, 5.0)
+    # with a table: its k on the residual that keeps the seasonal (ref plate)
+    path = tmp_path / "k.json"
+    path.write_text(json.dumps(_table()))
+    r2 = vel.estimate_station_velocity(
+        "THOB", *win, vel.VelocitySettings(k_table=str(path))
+    )
+    assert r2.sigma_method == "empirical_k_table" and r2.k == (2.0, 2.0, 2.0)
+    assert r2.k_source["residual"] == "secular"
+    assert r2.input_fingerprint != r.input_fingerprint  # k is in the key
+    np.testing.assert_allclose(r2.rate, r.rate)
     r = vel.estimate_station_velocity(
-        "THOB", *win, vel.VelocitySettings(no_record="refuse")
+        "THOB", *win, vel.VelocitySettings(no_record="refuse", k_table="none")
     )
     assert r.refused == "no_record"
+
+
+@pytest.mark.skipif(not _have_pos("NYLA"), reason="no local NYLA itrf2014 .pos")
+@pytest.mark.usefixtures("_deployed_config_reachable")
+def test_a_week_long_window_is_not_refused_by_the_count_floor():
+    st = vel.VelocitySettings(k_table="none")
+    r = vel.estimate_station_velocity("NYLA", dt.date(2026, 10, 1),
+                                      dt.date(2026, 10, 7), st)  # fmt: skip
+    assert r.accepted, r.refused
+    assert r.sigma_method == "empirical_k"  # its own k at 7 days
+
+
+def test_records_do_not_depend_on_the_other_stations(monkeypatch):
+    """A station's record is the same whichever stations share the run."""
+    calls = []
+
+    def fake(sta, start, end, settings, *, doc=None, k_table=None, **_):
+        calls.append((sta, k_table))
+        return _record(station=sta)
+
+    monkeypatch.setattr(vel, "estimate_station_velocity", fake)
+    monkeypatch.setattr(vel, "_params_doc", lambda s: None)
+    monkeypatch.setattr(vel, "load_k_table", lambda s: ("T", "src"))
+    a = vel.estimate_velocities(["B", "A"], 2026.0, 2026.1)
+    b = vel.estimate_velocities(["A"], 2026.0, 2026.1)
+    assert [r.station for r in a] == ["A", "B"] and a[0] == b[0]
+    assert {c[1] for c in calls} == {("T", "src")}

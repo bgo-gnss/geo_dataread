@@ -190,12 +190,15 @@ class VelocitySettings:
     uncert: float = DEFAULT_UNCERT
     no_record: str = "plate"
     allow_steps: bool = False
-    min_obs: int = 20
+    min_obs: int = 5
     min_cover: float = 0.8
     default_k: float = DEFAULT_K
     pos_dir: str | None = None
     params: str | None = None
     steps: str | None = None
+    #: the k(T) table (:func:`build_k_table`): a path, None for the
+    #: deployed one when it exists, "none" for no table
+    k_table: str | None = None
 
     def __post_init__(self) -> None:
         if self.ref not in REFS:
@@ -234,7 +237,7 @@ def velocity_from_arrays(
     *,
     step_epochs: Sequence[float] = (),
     allow_steps: bool = False,
-    min_obs: int = 20,
+    min_obs: int = 5,
     min_cover: float = 0.8,
 ) -> WindowRate:
     """The rate of a line through each component inside ``window``.
@@ -284,14 +287,6 @@ def velocity_from_arrays(
     gap = largest_gap(used) if used.size else None
     return WindowRate(rate, sig, (counts[0], counts[1], counts[2]), span, gap,
                       tuple(reasons), steps)  # fmt: skip
-
-
-def network_k(records: Sequence[VelocityRecord]) -> FloatArray | None:
-    """The per-component median k of the records whose k is their own."""
-    own = [r.k for r in records if r.sigma_method == "empirical_k"]
-    if not own:
-        return None
-    return np.asarray(np.nanmedian(np.asarray(own, dtype=float), axis=0), dtype=float)
 
 
 # ---------------------------------------------------------------------------
@@ -363,22 +358,23 @@ def _read(
     end: float,
     settings: VelocitySettings,
     *,
-    ref: str,
+    terms: str | None,
     doc: Mapping[str, Any] | None,
 ) -> tuple[FloatArray, FloatArray, FloatArray, dict[str, Any]]:
     """(t, y (3,N), σ (3,N), view attrs) of one station: plate removed, the
-    ``ref`` terms of its stored record removed, outliers NaN (cleaned)."""
+    ``terms`` of its stored record removed (None: none), outliers NaN
+    (cleaned)."""
     from geo_dataread.gps_views import read_gps_view
 
     pid, _ = _product(settings)
     clean = settings.view == "cleaned"
-    detrend = ref in _TERMS
+    detrend = terms is not None
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         df = read_gps_view(
             sta, start, end,
             view="detrended" if detrend else "raw",
-            terms=_TERMS.get(ref, "all"),
+            terms=terms or "all",
             clean=clean,
             params=doc,
             steps=settings.steps,
@@ -403,32 +399,169 @@ def _read(
     return t, y, s, attrs
 
 
+#: the residual k is measured on, by ref: a plate rate still carries the
+#: seasonal slope, so its k must too (only the secular removed)
+K_RESIDUAL = {"plate-periodic": "all", "background": "all", "plate": "secular"}
+
+
+def station_rate_scales(
+    sta: str,
+    years: Sequence[float],
+    settings: VelocitySettings,
+    *,
+    doc: Mapping[str, Any] | None = None,
+    residual: str = "all",
+) -> tuple[dict[float, FloatArray], dict[str, Any]]:
+    """The station's k(T) for each window length of ``years``, measured on
+    its detrend record's window with ``residual`` of the stored model
+    removed (``"all"``, or ``"secular"`` to keep the seasonal in);
+    ``({}, info)`` when it has no record. A length with too few windows
+    on the quiet span is left out."""
+    from gps_analysis import empirical_rate_scale
+
+    record = _record(doc, sta)
+    if record is None or not record.get("window"):
+        return {}, {"reason": "no record"}
+    w0, w1 = (float(v) for v in record["window"])
+    try:
+        t, y, s, _ = _read(sta, w0, w1, settings, terms=residual, doc=doc)
+    except ValueError as exc:
+        return {}, {"reason": str(exc)}
+    out: dict[float, FloatArray] = {}
+    for T in years:
+        rs = empirical_rate_scale(t, y, s, window_years=float(T))
+        if np.all(np.isfinite(rs.k)):
+            out[float(T)] = np.asarray(rs.k, dtype=float)
+    return out, {"quiet_span": [w0, w1], "residual": residual}
+
+
 def station_rate_scale(
     sta: str,
     window_years: float,
     settings: VelocitySettings,
     *,
     doc: Mapping[str, Any] | None = None,
+    residual: str = "all",
 ) -> tuple[FloatArray | None, dict[str, Any]]:
-    """The station's k(T) for windows of ``window_years``, measured on its
-    detrend record's window with the whole stored model removed; ``(None,
-    info)`` when it has no record or too short a quiet span."""
-    from gps_analysis import empirical_rate_scale
-
-    record = _record(doc, sta)
-    if record is None or not record.get("window"):
-        return None, {"reason": "no record"}
-    w0, w1 = (float(v) for v in record["window"])
-    try:
-        t, y, s, _ = _read(sta, w0, w1, settings, ref="background", doc=doc)
-    except ValueError as exc:
-        return None, {"reason": str(exc)}
-    rs = empirical_rate_scale(t, y, s, window_years=window_years)
-    info = {"quiet_span": [w0, w1], "n_windows": [int(n) for n in rs.n_windows]}
-    if not np.all(np.isfinite(rs.k)):
-        info["reason"] = "too few windows on the quiet span"
+    """:func:`station_rate_scales` for one window length; ``(None, info)``
+    when there is no k."""
+    got, info = station_rate_scales(
+        sta, [window_years], settings, doc=doc, residual=residual
+    )
+    if not got:
+        info.setdefault("reason", "too few windows on the quiet span")
         return None, info
-    return np.asarray(rs.k, dtype=float), info
+    return got[float(window_years)], info
+
+
+# ---------------------------------------------------------------------------
+# the k(T) table: the fallback that does not depend on the run
+# ---------------------------------------------------------------------------
+
+#: window lengths of the k(T) table [days]
+K_TABLE_DAYS = (7, 14, 30, 61, 91, 182, 365, 730)
+K_TABLE_SCHEMA = 1
+
+
+def k_table_path(settings: VelocitySettings) -> Path:
+    """``k_table_<frame>.json`` in :func:`velocity_dir`."""
+    from geo_dataread.pos import pos_frame
+
+    return velocity_dir() / f"k_table_{pos_frame(settings.frame)}.json"
+
+
+def build_k_table(
+    stations: Sequence[str],
+    settings: VelocitySettings,
+    *,
+    days: Sequence[int] = K_TABLE_DAYS,
+    progress: Any = None,
+) -> dict[str, Any]:
+    """The per-component median k(T) over every station with a record:
+    for both residuals (``all``: the seasonal removed; ``secular``: kept),
+    at the lengths of ``days``. Deterministic for the same inputs; what a
+    station without a quiet span of its own takes (sigma_method
+    ``empirical_k_table``)."""
+    doc = _params_doc(settings)
+    years = [d / 365.25 for d in days]
+    per: dict[str, dict[float, list[FloatArray]]] = {"all": {}, "secular": {}}
+    used: list[str] = []
+    for sta in sorted({x.upper() for x in stations}):
+        if _record(doc, sta) is None:
+            continue
+        got_any = False
+        for residual in per:
+            got, _info = station_rate_scales(
+                sta, years, settings, doc=doc, residual=residual
+            )
+            for T, k in got.items():
+                per[residual].setdefault(T, []).append(k)
+            got_any |= bool(got)
+        if got_any:
+            used.append(sta)
+        if progress is not None:
+            progress(sta)
+    residuals = {}
+    for residual, by_t in per.items():
+        rows = [(T, np.asarray(by_t[T])) for T in years if T in by_t]
+        residuals[residual] = {
+            "days": [round(T * 365.25) for T, _ in rows],
+            "k": [
+                [round(float(v), 4) for v in np.nanmedian(a, axis=0)] for _, a in rows
+            ],
+            "n_stations": [int(a.shape[0]) for _, a in rows],
+        }
+    pid, frame = _product(settings)
+    return {
+        "schema": K_TABLE_SCHEMA,
+        "frame": frame,
+        "series": pid,
+        "view": settings.view,
+        "uncert": settings.uncert,
+        "stations": used,
+        "residuals": residuals,
+    }
+
+
+def table_k(
+    table: Mapping[str, Any], residual: str, window_years: float
+) -> FloatArray | None:
+    """k at ``window_years`` from a k(T) table, or None when it has no
+    entry for ``residual``."""
+    from gps_analysis import rate_scale_at
+
+    entry = (table.get("residuals") or {}).get(residual)
+    if not entry or not entry.get("days"):
+        return None
+    k = rate_scale_at(
+        window_years, np.asarray(entry["days"], float) / 365.25, entry["k"]
+    )
+    return k if np.all(np.isfinite(k)) else None
+
+
+def load_k_table(
+    settings: VelocitySettings,
+) -> tuple[dict[str, Any] | None, str | None]:
+    """(table, its path + sha256) of the settings, or (None, None)."""
+    if settings.k_table == "none":
+        return None, None
+    path = (
+        Path(settings.k_table).expanduser()
+        if settings.k_table
+        else k_table_path(settings)
+    )
+    if not path.is_file():
+        if settings.k_table:
+            raise FileNotFoundError(f"k table {path} not found")
+        return None, None
+    raw = path.read_bytes()
+    table = json.loads(raw)
+    if table.get("schema") != K_TABLE_SCHEMA:
+        raise ValueError(f"{path}: k table schema {table.get('schema')!r}")
+    _pid, frame = _product(settings)
+    if table.get("frame") != frame:
+        raise ValueError(f"{path}: k table frame {table.get('frame')!r}, not {frame!r}")
+    return table, f"{path}#sha256:{hashlib.sha256(raw).hexdigest()[:16]}"
 
 
 # ---------------------------------------------------------------------------
@@ -485,6 +618,7 @@ def estimate_station_velocity(
     doc: Mapping[str, Any] | None = None,
     k: npt.ArrayLike | None = None,
     k_method: str | None = None,
+    k_table: tuple[Mapping[str, Any] | None, str | None] | None = None,
     coords: tuple[float, float] | None = None,
 ) -> VelocityRecord:
     """The velocity of ``sta`` over [start, end]: THE product's estimator.
@@ -497,11 +631,12 @@ def estimate_station_velocity(
             None.
         doc: The detrend parameter document of the settings' frame; read
             when None.
-        k: The rate scale to use, shape (3,); None measures the station's
-            own (:func:`station_rate_scale`), falling back to
-            ``settings.default_k``.
-        k_method: The ``sigma_method`` a given ``k`` carries
-            (``empirical_k_network`` for a run median).
+        k: The rate scale to use, shape (3,); None takes, in order, the
+            station's own (:func:`station_rate_scale`, on the residual of
+            its ref, :data:`K_RESIDUAL`), the k(T) table's
+            (:func:`load_k_table`), ``settings.default_k``.
+        k_method: The ``sigma_method`` a given ``k`` carries.
+        k_table: A loaded ``(table, source)``; None loads the settings'.
         coords: (lon, lat); stations.cfg when None.
 
     Never raises for a station-level reason: a station that cannot give a
@@ -547,7 +682,9 @@ def estimate_station_velocity(
     wr = None
     if refused is None:
         try:
-            t, y, s, attrs = _read(sta, t0, t1, settings, ref=ref, doc=doc)
+            t, y, s, attrs = _read(
+                sta, t0, t1, settings, terms=_TERMS.get(ref), doc=doc
+            )
         except ValueError as exc:
             refused = f"read: {exc}"
     if refused is None:
@@ -563,17 +700,28 @@ def estimate_station_velocity(
         elif wr.steps_in_window:
             flags.append("steps_in_window")
     k_source: dict[str, Any] = {}
+    residual = K_RESIDUAL[ref]
     if k is not None:
         kk = np.asarray(k, dtype=float).reshape(3)
         sigma_method = k_method or "empirical_k"
+        k_source = {"given": True}
     else:
         own: FloatArray | None = None
         if refused is None and record is not None:
-            own, k_source = station_rate_scale(sta, t1 - t0, settings, doc=doc)
+            own, k_source = station_rate_scale(
+                sta, t1 - t0, settings, doc=doc, residual=residual
+            )
+        table, table_source = k_table if k_table is not None else load_k_table(settings)
+        from_table = table_k(table, residual, t1 - t0) if table is not None else None
         if own is not None:
             kk, sigma_method = own, "empirical_k"
+        elif from_table is not None:
+            kk, sigma_method = from_table, "empirical_k_table"
+            k_source = {"table": table_source, "residual": residual,
+                        "own": k_source.get("reason")}  # fmt: skip
         else:
             kk, sigma_method = np.full(3, settings.default_k), "default_k"
+            k_source = {"default_k": settings.default_k, "own": k_source.get("reason")}
     nan3 = (np.nan, np.nan, np.nan)
     rate = tuple(float(v) for v in wr.rate) if wr and refused is None else nan3
     formal = (
@@ -581,7 +729,9 @@ def estimate_station_velocity(
     )
     sigma = tuple(float(a * b) for a, b in zip(formal, kk, strict=True))
     fp_extra = {"settings": dataclasses.asdict(settings), "ref": ref,
-                "window": [t0, t1], "record": _record_summary(record)}  # fmt: skip
+                "window": [t0, t1], "record": _record_summary(record),
+                "k": [float(v) for v in kk], "sigma_method": sigma_method,
+                "k_source": k_source}  # fmt: skip
     return VelocityRecord(
         station=sta,
         lon=float(lon),
@@ -632,27 +782,16 @@ def estimate_velocities(
 ) -> list[VelocityRecord]:
     """Every station over one window, sorted by station.
 
-    Stations with a quiet span measure their own k first; the others take
-    the per-component median of those (``empirical_k_network``), else
-    ``settings.default_k``.
+    Each record depends on its station and the settings alone, never on
+    which other stations are in the run: the fallback k is the stored
+    k(T) table (:func:`build_k_table`), not a median of this run.
     """
     settings = settings or VelocitySettings()
     doc = _params_doc(settings)
-    first = [
-        estimate_station_velocity(sta, start, end, settings, doc=doc)
-        for sta in sorted({x.upper() for x in stations})
-    ]
-    median = network_k(first)
+    table = load_k_table(settings)
     out = []
-    for r in first:
-        if r.sigma_method == "default_k" and median is not None and r.accepted:
-            scaled = [float(a * b) for a, b in zip(r.sigma_formal, median, strict=True)]
-            r = dataclasses.replace(
-                r,
-                k=(float(median[0]), float(median[1]), float(median[2])),
-                sigma=(scaled[0], scaled[1], scaled[2]),
-                sigma_method="empirical_k_network",
-            )
+    for sta in sorted({x.upper() for x in stations}):
+        r = estimate_station_velocity(sta, start, end, settings, doc=doc, k_table=table)
         out.append(r)
         if progress is not None:
             progress(r)
@@ -853,6 +992,12 @@ def build_parser() -> argparse.ArgumentParser:
     e.add_argument("--min-obs", type=int, default=20)
     e.add_argument("--min-cover", type=float, default=0.8)
     e.add_argument("--default-k", type=float, default=DEFAULT_K)
+    e.add_argument(
+        "--k-table", default=None,
+        help="k(T) table for stations without a quiet span of their own "
+        "(default: k_table_<frame>.json in the velocity dir when built; "
+        "'none' = default-k)",
+    )  # fmt: skip
     e.add_argument("--pos-dir", default=None)
     e.add_argument("--params", default=None, help="detrend parameter document")
     e.add_argument("--steps", default=None, help="steps.yaml")
@@ -862,6 +1007,19 @@ def build_parser() -> argparse.ArgumentParser:
     e.add_argument(
         "--name", default=None, help="set name (default from window/ref/frame)"
     )
+    t = sub.add_parser(
+        "k-table",
+        help="build the k(T) table: the median empirical rate scale over every "
+        "station with a detrend record, the fallback of stations without one",
+    )
+    t.add_argument("stations", nargs="*", help="markers or patterns (default all)")
+    t.add_argument("--frame", default=DEFAULT_FRAME)
+    t.add_argument("--view", choices=VIEWS, default="cleaned")
+    t.add_argument("-u", "--uncert", type=float, default=DEFAULT_UNCERT)
+    t.add_argument("--pos-dir", default=None)
+    t.add_argument("--params", default=None)
+    t.add_argument("--out", default=None, help="file (default k_table_<frame>.json "
+                   "in the velocity dir)")  # fmt: skip
     s = sub.add_parser("show", help="print a set")
     s.add_argument("path")
     s.add_argument("--all", action="store_true", help="refused rows too")
@@ -884,11 +1042,32 @@ def _show(records: Sequence[VelocityRecord], show_all: bool) -> None:
         print(f"{r.station:4} {nums} {min(r.n_epochs):4d} {r.sigma_method:>18} {note}")
 
 
+def _k_table_main(args: argparse.Namespace) -> int:
+    settings = VelocitySettings(frame=args.frame, view=args.view,
+                                uncert=args.uncert, pos_dir=args.pos_dir,
+                                params=args.params)  # fmt: skip
+    stations = select_stations(args.stations, None)
+    table = build_k_table(
+        stations, settings, progress=lambda sta: print(sta, file=sys.stderr, end=" ")
+    )
+    out = Path(args.out).expanduser() if args.out else k_table_path(settings)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(table, indent=1, sort_keys=True) + "\n", encoding="utf-8")
+    print(f"\n{len(table['stations'])} stations -> {out}")
+    for residual, entry in table["residuals"].items():
+        for d, k, n in zip(entry["days"], entry["k"], entry["n_stations"], strict=True):
+            print(f"  {residual:8} {d:4d} d  k N/E/U {k[0]:5.2f} {k[1]:5.2f} {k[2]:5.2f}"
+                  f"  ({n} stations)")  # fmt: skip
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.cmd == "show":
         _show(read_velocity_records(args.path), args.all)
         return 0
+    if args.cmd == "k-table":
+        return _k_table_main(args)
     if (args.window is None) == (args.last is None):
         print("error: give --window START:END or --last DAYS", file=sys.stderr)
         return 2
@@ -903,7 +1082,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             no_record=args.no_record, allow_steps=args.allow_steps,
             min_obs=args.min_obs, min_cover=args.min_cover,
             default_k=args.default_k, pos_dir=args.pos_dir, params=args.params,
-            steps=args.steps,
+            steps=args.steps, k_table=args.k_table,
         )  # fmt: skip
         stations = select_stations(args.stations, args.region)
     except ValueError as exc:
@@ -933,10 +1112,11 @@ if __name__ == "__main__":  # pragma: no cover
 
 
 __all__ = [
-    "COMPONENTS", "DEFAULT_K", "REFS", "SCHEMA_VERSION", "VIEWS",
-    "VelocityRecord", "VelocitySettings", "WindowRate",
-    "estimate_station_velocity", "estimate_velocities", "network_k",
+    "COMPONENTS", "DEFAULT_K", "K_RESIDUAL", "K_TABLE_DAYS", "REFS",
+    "SCHEMA_VERSION", "VIEWS", "VelocityRecord", "VelocitySettings",
+    "WindowRate", "build_k_table", "estimate_station_velocity",
+    "estimate_velocities", "k_table_path", "load_k_table",
     "read_velocity_records", "select_stations", "set_name",
-    "station_rate_scale", "velocity_dir", "velocity_from_arrays",
-    "window_bounds", "write_velocity_set", "yearf",
+    "station_rate_scale", "station_rate_scales", "table_k", "velocity_dir",
+    "velocity_from_arrays", "window_bounds", "write_velocity_set", "yearf",
 ]  # fmt: skip
