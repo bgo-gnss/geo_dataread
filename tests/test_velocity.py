@@ -232,6 +232,14 @@ def test_a_station_without_record_falls_back_to_plate_or_is_refused(tmp_path):
     assert r2.sigma_method == "empirical_k_table" and r2.k == (2.0, 2.0, 2.0)
     assert r2.k_source["residual"] == "secular"
     assert r2.input_fingerprint != r.input_fingerprint  # k is in the key
+    assert "k_table_settings_differ" not in r2.flags
+    # a table built on the raw view: used, but the record says so
+    path.write_text(json.dumps({**_table(), "view": "raw", "uncert": 10.0}))
+    r3 = vel.estimate_station_velocity(
+        "THOB", *win, vel.VelocitySettings(k_table=str(path))
+    )
+    assert "k_table_settings_differ" in r3.flags
+    assert r3.k_source["table_settings"] == {"view": "raw"}
     np.testing.assert_allclose(r2.rate, r.rate)
     r = vel.estimate_station_velocity(
         "THOB", *win, vel.VelocitySettings(no_record="refuse", k_table="none")

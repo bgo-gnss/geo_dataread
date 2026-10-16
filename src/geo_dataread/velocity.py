@@ -719,6 +719,15 @@ def estimate_station_velocity(
             kk, sigma_method = from_table, "empirical_k_table"
             k_source = {"table": table_source, "residual": residual,
                         "own": k_source.get("reason")}  # fmt: skip
+            assert table is not None
+            differ = {
+                key: table.get(key)
+                for key, value in (("view", settings.view), ("uncert", settings.uncert))
+                if table.get(key) is not None and table.get(key) != value
+            }
+            if differ:  # a table built on other settings: usable, but say so
+                k_source["table_settings"] = differ
+                flags.append("k_table_settings_differ")
         else:
             kk, sigma_method = np.full(3, settings.default_k), "default_k"
             k_source = {"default_k": settings.default_k, "own": k_source.get("reason")}
@@ -782,9 +791,10 @@ def estimate_velocities(
 ) -> list[VelocityRecord]:
     """Every station over one window, sorted by station.
 
-    Each record depends on its station and the settings alone, never on
-    which other stations are in the run: the fallback k is the stored
-    k(T) table (:func:`build_k_table`), not a median of this run.
+    Each record depends on its station, the settings and the k(T) table
+    named in its ``k_source`` (:func:`build_k_table`), never on which other
+    stations are in the run. The table is a file: a host without it falls
+    back to ``default_k``, which ``sigma_method`` says.
     """
     settings = settings or VelocitySettings()
     doc = _params_doc(settings)

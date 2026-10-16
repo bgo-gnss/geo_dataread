@@ -77,8 +77,13 @@ data end is refused (4 epochs, cover 0.37). An earlier draft used a floor of
   3. `default_k = 5` (`default_k`).
 - **Never a median of the run.** An earlier draft used one, which made a
   station's σ depend on which other stations were drawn. A record now
-  depends only on its station and the settings, and k, `sigma_method` and
-  `k_source` are part of `input_fingerprint`.
+  depends on its station, the settings and the k table named in
+  `k_source`; k, `sigma_method` and `k_source` are part of
+  `input_fingerprint`.
+- **The table is a file.** A host without it (rek, until it is deployed)
+  falls back to `default_k = 5` for the stations without a record of their
+  own, which `sigma_method` says. A table built on another view or uncert is
+  used but flagged (`k_table_settings_differ`).
 
 **The k(T) table**: `gps-velocities k-table` writes
 `~/gps-data/velocities/k_table_itrf14.json`. It is the median over 113
@@ -141,6 +146,18 @@ formal. Open questions for BGÓ:
    plan (a regional secular model) first.
 
 ## Also open
+
+- **Which plate for model input.** `plate-periodic` and every
+  `fallback:plate` station remove each station's own plate model. Around
+  Svartsengi the assignment mixes NOAM and EURA, about 16 mm/yr apart in
+  east. `background` mode cancels it, because the station's own secular is
+  in its own plate frame. Per-station plate, or NOAM throughout for the
+  Reykjanes model input? (BGÓ)
+- **`--last N` during unrest.** The data end a few days before today, so
+  `--last 7` holds ~4 epochs and is refused (the map example `--last 7
+  --vertical` now draws nothing). Options (BGÓ): count `--last` back from
+  each station's last epoch, use `-e` set to the last data day, or change
+  the example.
 
 - `gps_api` velocities: becomes a projection of this product. The `.NEU`
   `_velocity_feature` path retires; it stamps ITRF2014 on ITRF2008-plate data.
