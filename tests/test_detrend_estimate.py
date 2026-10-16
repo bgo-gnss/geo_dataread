@@ -97,6 +97,13 @@ def _settings(**overrides: Any) -> StationFitSettings:
     return StationFitSettings(**base)
 
 
+def _status_catalog(tmp_path: Path, rows: str) -> Path:
+    """A detrend_status.csv with these rows under its header."""
+    path = tmp_path / "detrend_status.csv"
+    path.write_text("sta,status,notes\n" + rows)
+    return path
+
+
 def _empty_overrides(tmp_path: Path) -> Path:
     """Header-only outlier_overrides.csv (valid, empty catalog)."""
     path = tmp_path / "outlier_overrides.csv"
@@ -578,8 +585,36 @@ class TestCli:
             str(_empty_overrides(tmp_path)),
             "--analysis-yaml",
             str(empty_yaml),
+            # hermetic: not the operator's deployed skip list
+            "--status-catalog",
+            str(_status_catalog(tmp_path, "")),
         ]
         return catalog, out, extra
+
+    def test_a_skip_row_keeps_the_station_out_of_the_document(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        _catalog, out, extra = self._cli_env(tmp_path, monkeypatch)
+        status = _status_catalog(tmp_path, "DYNG,skip,unrest: no background\n")
+        extra = [*extra, "--status-catalog", str(status)]
+        assert main(["DYNG", *extra]) == 0
+        assert read_detrend_params(out)["stations"] == {}
+        assert "DYNG: [skip] detrend_status.csv: unrest: no background" in (
+            capsys.readouterr().out
+        )
+        assert main(["DYNG", *extra, "--include-skipped"]) == 0
+        assert set(read_detrend_params(out)["stations"]) == {"DYNG"}
+
+    def test_a_malformed_status_catalog_stops_the_batch(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _catalog, out, extra = self._cli_env(tmp_path, monkeypatch)
+        status = _status_catalog(tmp_path, ",skip,no station\n")
+        assert main(["DYNG", *extra, "--status-catalog", str(status)]) == 2
+        assert not out.exists()
 
     def test_catalog_row_unlocks_dyng_and_doc_is_readable(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -1009,9 +1044,9 @@ class TestStagePlansReachTheBatch:
         for c, comp in enumerate(run2["components"]):
             donor_params = drifted["stations"]["OLAC"]["components"][c]["params"]
             assert comp["params"][1] == donor_params[1], "donor rate did not propagate"
-            assert (
-                comp["params"][0] != donor_params[0]
-            ), "the donor's datum crossed into the borrower"
+            assert comp["params"][0] != donor_params[0], (
+                "the donor's datum crossed into the borrower"
+            )
 
         # and once run 2's record is deployed, an unchanged donor is silent
         drifted["stations"]["DYNG"] = run2
