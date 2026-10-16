@@ -44,7 +44,7 @@ def _record(**changes):
 
 def test_line_rates_are_recovered_per_component():
     t, y, s = _series(noise=0.1)
-    wr = vel.velocity_from_arrays(t, y, s, (t[0], t[-1]))
+    wr = vel.velocity_from_arrays(t, y, s, (t[0], t[-1] + 1e-6))
     assert wr.reasons == ()
     np.testing.assert_allclose(wr.rate, [1.0, -2.0, 3.0], atol=0.3)
     assert np.all(wr.sigma_formal > 0) and wr.n_epochs == (t.size,) * 3
@@ -53,7 +53,7 @@ def test_line_rates_are_recovered_per_component():
 def test_nan_epochs_drop_per_component_and_from_the_gates():
     t, y, s = _series()
     y[2, ::2] = np.nan  # outliers in up only
-    wr = vel.velocity_from_arrays(t, y, s, (t[0], t[-1]))
+    wr = vel.velocity_from_arrays(t, y, s, (t[0], t[-1] + 1e-6))
     assert wr.n_epochs[0] == t.size and wr.n_epochs[2] < t.size
     assert np.isfinite(wr.rate).all()
 
@@ -69,9 +69,9 @@ def test_gates_refuse_all_three_rates():
 def test_a_step_inside_refuses_unless_allowed():
     t, y, s = _series()
     step = float(t[40])
-    wr = vel.velocity_from_arrays(t, y, s, (t[0], t[-1]), step_epochs=[step])
+    wr = vel.velocity_from_arrays(t, y, s, (t[0], t[-1] + 1e-6), step_epochs=[step])
     assert wr.reasons == (f"step_in_window@{step:.4f}",)
-    wr = vel.velocity_from_arrays(t, y, s, (t[0], t[-1]), step_epochs=[step],
+    wr = vel.velocity_from_arrays(t, y, s, (t[0], t[-1] + 1e-6), step_epochs=[step],
                                   allow_steps=True)  # fmt: skip
     assert wr.reasons == () and wr.steps_in_window == (step,)
 
@@ -272,3 +272,55 @@ def test_records_do_not_depend_on_the_other_stations(monkeypatch):
     b = vel.estimate_velocities(["A"], 2026.0, 2026.1)
     assert [r.station for r in a] == ["A", "B"] and a[0] == b[0]
     assert {c[1] for c in calls} == {("T", "src")}
+
+
+def test_cli_defaults_are_the_library_defaults():
+    """gps-velocities and the map (VelocitySettings()) must give one number."""
+    args = vel.build_parser().parse_args(["estimate", "NYLA", "--last", "7"])
+    st = vel.VelocitySettings()
+    assert (args.min_obs, args.min_cover) == (st.min_obs, st.min_cover)
+    assert (args.ref, args.view, args.frame) == (st.ref, st.view, st.frame)
+    assert (args.uncert, args.default_k, args.no_record) == (
+        st.uncert,
+        st.default_k,
+        st.no_record,
+    )
+
+
+def test_last_days_are_whole_days_ending_with_the_end_day():
+    assert vel.last_days_start(dt.date(2026, 10, 16), 7) == dt.date(2026, 10, 10)
+    t0, t1 = vel.window_bounds(vel.last_days_start(dt.date(2026, 10, 16), 7),
+                               dt.date(2026, 10, 16))  # fmt: skip
+    assert (t1 - t0) * 365.25 == pytest.approx(7, abs=0.02)
+    with pytest.raises(ValueError, match="at least one day"):
+        vel.last_days_start(dt.date(2026, 10, 16), 0)
+
+
+def test_a_window_is_half_open_at_the_midnight_after_its_end():
+    t, y, s = _series(years=0.1)
+    end = float(t[-1])
+    whole = vel.velocity_from_arrays(t, y, s, (float(t[0]), end + 1e-9))
+    edge = vel.velocity_from_arrays(t, y, s, (float(t[0]), end))
+    assert whole.n_epochs[0] == edge.n_epochs[0] + 1
+
+
+@pytest.mark.usefixtures("_deployed_config_reachable")
+def test_a_station_without_a_pos_file_is_refused_not_raised(tmp_path):
+    st = vel.VelocitySettings(pos_dir=str(tmp_path), k_table="none")
+    r = vel.estimate_station_velocity("NYLA", dt.date(2026, 10, 1),
+                                      dt.date(2026, 10, 7), st)  # fmt: skip
+    assert not r.accepted and r.refused.startswith("read:")
+    r = vel.estimate_station_velocity("XXXX", dt.date(2026, 10, 1),
+                                      dt.date(2026, 10, 7), st)  # fmt: skip
+    assert not r.accepted and "no_coordinates" in r.flags
+
+
+def test_a_given_k_is_not_called_empirical(monkeypatch):
+    monkeypatch.setattr(
+        vel, "_read", lambda *a, **k: (_ for _ in ()).throw(ValueError("x"))
+    )
+    r = vel.estimate_station_velocity(
+        "NYLA", 2026.0, 2026.1, vel.VelocitySettings(no_record="plate"),
+        doc={"stations": {}}, k=(2.0, 2.0, 2.0), coords=(0.0, 0.0),
+    )  # fmt: skip
+    assert r.sigma_method == "given_k"

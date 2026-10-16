@@ -52,7 +52,12 @@ Before, three paths gave three answers for the same station and window:
 - The model is always a line. A seasonal cannot be estimated inside a window
   shorter than ~2.5 yr: it is removed from the record or not at all.
 - The window is whole days for dates: from the start date's midnight to the
-  midnight after the end date.
+  midnight after the end date, half-open (an epoch at that midnight is out).
+  `--last N` is N whole days ending with `-e` (default today), in
+  `gps-velocities` and the map alike.
+- `gpsplot ts --rate` without `--rate-window` takes the same whole days, from
+  the plot's `-s`/`-e` (else its first/last epoch): the same T, k(T) and σ
+  as `map --window` over the same dates.
 
 **Gates** (refused, with the reason):
 - fewer than 5 epochs;
@@ -64,7 +69,13 @@ Before, three paths gave three answers for the same station and window:
 The 5-epoch floor is low on purpose: week-long inter-episode windows must
 pass, and `min_cover` keeps sparse windows out. The last week before the
 data end is refused (4 epochs, cover 0.37). An earlier draft used a floor of
-20, which refused every 7–14 day window.
+20, which refused every 7–14 day window. The CLI defaults are the
+`VelocitySettings` defaults (test-pinned): the map and `gps-velocities` give
+one number.
+
+A station with no `.pos` or no stations.cfg entry is refused (`read: …`,
+`no_coordinates`), never a crash of the run. A `k` passed by the caller is
+`sigma_method = given_k`.
 
 **σ: k(T), the empirical rate scale.**
 - On a quiet series with its background removed, slide windows of length T,
@@ -144,6 +155,18 @@ formal. Open questions for BGÓ:
 3. **Borrowed secular records** stay refused, as `record_velocity` does now.
 4. **The Reykjanes stations without records** need item 3 of the Reykjanes
    plan (a regional secular model) first.
+
+## Known limitation: the `cleaned` view (Fable code review 2026-10-16)
+
+`view=cleaned` runs outlier detection on the window alone, fitting a
+`lineperiodic` model to the window's epochs (`read_gps_view(clean=True)` on
+[t0, t1]). In unrest that flags real signal: on the Nov-2023 dike a 61-d
+window aborts on SENG east (flagged `outlier_abort`), and drops 2 epochs on
+SKSH and 1 on THOB **silently**. The cleaned set also depends on the window
+length, so it is not the set `gpsplot ts --view cleaned` shows. Options
+(BGÓ, tied to the fast-motion gate below): the product default to `raw` +
+the declared `excluded_epochs.csv`, or detect once on the record window +
+the window and slice.
 
 ## Also open
 

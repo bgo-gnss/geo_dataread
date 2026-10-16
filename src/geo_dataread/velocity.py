@@ -24,10 +24,11 @@ Uncertainty: the WLS formal σ of the window rate times the station's
 empirical rate scale k(T) (:func:`gps_analysis.empirical_rate_scale`),
 measured on the station's own quiet span (its detrend record window, the
 background removed) for windows of the same length. A station without
-one takes the median k of the stations in the same run, else
-:data:`DEFAULT_K`; ``sigma_method`` says which.
+one takes the stored k(T) table's (:func:`load_k_table`), else
+:data:`DEFAULT_K`; ``sigma_method`` says which. Never a median of the run:
+a record depends on its station, the settings and the table alone.
 
-Refusals (``refused``, no rate): fewer than 20 epochs, less than 80 % of
+Refusals (``refused``, no rate): fewer than 5 epochs, less than 80 % of
 the window spanned, a declared step inside the window (``allow_steps``
 turns that into a flag), a failed background removal, no record when one
 is required. The model is always a line: a seasonal cannot be estimated
@@ -258,7 +259,7 @@ def velocity_from_arrays(
     yy = np.atleast_2d(np.asarray(y, dtype=np.float64))
     ss = np.atleast_2d(np.asarray(sigma, dtype=np.float64))
     start, end = float(window[0]), float(window[1])
-    inside = np.isfinite(tt) & (tt >= start) & (tt <= end)
+    inside = np.isfinite(tt) & (tt >= start) & (tt < end)
     finite = (
         inside
         & np.all(np.isfinite(yy), axis=0)
@@ -313,6 +314,14 @@ def window_bounds(
     if isinstance(end, dt.date) and not isinstance(end, dt.datetime):
         end = end + dt.timedelta(days=1)
     return yearf(start), yearf(end)
+
+
+def last_days_start(end: dt.date, days: int) -> dt.date:
+    """The first day of the ``days`` days ending with ``end`` (both in):
+    ``--last 7`` is seven whole days."""
+    if days < 1:
+        raise ValueError(f"--last {days}: at least one day")
+    return end - dt.timedelta(days=days - 1)
 
 
 def _pos_dir(settings: VelocitySettings) -> str:
@@ -667,7 +676,7 @@ def estimate_station_velocity(
         flags.append(f"borrowed:{(record['borrowed'] or {}).get('from')}")
     try:
         lon, lat = coords if coords is not None else _coords(sta)
-    except (KeyError, TypeError, ValueError):
+    except Exception:  # gps_parser raises bare Exception for an unknown station
         lon, lat = np.nan, np.nan
         flags.append("no_coordinates")
     from geo_dataread.gps_views import station_step_epochs
@@ -685,7 +694,7 @@ def estimate_station_velocity(
             t, y, s, attrs = _read(
                 sta, t0, t1, settings, terms=_TERMS.get(ref), doc=doc
             )
-        except ValueError as exc:
+        except (OSError, ValueError) as exc:  # no .pos: FileNotFoundError
             refused = f"read: {exc}"
     if refused is None:
         if attrs.get("outlier_abort"):
@@ -703,7 +712,7 @@ def estimate_station_velocity(
     residual = K_RESIDUAL[ref]
     if k is not None:
         kk = np.asarray(k, dtype=float).reshape(3)
-        sigma_method = k_method or "empirical_k"
+        sigma_method = k_method or "given_k"
         k_source = {"given": True}
     else:
         own: FloatArray | None = None
@@ -957,7 +966,7 @@ def select_stations(
     from gps_parser import ConfigParser
 
     cfg = ConfigParser()
-    names = [str(s) for s in cfg.getStationInfo()]
+    names = [str(s) for s in cfg.getStationInfo() if str(s) != "DEFAULTS"]
     pats = [p.upper() for p in patterns] or ["*"]
     picked = [n for n in names if any(fnmatch.fnmatchcase(n, p) for p in pats)]
     if region is None:
@@ -967,7 +976,7 @@ def select_stations(
     for sta in picked:
         try:
             lon, lat = _coords(sta)
-        except (KeyError, TypeError, ValueError):
+        except Exception:  # an unknown station: not in the region
             continue
         if w <= lon <= e and s <= lat <= n:
             out.append(sta)
@@ -987,7 +996,7 @@ def build_parser() -> argparse.ArgumentParser:
     e.add_argument("--window", type=_window, default=None, metavar="START:END")
     e.add_argument("--last", type=int, default=None, metavar="DAYS")
     e.add_argument("-e", "--end", type=_date, default=None,
-                   help="YYYYMMDD: the end of --last (default today)")  # fmt: skip
+                   help="YYYYMMDD: the last day of --last (default today)")  # fmt: skip
     e.add_argument("--ref", choices=REFS, default="plate-periodic",
                    help="plate-periodic: seasonal removed; background: secular + "
                    "seasonal removed (the transient); plate: nothing more")  # fmt: skip
@@ -999,8 +1008,8 @@ def build_parser() -> argparse.ArgumentParser:
                    "plate (flagged) or refuse")  # fmt: skip
     e.add_argument("--allow-steps", action="store_true",
                    help="keep a window with a declared step inside (flagged)")  # fmt: skip
-    e.add_argument("--min-obs", type=int, default=20)
-    e.add_argument("--min-cover", type=float, default=0.8)
+    e.add_argument("--min-obs", type=int, default=VelocitySettings.min_obs)
+    e.add_argument("--min-cover", type=float, default=VelocitySettings.min_cover)
     e.add_argument("--default-k", type=float, default=DEFAULT_K)
     e.add_argument(
         "--k-table", default=None,
@@ -1085,7 +1094,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         start, end = args.window
     else:
         end = args.end or dt.date.today()
-        start = end - dt.timedelta(days=args.last)
+        start = last_days_start(end, args.last)
     try:
         settings = VelocitySettings(
             frame=args.frame, ref=args.ref, view=args.view, uncert=args.uncert,
