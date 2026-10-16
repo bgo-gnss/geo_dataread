@@ -38,6 +38,7 @@ gps-globk-tot = "geo_dataread.globk_tot:main"
 gps-estimate-detrend = "geo_dataread.detrend_estimate:main"
 gps-realign = "geo_dataread.realign:main"
 gps-baseline-noise = "geo_dataread.baseline_noise:main"
+gps-velocities = "geo_dataread.velocity:main"
 
 [tool.hatch.metadata]
 allow-direct-references = true

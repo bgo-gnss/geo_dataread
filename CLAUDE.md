@@ -57,6 +57,7 @@ geo_dataread/
 │   ├── globk_join.py     # GLOBK multibase segment read + datum-consistent join (10 m de-wrap, min-σ dedup) + mb_STA_TOT.dat writer (format_tot_file/write_joined_series, 3-line-header contract) (typed, mypy-strict)
 │   ├── globk_tot.py      # gps-globk-tot CLI: batch pre/rap → local TOT dir; per-station segment-exclusion catalog (segment_exclusions.csv) + declared non-quantum junction offsets (junction_offsets.csv, e.g. GUSK U +1.093 m for a stale station.info height), both deployed via gps_parser outlier_catalogs; --exclusions / --junction-offsets dev overrides; reason mandatory (typed, mypy-strict)
 │   ├── detrend_estimate.py # gps-estimate-detrend CLI: batch estimate stored-detrend params from local TOT (ref=plate) → detrend_params.json (schema v1); per-station fit catalog fit_windows.csv (window + gate overrides, e.g. DYNG max_gap 1.0) via gps_parser resolver; unstamped = byte-reproducible, --stamp for timestamps; --uncert is the read-time sigma screen (default 15 = getData's own, workbench uses 10) and rides into refs, because it changes WHICH epochs were fitted without touching any fitted quantity; station_estimate_from_arrays returns record + the inlier mask lifted to the caller's index space (station_record_from_arrays wraps it) — the workbench's grey overlay, which no re-run detector could match (typed, mypy-strict)
+│   ├── velocity.py       # THE velocity product (BGÓ 2026-10-16): estimate_station_velocity → VelocityRecord (window rate, ref plate-periodic|background|plate, σ = formal × empirical k(T): the station's own on its quiet span (residual by ref: plate keeps the seasonal), else the stored k(T) table (gps-velocities k-table → velocity_dir/k_table_<frame>.json, median of 113 stations), else 5 — never a run median, so a record depends on its station alone; k is in the fingerprint; gates n_obs ≥ 5 + cover ≥ 0.8, provenance + fingerprint); write_velocity_set → .gmt/.csv/.jsonl (one frame, byte-stable); gps-velocities estimate|k-table|show (typed)
 │   ├── rtk_read.py       # RTK baselines (RTKLIB ROVER-BASE day files on rtk.vedur.is, mounted /mnt_data/rtgpsdata, $GPS_RTK_DIR): ENU columns (not rtk_gps's sdn/sde labels), UTC, day files overlap midnight (dedup), Q=5 + sigma screen, interval medians; complete days cached under $GPS_RTK_CACHE / XDG cache; never writes under the data dir (typed)
 │   ├── gas_read.py       # GAS (strainmeter) data
 │   ├── sil_read.py       # SIL seismic data
@@ -132,6 +133,7 @@ gps-displacemnts ...  # entry: geo_dataread.gps_displ:main   (sic — typo prese
 gps-globk-tot ...     # entry: geo_dataread.globk_tot:main — batch GLOBK pre/rap segments → local mb_STA_TOT.dat{1,2,3} (deployed segment_exclusions.csv + junction_offsets.csv; --exclusions / --junction-offsets dev overrides)
 gps-realign --start D --end D --frame igb14|itrf2008 [--to itrf2020] --out DIR [-j N] # re-align the loose SINEX archive → per-station .pos
 gps-baseline-noise [--dir TOT] [--window-years 2] # refit the empirical baseline-σ record (cron-able, ~4 s)
+gps-velocities estimate --region W/E/S/N --window A:B [--ref plate-periodic|background|plate] # the velocity product → velocity_dir (default ~/gps-data/velocities)
 gps-estimate-detrend ... # entry: geo_dataread.detrend_estimate:main — batch detrend-parameter estimation over local TOT → detrend_params.json (fit_windows.csv per-station windows/gates)
                          #   --analysis-yaml: per-station STAGE PLANS (detrend.estimation.stage_plans), what gps-detrend-workbench --commit writes
                          #   --donor-params:  document a 'donor:' hold borrows from (default: the DEPLOYED one, never this run's --out)
@@ -142,11 +144,12 @@ gps-estimate-detrend ... # entry: geo_dataread.detrend_estimate:main — batch d
 - `../CLAUDE.md` — ecosystem overview + dependency graph
 - `../geofunc/CLAUDE.md` — coordinate-math primitives this package consumes
 - `../gps_parser/CLAUDE.md` — station-config provider
+- `docs/velocity-product.md` — the velocity product: decisions, gates, k(T) table, schema, phase 2 questions
 - Vault hub: `/home/bgo/notes/bgovault/2.Areas/VI_GPS_Library/1776347706-gps-library-ecosystem-hub.md`
 
 ---
 
-*Last reviewed: 2026-10-14 (rtk_read: RTK baselines for gpsplot rtk; gps_views.window_datum_shift, for gpsplot ts --model). Previous 2026-10-13 (pos: products = itr08/igb14/final_igb20; itrf2020 now names gamit-p01's IGb20). Previous 2026-10-12 (stabilize/org: glorg stabilization on the loose SINEX; station_catalog: plate velocity via geofunc.plates). Previous 2026-10-10 (pos.py: .pos reader + tType="POS"; write_pos 2026-10-12). Previous 2026-10-09 (baseline_noise + sinex modules; baseline() opt-in rho=/sigma_scale=). Previous 2026-08-26 (re-anchoring now covers BOTH hold kinds:
+*Last reviewed: 2026-10-16 (velocity: the velocity product, phase 1 windowed). Previous 2026-10-14 (rtk_read: RTK baselines for gpsplot rtk; gps_views.window_datum_shift, for gpsplot ts --model). Previous 2026-10-13 (pos: products = itr08/igb14/final_igb20; itrf2020 now names gamit-p01's IGb20). Previous 2026-10-12 (stabilize/org: glorg stabilization on the loose SINEX; station_catalog: plate velocity via geofunc.plates). Previous 2026-10-10 (pos.py: .pos reader + tType="POS"; write_pos 2026-10-12). Previous 2026-10-09 (baseline_noise + sinex modules; baseline() opt-in rho=/sigma_scale=). Previous 2026-08-26 (re-anchoring now covers BOTH hold kinds:
 `donor:` (a finished record in detrend_params.json) carried the donor's datum
 exactly as `store:` did — measured, THOB holding SENG via donor: sat
 +75.3/-34.3/-124.6 mm off its own data and ignored --anchor-window entirely.
