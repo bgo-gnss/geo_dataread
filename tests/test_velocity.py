@@ -32,7 +32,8 @@ def _record(**changes):
         k=(4.0, 4.0, 4.0), k_source={"quiet_span": [2010.0, 2019.0]},
         corr_en=0.0, record=None, steps_in_window=(), outlier_abort=False,
         n_flagged=0, flags=(), refused=None, software={"x": "1"},
-        input_fingerprint="abc",
+        input_fingerprint="abc", snr=(10.0, 2.0), chi2nu=(1.0, 1.1, 0.4),
+        f_quadratic=(0.5, 1.0, 2.0),
     )  # fmt: skip
     return dataclasses.replace(base, **changes)
 
@@ -58,12 +59,17 @@ def test_nan_epochs_drop_per_component_and_from_the_gates():
     assert np.isfinite(wr.rate).all()
 
 
-def test_gates_refuse_all_three_rates():
+def test_count_and_cover_gates_leave_a_short_window_to_the_short_tier():
     t, y, s = _series(years=0.01)  # 4 epochs
     wr = vel.velocity_from_arrays(t, y, s, (t[0], t[0] + 0.25))
     assert any(r.startswith("n_obs") for r in wr.reasons)
     assert any(r.startswith("cover") for r in wr.reasons)
-    assert np.isnan(wr.rate).all()
+    assert wr.short and np.isfinite(wr.rate).all()
+    assert np.all(wr.sigma_short >= wr.sigma_formal - 1e-12)
+    # a step inside refuses outright: no short tier
+    wr = vel.velocity_from_arrays(t, y, s, (t[0], t[0] + 0.25),
+                                  step_epochs=[float(t[1]) + 1e-4])  # fmt: skip
+    assert not wr.short and np.isnan(wr.rate).all()
 
 
 def test_a_step_inside_refuses_unless_allowed():
@@ -148,6 +154,12 @@ def test_record_round_trips_through_json_with_nan_as_null():
     assert vel.VelocityRecord.from_dict(_record().to_dict()) == _record()
     with pytest.raises(ValueError, match="schema"):
         vel.VelocityRecord.from_dict({**d, "schema_version": 99})
+    # a schema-1 record reads with the standard-tier defaults
+    v1 = {k: v for k, v in _record().to_dict().items()
+          if k not in ("tier", "snr", "chi2nu", "f_quadratic", "parts_refused",
+                       "data_end")}  # fmt: skip
+    old = vel.VelocityRecord.from_dict({**v1, "schema_version": 1})
+    assert old.tier == "standard" and np.isnan(old.snr).all()
 
 
 def test_set_files_are_sorted_byte_stable_and_gmt_has_accepted_rows(tmp_path):
@@ -167,7 +179,9 @@ def test_set_files_are_sorted_byte_stable_and_gmt_has_accepted_rows(tmp_path):
                                   "2.000", "2.000", "0.000"]  # fmt: skip
     csv_rows = paths["csv"].read_text().splitlines()[2:]
     assert [r.split(",")[0] for r in csv_rows] == ["AAAA", "MMMM", "ZZZZ"]
-    assert csv_rows[0].endswith(",no_record")
+    head = paths["csv"].read_text().splitlines()[1].split(",")
+    assert csv_rows[0].split(",")[head.index("refused")] == "no_record"
+    assert head[-4:] == ["tier", "snr_h", "snr_u", "parts_refused"]
     back = vel.read_velocity_records(paths["csv"])
     assert [r.station for r in back] == ["AAAA", "MMMM", "ZZZZ"]
 
@@ -285,6 +299,11 @@ def test_cli_defaults_are_the_library_defaults():
         st.default_k,
         st.no_record,
     )
+    assert (args.short_tier, args.short_snr, args.short_snr_pair) == (
+        st.short_tier,
+        st.short_snr,
+        st.short_snr_pair,
+    )
 
 
 def test_last_days_are_whole_days_ending_with_the_end_day():
@@ -324,3 +343,49 @@ def test_a_given_k_is_not_called_empirical(monkeypatch):
         doc={"stations": {}}, k=(2.0, 2.0, 2.0), coords=(0.0, 0.0),
     )  # fmt: skip
     assert r.sigma_method == "given_k"
+
+
+def _fake_read(t, y, s):
+    return lambda *a, **k: (np.asarray(t, float), np.asarray(y, float),
+                            np.asarray(s, float), {})  # fmt: skip
+
+
+def _short(monkeypatch, t, y, s, **settings):
+    monkeypatch.setattr(vel, "_read", _fake_read(t, y, s))
+    day = 1 / 365.25
+    return vel.estimate_station_velocity(
+        "NYLA", float(t[0]) - day / 2, float(t[-1]) + day / 2,
+        vel.VelocitySettings(**settings), doc={"stations": {}},
+        k=(1.5, 1.5, 1.5), coords=(0.0, 0.0),
+    )  # fmt: skip
+
+
+def test_short_tier_keeps_a_fast_pair_and_drops_the_quiet_up(monkeypatch):
+    day = 1 / 365.25
+    t = 2015.5 + np.arange(3) * day
+    y = np.vstack([20.0 * np.arange(3), -25.0 * np.arange(3), np.zeros(3)])
+    r = _short(monkeypatch, t, y, np.full((3, 3), 3.0))
+    assert r.accepted and r.tier == "short" and "short:n=3" in r.flags
+    assert r.rate[0] == pytest.approx(20.0 * 365.25)
+    assert np.isnan(r.rate[2]) and r.parts_refused["up"].startswith("snr=")
+    assert r.snr[0] >= vel.SHORT_SNR
+
+
+def test_short_tier_refuses_quiet_windows_and_a_blunder(monkeypatch):
+    day = 1 / 365.25
+    t = 2015.5 + np.arange(3) * day
+    quiet = _short(monkeypatch, t, np.zeros((3, 3)), np.full((3, 3), 3.0))
+    assert not quiet.accepted and "horizontal snr=" in quiet.refused
+    # one bad epoch on 3: the χ² inflates σ, the window stays refused
+    bad = np.zeros((3, 3))
+    bad[1, 2] = 40.0
+    r = _short(monkeypatch, t, bad, np.full((3, 3), 3.0))
+    assert not r.accepted
+    # two epochs: the stricter pair threshold
+    t2, y2 = t[:2], np.vstack([[0.0, 40.0], [0.0, 0.0], [0.0, 0.0]])
+    r = _short(monkeypatch, t2, y2, np.full((3, 2), 3.0))
+    assert not r.accepted  # snr 40 mm/day at σ 3: below the pair's 10
+    loose = _short(monkeypatch, t2, y2, np.full((3, 2), 3.0), short_snr_pair=3.0)
+    assert loose.accepted and "short:n=2" in loose.flags
+    off = _short(monkeypatch, t2, y2, np.full((3, 2), 3.0), short_tier=False)
+    assert not off.accepted and "snr" not in off.refused

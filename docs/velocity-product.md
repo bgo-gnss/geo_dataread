@@ -48,7 +48,8 @@ Before, three paths gave three answers for the same station and window:
 **Estimator.**
 - A line, per component, over a window of the plate-removed `.pos` series
   in ONE frame (itrf2014 by default).
-- The ref's stored terms are removed first; the `cleaned` view by default.
+- The ref's stored terms are removed first; the `declared` view by default
+  (below).
 - The model is always a line. A seasonal cannot be estimated inside a window
   shorter than ~2.5 yr: it is removed from the record or not at all.
 - The window is whole days for dates: from the start date's midnight to the
@@ -59,17 +60,49 @@ Before, three paths gave three answers for the same station and window:
   the plot's `-s`/`-e` (else its first/last epoch): the same T, k(T) and σ
   as `map --window` over the same dates.
 
-**Gates** (refused, with the reason):
-- fewer than 5 epochs;
-- less than 80 % of the window spanned;
+**Gates: two tiers** (BGÓ 2026-10-16: slow motion must be robust, fast
+motion is well determined from few epochs, even two).
+
+Refused outright, with the reason:
 - a declared step strictly inside (`--allow-steps` turns that into a flag);
-- a failed background removal;
+- a failed background removal, no `.pos`, fewer than 2 epochs;
 - no record when one is required (`--no-record refuse`).
 
-The 5-epoch floor is low on purpose: week-long inter-episode windows must
-pass, and `min_cover` keeps sparse windows out. The last week before the
-data end is refused (4 epochs, cover 0.37). An earlier draft used a floor of
-20, which refused every 7–14 day window. The CLI defaults are the
+*Standard tier*: at least 5 epochs and 80 % of the window covered. Cover
+counts each daily epoch's own day, so five daily epochs cover a five-day
+window, and is measured against the station's last epoch when the data stop
+inside the window (the processing lag; flag `truncated@<yr>`, `data_end`).
+
+*Short tier* (`tier = short`): a window failing only the count/cover gates
+keeps each part, horizontal pair or up, whose |v|/σ reaches 5 (10 on two
+epochs); a part that does not stand is NaN, with its reason in
+`parts_refused`; no part standing refuses the window. σ here is a-priori ×
+√max(1, χ²/ν) × k: χ² on 2–4 epochs is too noisy to shrink σ, but a blunder
+must still inflate it. `--no-short-tier`, `--short-snr`, `--short-snr-pair`.
+
+Thresholds, measured 2026-10-16 (raw series, background removed, 3-yr quiet
+spans of 20 stations, every 1–8 day window, ~20 000 per epoch count):
+
+| | false accepts per 10⁴, \|v_h\|/σ_h ≥ 5 | ≥ 10 |
+|---|---|---|
+| 2 epochs | 23 | 2 |
+| 3–4 epochs | 1.6–2 | 0 |
+
+Up never passed 5 on quiet data. The fast motion passes: the Svartsengi dike
+~200 on two epochs (but it is a step, declared, so refused); post-dike
+2023-11-12..14 SENG/SKSH/ELDC 6–13 on three epochs, while the two-epoch
+11-12..13 window gives SENG 9.1, SKSH 10.0, THOB 8.9 — just under the pair
+threshold (`--short-snr-pair 8` takes them at ~10 false per 10⁴). The 2024
+inflation reaches 5 only over ~10–14 days.
+
+*Nonlinear flag* (`nonlinear:NEU`): the F of a quadratic against the line
+≥ 50 in a component (`gps_analysis.NONLINEAR_F`). Quiet p99 is 23–42 at
+7–61 d, 80 at 91 d; post-dike 14–30 d windows reach 30–310. A flag, not a
+refusal: the rate of a decaying pulse is a mean, not a rate. χ²/ν was not
+used: it depends on the component and on `-u` (quiet p99 N 10, E 16, U 2.5).
+
+An earlier draft used a floor of 20, which refused every 7–14 day window.
+The CLI defaults are the
 `VelocitySettings` defaults (test-pinned): the map and `gps-velocities` give
 one number.
 
@@ -113,19 +146,22 @@ stations with records, built in 2 min.
 k grows with T, as correlated noise predicts. Where the seasonal is kept,
 k is higher at 2–6 months: that excess is the seasonal aliasing.
 
-**Record** (`VelocityRecord`, schema 1, one line of `.jsonl`):
+**Record** (`VelocityRecord`, schema 2, one line of `.jsonl`; schema 1
+reads with the standard-tier defaults):
 - station, lon/lat, frame, plate, ref (used and requested), series, view;
 - uncert, window, span used, n epochs per component, largest gap;
 - method `wls`, model `linear`;
 - rate, σ, formal σ, `sigma_method`, k, `k_source`, `corr_en` (0: the
   components are fitted on their own);
 - a record summary, steps in the window, outlier abort, flags, refusal;
+- `tier`, `snr` (horizontal, up), `chi2nu`, `f_quadratic`, `parts_refused`,
+  `data_end`;
 - software versions, `input_fingerprint`.
 
 **Files** (`write_velocity_set`): sorted by station, fixed decimals, no
 timestamps, so they are byte-stable (verified). One frame per set.
 - `.gmt`: `lon lat ve vn sve svn corr_en station`, GMT `velo -Se`, accepted
-  rows only;
+  rows with a horizontal rate only;
 - `.csv`: every row, with the reason a row was refused;
 - `.jsonl`: the full record per line.
 
@@ -156,7 +192,16 @@ formal. Open questions for BGÓ:
 4. **The Reykjanes stations without records** need item 3 of the Reykjanes
    plan (a regional secular model) first.
 
-## Known limitation: the `cleaned` view (Fable code review 2026-10-16)
+## The view: `declared` by default (BGÓ 2026-10-16)
+
+`declared` is the raw series less the operator-declared blunder epochs
+(`excluded_epochs.csv`, matched as the cleaned view matches them), with no
+detection. `cleaned` stays available; its limitation follows. `gpsplot ts
+--rate` uses the product's view, not the plot's (`--view raw` stays raw), so
+its number is the map's. The k table is built on `declared`
+(`gps-velocities k-table --view declared`; within 0.1 of the cleaned one).
+
+### The `cleaned` view (Fable code review 2026-10-16)
 
 `view=cleaned` runs outlier detection on the window alone, fitting a
 `lineperiodic` model to the window's epochs (`read_gps_view(clean=True)` on
@@ -164,9 +209,8 @@ formal. Open questions for BGÓ:
 window aborts on SENG east (flagged `outlier_abort`), and drops 2 epochs on
 SKSH and 1 on THOB **silently**. The cleaned set also depends on the window
 length, so it is not the set `gpsplot ts --view cleaned` shows. Options
-(BGÓ, tied to the fast-motion gate below): the product default to `raw` +
-the declared `excluded_epochs.csv`, or detect once on the record window +
-the window and slice.
+were the product default to `raw` + the declared `excluded_epochs.csv` (taken:
+`declared`), or detect once on the record window + the window and slice.
 
 ## Also open
 
