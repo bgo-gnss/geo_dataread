@@ -1234,8 +1234,9 @@ def compare_with_prior(
     processing problem rather than motion. ``None`` when either record has no
     ``rate`` (by name) or the components differ.
     """
-    names, pnames = list(record.get("param_names") or ()), list(
-        prior.get("param_names") or ()
+    names, pnames = (
+        list(record.get("param_names") or ()),
+        list(prior.get("param_names") or ()),
     )
     if "rate" not in names or "rate" not in pnames:
         return None
@@ -1649,6 +1650,19 @@ def _donor_drift(
     return donor_drift_warnings(previous, record, station=sta)
 
 
+def _skipped_stations(path: Path | None) -> dict[str, str]:
+    """The ``skip`` stations of ``detrend_status.csv`` (``path``, else the
+    deployed catalog); none when there is no catalog.
+
+    Raises:
+        ValueError: a malformed catalog — a batch must not silently fit
+            stations the operator meant to leave out.
+    """
+    from gps_parser.outlier_catalogs import skipped_detrend_stations
+
+    return {str(k): str(v) for k, v in skipped_detrend_stations(path).items()}
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """CLI entry point: batch-estimate detrend parameters -> JSON document."""
     parser = argparse.ArgumentParser(
@@ -1782,6 +1796,23 @@ def main(argv: Sequence[str] | None = None) -> int:
         ),
     )
     parser.add_argument(
+        "--status-catalog",
+        type=Path,
+        default=None,
+        help=(
+            "detrend_status.csv dev override; default: the deployed catalog "
+            "via gps_parser. Its 'skip' stations get no record"
+        ),
+    )
+    parser.add_argument(
+        "--include-skipped",
+        action="store_true",
+        help=(
+            "estimate the stations detrend_status.csv marks 'skip' too "
+            "(default: left out, named in the log)"
+        ),
+    )
+    parser.add_argument(
         "--stamp",
         action="store_true",
         help=(
@@ -1874,11 +1905,22 @@ def main(argv: Sequence[str] | None = None) -> int:
         datetime.now(timezone.utc).isoformat(timespec="seconds") if args.stamp else None
     )
 
+    try:
+        skipped = {} if args.include_skipped else _skipped_stations(args.status_catalog)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
     records: dict[str, dict[str, Any]] = {}
     d_rates: dict[str, list[float]] = {}
     n_errors = 0
     for station in args.stations:
         sta = station.upper()
+        if sta in skipped:
+            # the operator's decision: no record, not even a prior fallback
+            note = f": {skipped[sta]}" if skipped[sta] else ""
+            print(f"{sta}: [skip] detrend_status.csv{note}")
+            continue
         settings = resolve_fit_settings(
             sta, catalog, defaults, catalog_source=catalog_source
         )
