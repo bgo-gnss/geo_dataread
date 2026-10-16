@@ -144,6 +144,7 @@ gps-estimate-detrend ... # entry: geo_dataread.detrend_estimate:main — batch d
 - `../CLAUDE.md` — ecosystem overview + dependency graph
 - `../geofunc/CLAUDE.md` — coordinate-math primitives this package consumes
 - `../gps_parser/CLAUDE.md` — station-config provider
+- `docs/velocity-product.md` — the velocity product: decisions, gates, k(T) table, schema, phase 2 questions
 - Vault hub: `/home/bgo/notes/bgovault/2.Areas/VI_GPS_Library/1776347706-gps-library-ecosystem-hub.md`
 
 ---
