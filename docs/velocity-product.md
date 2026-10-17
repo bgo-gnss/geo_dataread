@@ -181,6 +181,44 @@ timestamps, so they are byte-stable (verified). One frame per set.
 - `gpsplot map velocity --velocities FILE` is pixel-identical to the map
   that wrote the file.
 
+## The `pre-onset` reference (BGÓ 2026-10-17)
+
+`--ref pre-onset --pre-window START:END`: the window's `plate-periodic` rate
+less the station's own `plate-periodic` rate over a fixed reference window
+before the unrest's onset. The rates are then relative to the preceding
+state, in the frame of the activity; the plate (NOAM/EURA) drops out with
+it. For the 2023 Svartsengi unrest: `--pre-window 20230806:20231024`, the
+day after Litli-Hrútur ended (2023-08-05) to the day before the uplift
+(onset 2023-10-27 in VÍ's timeline and in the GNSS, the daily solutions
+show it from the 27th; the series used 25 Oct as a safe end).
+
+- Two estimates of the ordinary estimator: the window (its gates, short
+  tier, k) and the pre-window (standard tier only, no step inside). rate =
+  v_win − v_pre; σ = √(σ_win² + σ_pre²) per component. The short tier's
+  part decisions are the window's own (what its false-accept rates were
+  measured on); `snr` is the relative rate's.
+- A refused pre-window refuses the record (`pre_onset: <reason>`): no data
+  before the onset (the stations installed in November 2023), too little
+  cover. A neighbour's pre-rate is never borrowed (SENG and SKSH differ
+  5.7 mm/yr east in their secular rate).
+- `seasonal:none`: a station without a stored record has no seasonal
+  removed, so its pre-window rate aliases the seasonal; its k(L) (seasonal
+  kept, `K_RESIDUAL["plate"]`) says how much (~3.3–4 at 80–90 days). A
+  regional seasonal (open item 2) is the fix.
+- `pre_overlap`: the window starts before the pre-window ends; the two
+  rates share epochs and σ is conservative.
+- The record keeps what was subtracted in `pre_onset` (window, rate, σ,
+  k, n, flags, fingerprint), schema 3.
+- Measured on the 2023 reference (itrf20, 48 Reykjanes stations): 23
+  take it. The reference is not quiet near Fagradalsfjall (FEFC U +135,
+  GONH U +164, VOGC N +111 mm/yr in Aug–Oct 2023, after Litli-Hrútur):
+  "relative to the preceding state", not to a background.
+- `gpsplot ts --rate` does not take this ref yet.
+
+An events catalog (onsets of every Reykjanes event since 2020, joined to
+`steps.yaml` by `event_id`) is drafted for `gps-config-data`; the
+reference window is given by hand until it is deployed.
+
 ## Phase 2: secular velocities (not started: decisions needed)
 
 The detrend record already holds a curated secular rate: its window, steps

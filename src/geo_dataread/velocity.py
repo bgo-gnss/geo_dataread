@@ -15,6 +15,10 @@ Reference modes (``ref``), all plate-removed first:
 - ``background`` — the stored secular + seasonal (+ steps) removed: the
   rate is the transient alone, relative to the station's background.
 - ``plate`` — nothing more removed (``background:none``).
+- ``pre-onset`` — the ``plate-periodic`` rate less the station's own
+  ``plate-periodic`` rate over a fixed window before the unrest's onset
+  (``pre_window``, BGÓ 2026-10-17): the rate relative to the preceding
+  state, σ² = σ_window² + σ_pre². See :func:`_pre_onset_velocity`.
 
 A station with no stored detrend record cannot take the first two; by
 default it falls back to ``plate`` and says so (``fallback:plate``,
@@ -77,11 +81,13 @@ from gps_analysis.rate_quality import (
 )
 from gtimes.timefunc import TimetoYearf
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 #: the record schemas this reader takes (1: no tier/snr/parts, read with
 #: the standard-tier defaults)
-READ_SCHEMAS = (1, 2)
-REFS = ("plate-periodic", "background", "plate")
+READ_SCHEMAS = (1, 2, 3)
+REFS = ("plate-periodic", "background", "plate", "pre-onset")
+#: the ref a pre-onset rate is built on, in its window and its pre-window
+PRE_ONSET_BASE = "plate-periodic"
 #: declared: the raw series less the operator-declared blunder epochs
 #: (excluded_epochs.csv), no detection, the default; cleaned: outliers
 #: detected on the window (flags real signal in unrest, see the docs); raw
@@ -167,6 +173,10 @@ class VelocityRecord:
     parts_refused: dict[str, str] = dataclasses.field(default_factory=dict)
     #: the station's last epoch when it is before the window end [yr]
     data_end: float | None = None
+    #: ref pre-onset: the pre-window's own rate, what was subtracted
+    #: (window, rate, sigma, sigma_formal, k, sigma_method, n_epochs, ref,
+    #: refused, flags, input_fingerprint); None otherwise
+    pre_onset: dict[str, Any] | None = None
 
     @property
     def accepted(self) -> bool:
@@ -244,10 +254,17 @@ class VelocitySettings:
     short_tier: bool = True
     short_snr: float = SHORT_SNR
     short_snr_pair: float = SHORT_SNR_PAIR
+    #: ref pre-onset: the reference window before the onset, fractional
+    #: years, half open (:func:`window_bounds`)
+    pre_window: tuple[float, float] | None = None
 
     def __post_init__(self) -> None:
         if self.ref not in REFS:
             raise ValueError(f"ref must be one of {REFS}, got {self.ref!r}")
+        if (self.ref == "pre-onset") != (self.pre_window is not None):
+            raise ValueError("ref pre-onset takes a pre_window, the other refs none")
+        if self.pre_window is not None and not self.pre_window[1] > self.pre_window[0]:
+            raise ValueError(f"pre_window {self.pre_window} ends before it starts")
         if self.view not in VIEWS:
             raise ValueError(f"view must be one of {VIEWS}, got {self.view!r}")
         if self.no_record not in NO_RECORD_POLICIES:
@@ -741,6 +758,11 @@ def estimate_station_velocity(
     arguments.
     """
     settings = settings or VelocitySettings()
+    if settings.ref == "pre-onset":
+        return _pre_onset_velocity(
+            sta, start, end, settings, doc=doc, k=k, k_method=k_method,
+            k_table=k_table, coords=coords,
+        )  # fmt: skip
     sta = sta.upper()
     t0, t1 = window_bounds(start, end)
     if not t1 > t0:
@@ -943,6 +965,84 @@ def estimate_station_velocity(
 _HALF_DAY = 0.5 / 365.25
 
 
+def _vec3(a: npt.ArrayLike) -> tuple[float, float, float]:
+    x, y, z = (float(v) for v in np.asarray(a, dtype=float).reshape(3))
+    return x, y, z
+
+
+def _pre_onset_velocity(
+    sta: str,
+    start: dt.date | dt.datetime | float,
+    end: dt.date | dt.datetime | float,
+    settings: VelocitySettings,
+    **kw: Any,
+) -> VelocityRecord:
+    """Ref ``pre-onset``: the window's :data:`PRE_ONSET_BASE` rate less the
+    station's own over ``settings.pre_window``.
+
+    The window is estimated exactly as a ``plate-periodic`` record (its
+    gates, short tier and k); the pre-window likewise but on the standard
+    tier alone, no step allowed inside. rate = v_win − v_pre, σ = √(σ_win²
+    + σ_pre²) per component (k: σ over the formal σ in quadrature). The
+    short tier's part decisions stay those of the window's own fit (what
+    its false-accept rates were measured on); ``snr`` is the relative
+    rate's. A refused pre-window refuses the record (``pre_onset: …``).
+    No neighbour's pre-rate is borrowed: a station without data before the
+    onset has no pre-onset rate. A station without a stored seasonal
+    (``fallback:plate``) is flagged ``seasonal:none``: its pre-window rate
+    aliases the seasonal, its k (seasonal kept) says how much.
+    """
+    from gps_analysis import signal_to_noise
+
+    assert settings.pre_window is not None
+    base = dataclasses.replace(settings, ref=PRE_ONSET_BASE, pre_window=None)
+    win = estimate_station_velocity(sta, start, end, base, **kw)
+    pre_settings = dataclasses.replace(base, short_tier=False, allow_steps=False)
+    p0, p1 = settings.pre_window
+    pre = estimate_station_velocity(sta, p0, p1, pre_settings, **kw)
+    flags = list(win.flags)
+    flags.append("pre_onset")
+    if win.ref == "plate":
+        flags.append("seasonal:none")
+    if p1 > win.window[0] + 1e-9:
+        flags.append("pre_overlap")  # the two rates share epochs: σ is high
+    refused = win.refused
+    if refused is None and pre.refused is not None:
+        refused = f"pre_onset: {pre.refused}"
+    Vec3 = tuple[float, float, float]
+    rate: Vec3 = (math.nan, math.nan, math.nan)
+    sigma, formal, k = rate, rate, rate
+    snr: tuple[float, float] = (math.nan, math.nan)
+    if refused is None:
+        v = np.asarray(win.rate) - np.asarray(pre.rate)
+        sg = np.hypot(win.sigma, pre.sigma)
+        fm = np.hypot(win.sigma_formal, pre.sigma_formal)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            kk = np.where(fm > 0, sg / fm, np.nan)
+        rate, sigma, formal, k = (_vec3(x) for x in (v, sg, fm, kk))
+        snr = signal_to_noise(v, sg)
+    pre_summary = {
+        "window": list(pre.window), "rate": list(pre.rate), "sigma": list(pre.sigma),
+        "sigma_formal": list(pre.sigma_formal), "k": list(pre.k),
+        "sigma_method": pre.sigma_method, "n_epochs": list(pre.n_epochs),
+        "span_used": list(pre.span_used) if pre.span_used else None,
+        "ref": pre.ref, "refused": pre.refused, "flags": list(pre.flags),
+        "input_fingerprint": pre.input_fingerprint,
+    }  # fmt: skip
+    h = hashlib.sha256()
+    for part in ("pre-onset", win.input_fingerprint, pre.input_fingerprint):
+        h.update(part.encode())
+    return dataclasses.replace(
+        win, ref="pre-onset", ref_requested=settings.ref,
+        rate=rate, sigma=sigma, sigma_formal=formal, k=k,
+        sigma_method=f"pre_onset({win.sigma_method}, {pre.sigma_method})",
+        corr_en=0.0 if refused is None else math.nan,
+        flags=tuple(flags), refused=refused,
+        snr=(float(snr[0]), float(snr[1])), pre_onset=pre_summary,
+        input_fingerprint=h.hexdigest(),
+    )  # fmt: skip
+
+
 def _data_end(
     sta: str, t: FloatArray, end: float, settings: VelocitySettings
 ) -> float | None:
@@ -1116,11 +1216,16 @@ def velocity_dir() -> Path:
 def set_name(settings: VelocitySettings, start: dt.date, end: dt.date) -> str:
     """``window-<start>-<end>_<ref>_<frame>``, the dates as YYYYMMDD
     (both included)."""
+    import geo_dataread.gps_read as gpsr
     from geo_dataread.pos import pos_frame
 
-    return (
-        f"window-{start:%Y%m%d}-{end:%Y%m%d}_{settings.ref}_{pos_frame(settings.frame)}"
-    )
+    ref = settings.ref
+    if settings.pre_window is not None:  # the reference window in the name
+        p0, p1 = settings.pre_window
+        dts = gpsr.toDateTime([p0 + 1e-6, p1 - 1e-6])  # type: ignore[no-untyped-call]
+        days = [d.date() for d in dts]
+        ref = f"{ref}-{days[0]:%Y%m%d}-{days[1]:%Y%m%d}"
+    return f"window-{start:%Y%m%d}-{end:%Y%m%d}_{ref}_{pos_frame(settings.frame)}"
 
 
 # ---------------------------------------------------------------------------
@@ -1191,7 +1296,11 @@ def build_parser() -> argparse.ArgumentParser:
                    help="YYYYMMDD: the last day of --last (default today)")  # fmt: skip
     e.add_argument("--ref", choices=REFS, default="plate-periodic",
                    help="plate-periodic: seasonal removed; background: secular + "
-                   "seasonal removed (the transient); plate: nothing more")  # fmt: skip
+                   "seasonal removed (the transient); plate: nothing more; "
+                   "pre-onset: plate-periodic less the --pre-window rate")  # fmt: skip
+    e.add_argument("--pre-window", type=_window, default=None, metavar="START:END",
+                   help="ref pre-onset: the reference days before the onset, "
+                   "YYYYMMDD:YYYYMMDD both included (e.g. 20230806:20231024)")  # fmt: skip
     e.add_argument("--view", choices=VIEWS, default=DEFAULT_VIEW)
     e.add_argument("--frame", default=DEFAULT_FRAME)
     e.add_argument("-u", "--uncert", type=float, default=DEFAULT_UNCERT)
@@ -1307,6 +1416,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             short_snr_pair=args.short_snr_pair,
             default_k=args.default_k, pos_dir=args.pos_dir, params=args.params,
             steps=args.steps, k_table=args.k_table,
+            pre_window=window_bounds(*args.pre_window) if args.pre_window else None,
         )  # fmt: skip
         stations = select_stations(args.stations, args.region)
     except ValueError as exc:

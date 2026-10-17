@@ -405,3 +405,71 @@ def test_short_tier_refuses_quiet_windows_and_a_blunder(monkeypatch):
     assert loose.accepted and "short:n=2" in loose.flags
     off = _short(monkeypatch, t2, y2, np.full((3, 2), 3.0), short_tier=False)
     assert not off.accepted and "snr" not in off.refused
+
+
+def _pre_onset_series():
+    day = 1 / 365.25
+    t = 2015.0 + np.arange(0, 0.6, day)
+    north = 20.0 * (t - 2015.0) + np.where(t > 2015.4, 80.0 * (t - 2015.4), 0.0)
+    y = np.vstack([north, np.zeros_like(t), np.zeros_like(t)])
+    y += np.random.default_rng(3).normal(0.0, 1.0, y.shape)
+    return t, y, np.full(y.shape, 1.0)
+
+
+def _run(monkeypatch, t, y, s, settings, window=(2015.45, 2015.55)):
+    monkeypatch.setattr(vel, "_read", _fake_read(t, y, s))
+    return vel.estimate_station_velocity(
+        "NYLA", *window, settings, doc={"stations": {}}, k=(1.5, 1.5, 1.5),
+        coords=(0.0, 0.0),
+    )  # fmt: skip
+
+
+def test_pre_onset_subtracts_the_station_s_own_pre_window_rate(monkeypatch):
+    t, y, s = _pre_onset_series()
+    pre = (2015.1, 2015.35)
+    r = _run(
+        monkeypatch, t, y, s, vel.VelocitySettings(ref="pre-onset", pre_window=pre)
+    )
+    win = _run(monkeypatch, t, y, s, vel.VelocitySettings())
+    before = _run(monkeypatch, t, y, s, vel.VelocitySettings(), window=pre)
+    assert r.accepted and r.ref == "pre-onset" and win.ref == "plate"
+    assert r.rate[0] == pytest.approx(win.rate[0] - before.rate[0])
+    assert r.rate[0] == pytest.approx(80.0, abs=15.0)
+    assert r.sigma[0] == pytest.approx(np.hypot(win.sigma[0], before.sigma[0]))
+    assert r.pre_onset is not None and r.pre_onset["rate"][0] == pytest.approx(
+        before.rate[0]
+    )
+    # no stored seasonal: the record says the pre-window rate aliases it
+    assert {"pre_onset", "seasonal:none", "fallback:plate"} <= set(r.flags)
+    assert "pre_overlap" not in r.flags
+    back = vel.VelocityRecord.from_dict(json.loads(json.dumps(r.to_dict())))
+    assert back.pre_onset == r.pre_onset and back.schema_version == 3
+
+
+def test_pre_onset_refuses_without_data_before_the_onset(monkeypatch):
+    t, y, s = _pre_onset_series()
+    st = vel.VelocitySettings(ref="pre-onset", pre_window=(2014.5, 2014.7))
+    r = _run(monkeypatch, t, y, s, st)
+    assert not r.accepted and r.refused.startswith("pre_onset: ")
+    assert np.isnan(r.rate).all()
+
+
+def test_pre_onset_settings_and_set_name():
+    with pytest.raises(ValueError, match="pre_window"):
+        vel.VelocitySettings(ref="pre-onset")
+    with pytest.raises(ValueError, match="pre_window"):
+        vel.VelocitySettings(pre_window=(2023.6, 2023.8))
+    st = vel.VelocitySettings(
+        ref="pre-onset", frame="itrf2020",
+        pre_window=vel.window_bounds(dt.date(2023, 8, 6), dt.date(2023, 10, 24)),
+    )  # fmt: skip
+    name = vel.set_name(st, dt.date(2023, 11, 1), dt.date(2023, 11, 7))
+    assert name == "window-20231101-20231107_pre-onset-20230806-20231024_itrf20"
+
+
+def test_cli_takes_a_pre_window():
+    args = vel.build_parser().parse_args(
+        ["estimate", "SENG", "--last", "7", "--ref", "pre-onset",
+         "--pre-window", "20230806:20231024"]
+    )  # fmt: skip
+    assert args.pre_window == (dt.date(2023, 8, 6), dt.date(2023, 10, 24))
