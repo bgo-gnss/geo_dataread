@@ -516,6 +516,10 @@ def _read(
 #: the residual k is measured on, by ref: a plate rate still carries the
 #: seasonal slope, so its k must too (only the secular removed)
 K_RESIDUAL = {"plate-periodic": "all", "background": "all", "plate": "secular"}
+#: the k(T) table entry for a station whose seasonal is a regional one
+#: (``seasonal_only`` record): measured by leave-one-out, not on a quiet
+#: span of its own (it has none)
+K_RESIDUAL_REGIONAL = "regional"
 
 
 def station_rate_scales(
@@ -536,6 +540,8 @@ def station_rate_scales(
     record = _record(doc, sta)
     if record is None or not record.get("window"):
         return {}, {"reason": "no record"}
+    if record.get("seasonal_only"):  # no quiet span of its own: not a k station
+        return {}, {"reason": "seasonal-only record"}
     w0, w1 = (float(v) for v in record["window"])
     try:
         t, y, s, _ = _read(sta, w0, w1, settings, terms=residual, doc=doc)
@@ -782,6 +788,12 @@ def estimate_station_velocity(
             refused = "no_record"
     if ref == "plate":
         flags.append("background:none")
+    regional = record is not None and bool(record.get("seasonal_only"))
+    if regional and ref in _TERMS:
+        if _TERMS[ref] != "periodic":  # its seasonal only: no background to remove
+            refused = f"seasonal_only: {ref} needs a background of the station's own"
+        else:
+            flags.append("seasonal:regional")
     if record is not None and record.get("borrowed") and ref in _TERMS:
         flags.append(f"borrowed:{(record['borrowed'] or {}).get('from')}")
     try:
@@ -835,6 +847,8 @@ def estimate_station_velocity(
     k_years = max(t_len, K_MIN_DAYS / 365.25)
     k_source: dict[str, Any] = {}
     residual = K_RESIDUAL[ref]
+    if regional and residual == "all":
+        residual = K_RESIDUAL_REGIONAL
     if k is not None:
         kk = np.asarray(k, dtype=float).reshape(3)
         sigma_method = k_method or "given_k"
@@ -847,6 +861,11 @@ def estimate_station_velocity(
             )
         table, table_source = k_table if k_table is not None else load_k_table(settings)
         from_table = table_k(table, residual, k_years) if table is not None else None
+        if from_table is None and residual == K_RESIDUAL_REGIONAL and table is not None:
+            # no regional entry measured yet: the seasonal-kept k, which
+            # bounds it from above (the regional seasonal removes part of it)
+            residual = "secular"
+            from_table = table_k(table, residual, k_years)
         if own is not None:
             kk, sigma_method = own, "empirical_k"
         elif from_table is not None:
