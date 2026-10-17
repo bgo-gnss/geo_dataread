@@ -1,0 +1,120 @@
+"""gps-regional-seasonal: seasonal-only records from neighbours' seasonals."""
+
+import json
+
+import numpy as np
+import pytest
+
+from geo_dataread import regional_seasonal as rs
+
+NAMES = ["offset", "rate", *rs.PERIODIC_NAMES]
+POS = {"A": (-22.40, 63.90), "B": (-22.30, 63.95), "C": (-22.35, 63.85),
+       "D": (-22.32, 63.88), "T": (-22.36, 63.90), "FAR": (-16.0, 65.0)}  # fmt: skip
+
+
+def _own(seasonal: float, **extra) -> dict:
+    comp = {"params": [0.0, 1.0, seasonal, seasonal, 0.1, 0.1], "cov_upper": [0.0] * 21}
+    return {"record_version": 1, "model": "lineperiodic", "param_names": NAMES,
+            "components": [dict(comp) for _ in range(3)], "step_epochs": [],
+            "fitted_at": "2026-01-01", "window": [2015.0, 2020.0], **extra}  # fmt: skip
+
+
+def _doc(**stations) -> dict:
+    return {"frame": "plate_removed@itrf14", "stations": stations}
+
+
+def _coords(sta: str) -> tuple[float, float]:
+    return POS[sta]
+
+
+def test_a_station_without_a_record_gets_a_seasonal_only_regional_one() -> None:
+    doc = _doc(A=_own(2.0), B=_own(2.0), C=_own(2.0))
+    out, report = rs.add_regional_seasonals(doc, ["T", "A"], _coords)
+    rec = out["stations"]["T"]
+    assert report["A"] == "has its own record" and report["T"].startswith("regional")
+    assert rec["seasonal_only"] and rec["model"] == "periodic"
+    assert (
+        rec["param_names"] == list(rs.PERIODIC_NAMES) and rec["frame"] == doc["frame"]
+    )
+    assert np.allclose(rec["components"][0]["params"], [2.0, 2.0, 0.1, 0.1])
+    g = rec["groups"]["periodic"]
+    assert g["provenance"].startswith("regional:") and {
+        d["station"] for d in g["donors"]
+    } == {"A", "B", "C"}
+    assert all(d["digest"].startswith("sha256:") for d in g["donors"])
+    # every fitted record now says so
+    for code in "ABC":
+        grp = out["stations"][code]["groups"]
+        assert (
+            grp["secular"]["provenance"] == grp["periodic"]["provenance"] == "estimated"
+        )
+    assert doc["stations"]["A"].get("groups") is None  # the input is untouched
+
+
+def test_borrowed_and_regional_records_are_never_donors() -> None:
+    doc = _doc(
+        A=_own(2.0), B=_own(9.0, borrowed={"from": "B"}), C=_own(2.0), D=_own(2.0)
+    )
+    out, _ = rs.add_regional_seasonals(doc, ["T"], _coords)
+    donors = {
+        d["station"] for d in out["stations"]["T"]["groups"]["periodic"]["donors"]
+    }
+    assert donors == {"A", "C", "D"}
+    # a second run does not use T's regional record as a donor for anything
+    assert not rs.is_donor(out["stations"]["T"])
+
+
+def test_too_few_near_donors_refuses_and_drops_an_old_regional_record() -> None:
+    doc = _doc(A=_own(2.0), B=_own(2.0), C=_own(2.0), T={"seasonal_only": True})
+    far_t = lambda s: (-18.0, 66.0) if s == "T" else POS[s]  # noqa: E731
+    out, report = rs.add_regional_seasonals(doc, ["T"], far_t)
+    assert report["T"].startswith("refused") and "T" not in out["stations"]
+
+
+def test_cli_writes_the_merged_document_and_never_the_input(
+    tmp_path, monkeypatch
+) -> None:
+    import geo_dataread.velocity as vel
+
+    src = tmp_path / "in.json"
+    src.write_text(json.dumps(_doc(A=_own(2.0), B=_own(2.0), C=_own(2.0))))
+    before = src.read_bytes()
+    monkeypatch.setattr(vel, "_coords", _coords)
+    monkeypatch.setattr(
+        vel, "select_stations", lambda pats, region: ["A", "B", "C", "T"]
+    )
+    out = tmp_path / "out.json"
+    assert (
+        rs.main(["--params", str(src), "--out", str(out), "--stamp", "2026-10-17"]) == 0
+    )
+    assert src.read_bytes() == before
+    got = json.loads(out.read_text())
+    assert got["stations"]["T"]["fitted_at"] == "2026-10-17"
+    assert got["regional_seasonal"]["n_validation"] == 3
+
+
+def test_group_provenance_reads_self_and_missing_as_estimated() -> None:
+    assert rs.group_provenance({}, "periodic") == "estimated"
+    assert (
+        rs.group_provenance(
+            {"groups": {"periodic": {"provenance": "self"}}}, "periodic"
+        )
+        == "estimated"
+    )
+    assert rs.group_provenance(
+        {"groups": {"periodic": {"provenance": "store:SENG@x"}}}, "periodic"
+    ).startswith("store:")
+
+
+def test_a_regional_record_applies_its_seasonal_only() -> None:
+    from gps_analysis.detrend import apply_detrend
+
+    out, _ = rs.add_regional_seasonals(
+        _doc(A=_own(2.0), B=_own(2.0), C=_own(2.0)), ["T"], _coords
+    )
+    rec = out["stations"]["T"]
+    t = np.linspace(2024.0, 2025.0, 20)
+    y = np.zeros((3, t.size))
+    assert np.isfinite(apply_detrend(rec, t, y, terms="periodic")).all()
+    with pytest.raises(ValueError, match="seasonal-only"):
+        apply_detrend(rec, t, y)

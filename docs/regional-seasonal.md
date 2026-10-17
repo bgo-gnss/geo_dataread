@@ -1,6 +1,8 @@
 # Regional seasonal (BGÓ 2026-10-17) — design
 
-**Status:** spec, not implemented. Branch `feat-regional-seasonal`.
+**Status:** implemented on branch `feat-regional-seasonal` (gps_analysis,
+geo_dataread); gps_plot/gps_api fail-closed items and the `regional` k(T)
+entry still open. Not deployed.
 
 ## Why
 
@@ -82,10 +84,20 @@ Every other record gains `groups.secular.provenance` and
 block reads as `estimated`; the existing spelling `self` is read as
 `estimated` too).
 
-**Writer:** the detrend estimator, `gps-estimate-detrend`, through the stage
-plan: a new hold source `periodic=regional` next to `store:` and `donor:`
-(`RegionalRef` in `stage_plan`), on an apply-only plan with `--model
-periodic`. Records are written with the usual backup of the deployed file.
+**Writer:** `gps-regional-seasonal --params <detrend doc> --out <merged
+doc>` (`geo_dataread.regional_seasonal`). It needs no time series, only the
+other records, so it is its own step after `gps-estimate-detrend` rather
+than a stage-plan hold: it reads the document, adds a regional record for
+each target in `--region` (default Reykjanes) without one of its own
+(re-making an old regional one), marks every fitted record `estimated`, and
+writes the merged document; the input is never written. A
+`periodic=regional` stage-plan hold (fitting a secular while holding the
+regional seasonal) is the later step for the 39 curation stations.
+
+First run on the deployed itrf14 document (2026-10-17): 43 regional records,
+none refused, 21–38 donors each (top weights SENG, SKSH, KRIV, NYLA, HVSK,
+REYK); leave-one-out σ of the annual amplitude 0.77 / 0.57 / 1.93 mm N/E/U
+over the 20 own-seasonal stations within 100 km of a target.
 
 ## Fail closed (from the consumer audit, 2026-10-17)
 
