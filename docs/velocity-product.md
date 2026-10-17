@@ -157,8 +157,11 @@ stations with records, built in 2 min.
 k grows with T, as correlated noise predicts. Where the seasonal is kept,
 k is higher at 2–6 months: that excess is the seasonal aliasing.
 
-**Record** (`VelocityRecord`, schema 2, one line of `.jsonl`; schema 1
-reads with the standard-tier defaults):
+**Record** (`VelocityRecord`, schema 3, one line of `.jsonl`; schemas 1
+and 2 read, schema 1 with the standard-tier defaults). Every set written
+since schema 3 is schema 3, whatever its ref: a reader still at
+`READ_SCHEMAS = (1, 2)` (gps_plot `--velocities`, gps_api on an older
+geo_dataread) refuses it, so deploy geo_dataread before sharing new sets:
 - station, lon/lat, frame, plate, ref (used and requested), series, view;
 - uncert, window, span used, n epochs per component, largest gap;
 - method `wls`, model `linear`;
@@ -167,6 +170,7 @@ reads with the standard-tier defaults):
 - a record summary, steps in the window, outlier abort, flags, refusal;
 - `tier`, `snr` (horizontal, up), `chi2nu`, `f_quadratic`, `parts_refused`,
   `data_end`;
+- `pre_onset` (ref `pre-onset` only: what was subtracted);
 - software versions, `input_fingerprint`.
 
 **Files** (`write_velocity_set`): sorted by station, fixed decimals, no
@@ -196,10 +200,16 @@ show it from the 27th; the series used 25 Oct as a safe end).
   tier, k) and the pre-window (standard tier only, no step inside). rate =
   v_win − v_pre; σ = √(σ_win² + σ_pre²) per component. The short tier's
   part decisions are the window's own (what its false-accept rates were
-  measured on); `snr` is the relative rate's.
+  measured on); `snr` is the relative rate's. A kept part whose relative
+  `snr` falls under the short-tier threshold is flagged
+  `short:pre_snr<5:horizontal` (or `…:up`): the window stood on its own,
+  the difference does not.
+- The pre-window must start before the window (else `ValueError`: a
+  swapped `--window`/`--pre-window`).
 - A refused pre-window refuses the record (`pre_onset: <reason>`): no data
   before the onset (the stations installed in November 2023), too little
-  cover. A neighbour's pre-rate is never borrowed (SENG and SKSH differ
+  cover. The window's short-tier state (`tier`, `parts_refused`,
+  `chi2nu`, `f_quadratic`, `short:`/`nonlinear` flags) is cleared. A neighbour's pre-rate is never borrowed (SENG and SKSH differ
   5.7 mm/yr east in their secular rate).
 - `seasonal:none`: a station without a stored record has no seasonal
   removed, so its pre-window rate aliases the seasonal; its k(L) (seasonal
@@ -208,19 +218,23 @@ show it from the 27th; the series used 25 Oct as a safe end).
 - `pre_overlap`: the window starts before the pre-window ends; the two
   rates share epochs and σ is conservative.
 - The record keeps what was subtracted in `pre_onset` (window, rate, σ,
-  k, n, flags, fingerprint), schema 3.
+  k, `k_source`, n, flags, fingerprint), schema 3.
 - Measured on the 2023 reference (itrf20, 48 Reykjanes stations): 25
   have one; 2 are refused on cover, 21 have no data in it (installed later,
   or none). The reference is not quiet near Fagradalsfjall (FEFC U +135,
   GONH U +164, VOGC N +111 mm/yr in Aug–Oct 2023; VÍ: deep inflation there
   from August 2023): "relative to the preceding state", not to a
-  background.
+  background. BGÓ 2026-10-17: wanted, that signal has another source and
+  must not leak into the Sundhnúkur signal.
 - A caller's `k` is the window's; the pre-window takes its own.
-- `gpsplot ts --rate` does not take this ref yet.
+- `gpsplot ts --rate` does not take this ref yet; `gpsplot map --velocities`
+  takes the reference days from the set and refuses a `--pre-window`.
 
-An events catalog (onsets of every Reykjanes event since 2020, joined to
-`steps.yaml` by `event_id`) is drafted for `gps-config-data`; the
-reference window is given by hand until it is deployed.
+The events catalog (33 Reykjanes events since 2020, Veðurstofa news as
+the source, joined to `steps.yaml` by `event_id`) is in `gps-config-data`
+`analysis-lane/events.yaml` (47fe763, with the 2023-11-10 dike as a
+declared step at 25 stations). Nothing reads it yet: the reference window
+is given by hand.
 
 ## Phase 2: secular velocities (not started: decisions needed)
 

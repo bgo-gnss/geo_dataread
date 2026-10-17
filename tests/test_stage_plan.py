@@ -1226,7 +1226,9 @@ class TestReAnchoringRealData:
         )
         settings = dataclasses.replace(
             resolve_fit_settings("ELDC", None, FitDefaults()),
-            segments=((2021.0, None),),
+            # ends before the 2023-11-10 dike, a declared step since
+            # 2026-10-17: an apply-only plan cannot hold a step
+            segments=((2021.0, 2023.85),),
             window_source="test",
         )
         result = station_estimate_from_arrays(

@@ -475,3 +475,47 @@ def test_cli_takes_a_pre_window():
          "--pre-window", "20230806:20231024"]
     )  # fmt: skip
     assert args.pre_window == (dt.date(2023, 8, 6), dt.date(2023, 10, 24))
+
+
+def _short_after_pre(noise):
+    """A quiet daily pre-window 2015.0–2015.4, then three fast epochs at 2015.5."""
+    day = 1 / 365.25
+    t = np.concatenate([2015.0 + np.arange(0, 0.4, day), 2015.5 + np.arange(3) * day])
+    y = np.random.default_rng(5).normal(0.0, noise, (3, t.size))
+    y[:, -3:] = np.vstack([20.0 * np.arange(3), -25.0 * np.arange(3), np.zeros(3)])
+    s = np.full(y.shape, float(noise))
+    s[:, -3:] = 3.0
+    return t, y, s, (2015.5 - day / 2, 2015.5 + 6.5 * day)
+
+
+def test_pre_onset_refusal_clears_the_window_s_short_tier(monkeypatch):
+    monkeypatch.setattr(vel, "_data_end", lambda *a: None)  # no .pos read
+    t, y, s, window = _short_after_pre(1.0)
+    st = vel.VelocitySettings(ref="pre-onset", pre_window=(2014.5, 2014.7))
+    r = _run(monkeypatch, t, y, s, st, window=window)
+    assert not r.accepted and r.refused.startswith("pre_onset: ")
+    assert r.tier == "standard" and r.parts_refused == {}
+    assert np.isnan(r.chi2nu).all() and np.isnan(r.f_quadratic).all()
+    assert not any(f.startswith(("short:", "nonlinear")) for f in r.flags)
+
+
+def test_pre_onset_flags_a_short_part_the_pre_window_sinks(monkeypatch):
+    monkeypatch.setattr(vel, "_data_end", lambda *a: None)  # no .pos read
+    t, y, s, window = _short_after_pre(1.0)
+    pre = (2015.0, 2015.4)
+    quiet = _run(monkeypatch, t, y, s, vel.VelocitySettings(ref="pre-onset", pre_window=pre), window=window)  # fmt: skip
+    assert quiet.accepted and quiet.tier == "short"
+    assert not any(f.startswith("short:pre_snr") for f in quiet.flags)
+    t, y, s, window = _short_after_pre(3000.0)
+    noisy = _run(monkeypatch, t, y, s, vel.VelocitySettings(ref="pre-onset", pre_window=pre), window=window)  # fmt: skip
+    assert noisy.accepted and noisy.tier == "short" and noisy.snr[0] < vel.SHORT_SNR
+    assert "short:pre_snr<5:horizontal" in noisy.flags
+
+
+def test_pre_onset_overlap_and_a_pre_window_after_the_window(monkeypatch):
+    t, y, s = _pre_onset_series()
+    st = vel.VelocitySettings(ref="pre-onset", pre_window=(2015.2, 2015.47))
+    assert "pre_overlap" in _run(monkeypatch, t, y, s, st).flags
+    st = vel.VelocitySettings(ref="pre-onset", pre_window=(2015.46, 2015.58))
+    with pytest.raises(ValueError, match="not before the window"):
+        _run(monkeypatch, t, y, s, st)

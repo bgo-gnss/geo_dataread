@@ -174,8 +174,8 @@ class VelocityRecord:
     #: the station's last epoch when it is before the window end [yr]
     data_end: float | None = None
     #: ref pre-onset: the pre-window's own rate, what was subtracted
-    #: (window, rate, sigma, sigma_formal, k, sigma_method, n_epochs, ref,
-    #: refused, flags, input_fingerprint); None otherwise
+    #: (window, rate, sigma, sigma_formal, k, sigma_method, k_source, n_epochs,
+    #: ref, refused, flags, input_fingerprint); None otherwise
     pre_onset: dict[str, Any] | None = None
 
     @property
@@ -986,11 +986,16 @@ def _pre_onset_velocity(
     + σ_pre²) per component (k: σ over the formal σ in quadrature). The
     short tier's part decisions stay those of the window's own fit (what
     its false-accept rates were measured on); ``snr`` is the relative
-    rate's. A refused pre-window refuses the record (``pre_onset: …``).
+    rate's, and a part it puts under the short-tier threshold is flagged
+    ``short:pre_snr<…``. A refused pre-window refuses the record
+    (``pre_onset: …``) and clears the window's short-tier state.
     No neighbour's pre-rate is borrowed: a station without data before the
     onset has no pre-onset rate. A station without a stored seasonal
     (``fallback:plate``) is flagged ``seasonal:none``: its pre-window rate
     aliases the seasonal, its k (seasonal kept) says how much.
+
+    Raises:
+        ValueError: the pre-window does not start before the window.
     """
     from gps_analysis import signal_to_noise
 
@@ -999,6 +1004,10 @@ def _pre_onset_velocity(
     win = estimate_station_velocity(sta, start, end, base, **kw)
     pre_settings = dataclasses.replace(base, short_tier=False, allow_steps=False)
     p0, p1 = settings.pre_window
+    if p0 >= win.window[0]:
+        raise ValueError(
+            f"pre_window starts at {p0:.4f}, not before the window ({win.window[0]:.4f})"
+        )
     # a caller's k is the window's (its length); the pre-window takes its own
     pre_kw = {key: v for key, v in kw.items() if key not in ("k", "k_method")}
     pre = estimate_station_velocity(sta, p0, p1, pre_settings, **pre_kw)
@@ -1011,6 +1020,12 @@ def _pre_onset_velocity(
     refused = win.refused
     if refused is None and pre.refused is not None:
         refused = f"pre_onset: {pre.refused}"
+    short_state: dict[str, Any] = {}
+    if refused is not None and win.refused is None:  # clear the window's short tier
+        flags = [f for f in flags if not f.startswith(("short:", "nonlinear"))]
+        nan3 = (math.nan, math.nan, math.nan)
+        short_state = {"tier": "standard", "parts_refused": {}, "chi2nu": nan3,
+                       "f_quadratic": nan3}  # fmt: skip
     Vec3 = tuple[float, float, float]
     rate: Vec3 = (math.nan, math.nan, math.nan)
     sigma, formal, k = rate, rate, rate
@@ -1023,10 +1038,18 @@ def _pre_onset_velocity(
             kk = np.where(fm > 0, sg / fm, np.nan)
         rate, sigma, formal, k = (_vec3(x) for x in (v, sg, fm, kk))
         snr = signal_to_noise(v, sg)
+        if win.tier == "short":
+            n = next(int(f[8:]) for f in flags if f.startswith("short:n="))
+            th = settings.short_snr_pair if n < 3 else settings.short_snr
+            low = [p for p, x in zip(("horizontal", "up"), snr, strict=True)
+                   if p not in win.parts_refused and not x >= th]  # fmt: skip
+            if low:
+                flags.append(f"short:pre_snr<{th:g}:{','.join(low)}")
     pre_summary = {
         "window": list(pre.window), "rate": list(pre.rate), "sigma": list(pre.sigma),
         "sigma_formal": list(pre.sigma_formal), "k": list(pre.k),
-        "sigma_method": pre.sigma_method, "n_epochs": list(pre.n_epochs),
+        "sigma_method": pre.sigma_method, "k_source": pre.k_source,
+        "n_epochs": list(pre.n_epochs),
         "span_used": list(pre.span_used) if pre.span_used else None,
         "ref": pre.ref, "refused": pre.refused, "flags": list(pre.flags),
         "input_fingerprint": pre.input_fingerprint,
@@ -1041,7 +1064,7 @@ def _pre_onset_velocity(
         corr_en=0.0 if refused is None else math.nan,
         flags=tuple(flags), refused=refused,
         snr=(float(snr[0]), float(snr[1])), pre_onset=pre_summary,
-        input_fingerprint=h.hexdigest(),
+        input_fingerprint=h.hexdigest(), **short_state,
     )  # fmt: skip
 
 
