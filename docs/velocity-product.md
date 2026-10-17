@@ -74,7 +74,7 @@ window, and is measured against the station's last epoch when the data stop
 inside the window (the processing lag; flag `truncated@<yr>`, `data_end`).
 
 *Short tier* (`tier = short`): a window failing only the count/cover gates
-keeps each part, horizontal pair or up, whose |v|/σ reaches 5 (10 on two
+keeps each part, horizontal pair or up, whose |v|/σ reaches 5 (8 on two
 epochs); a part that does not stand is NaN, with its reason in
 `parts_refused`; no part standing refuses the window. σ here is a-priori ×
 √max(1, χ²/ν) × k: χ² on 2–4 epochs is too noisy to shrink σ, but a blunder
@@ -83,16 +83,17 @@ must still inflate it. `--no-short-tier`, `--short-snr`, `--short-snr-pair`.
 Thresholds, measured 2026-10-16 (raw series, background removed, 3-yr quiet
 spans of 20 stations, every 1–8 day window, ~20 000 per epoch count):
 
-| | false accepts per 10⁴, \|v_h\|/σ_h ≥ 5 | ≥ 10 |
-|---|---|---|
-| 2 epochs | 23 | 2 |
-| 3–4 epochs | 1.6–2 | 0 |
+| | false accepts per 10⁴, \|v_h\|/σ_h ≥ 5 | ≥ 8 | ≥ 10 |
+|---|---|---|---|
+| 2 epochs | 23 | ~10 | 2 |
+| 3–4 epochs | 1.6–2 | 0 | 0 |
 
 Up never passed 5 on quiet data. The fast motion passes: the Svartsengi dike
 ~200 on two epochs (but it is a step, declared, so refused); post-dike
 2023-11-12..14 SENG/SKSH/ELDC 6–13 on three epochs, while the two-epoch
-11-12..13 window gives SENG 9.1, SKSH 10.0, THOB 8.9 — just under the pair
-threshold (`--short-snr-pair 8` takes them at ~10 false per 10⁴). The 2024
+11-12..13 window gives SENG 9.1, SKSH 10.0, THOB 8.9. The pair threshold is
+8 (BGÓ 2026-10-17), which takes them at ~10 false per 10⁴ quiet two-epoch
+windows; `--short-snr-pair 10` is the stricter choice (2 per 10⁴). The 2024
 inflation reaches 5 only over ~10–14 days.
 
 *Nonlinear flag* (`nonlinear:NEU`): the F of a quadratic against the line

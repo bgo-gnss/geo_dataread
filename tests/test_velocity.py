@@ -384,7 +384,7 @@ def test_short_tier_refuses_quiet_windows_and_a_blunder(monkeypatch):
     # two epochs: the stricter pair threshold
     t2, y2 = t[:2], np.vstack([[0.0, 40.0], [0.0, 0.0], [0.0, 0.0]])
     r = _short(monkeypatch, t2, y2, np.full((3, 2), 3.0))
-    assert not r.accepted  # snr 40 mm/day at σ 3: below the pair's 10
+    assert not r.accepted  # snr 40 mm/day at σ 3: below the pair's 8
     loose = _short(monkeypatch, t2, y2, np.full((3, 2), 3.0), short_snr_pair=3.0)
     assert loose.accepted and "short:n=2" in loose.flags
     off = _short(monkeypatch, t2, y2, np.full((3, 2), 3.0), short_tier=False)
