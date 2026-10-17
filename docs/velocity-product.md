@@ -209,10 +209,13 @@ show it from the 27th; the series used 25 Oct as a safe end).
   rates share epochs and σ is conservative.
 - The record keeps what was subtracted in `pre_onset` (window, rate, σ,
   k, n, flags, fingerprint), schema 3.
-- Measured on the 2023 reference (itrf20, 48 Reykjanes stations): 23
-  take it. The reference is not quiet near Fagradalsfjall (FEFC U +135,
-  GONH U +164, VOGC N +111 mm/yr in Aug–Oct 2023, after Litli-Hrútur):
-  "relative to the preceding state", not to a background.
+- Measured on the 2023 reference (itrf20, 48 Reykjanes stations): 25
+  have one; 2 are refused on cover, 21 have no data in it (installed later,
+  or none). The reference is not quiet near Fagradalsfjall (FEFC U +135,
+  GONH U +164, VOGC N +111 mm/yr in Aug–Oct 2023; VÍ: deep inflation there
+  from August 2023): "relative to the preceding state", not to a
+  background.
+- A caller's `k` is the window's; the pre-window takes its own.
 - `gpsplot ts --rate` does not take this ref yet.
 
 An events catalog (onsets of every Reykjanes event since 2020, joined to

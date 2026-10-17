@@ -999,7 +999,9 @@ def _pre_onset_velocity(
     win = estimate_station_velocity(sta, start, end, base, **kw)
     pre_settings = dataclasses.replace(base, short_tier=False, allow_steps=False)
     p0, p1 = settings.pre_window
-    pre = estimate_station_velocity(sta, p0, p1, pre_settings, **kw)
+    # a caller's k is the window's (its length); the pre-window takes its own
+    pre_kw = {key: v for key, v in kw.items() if key not in ("k", "k_method")}
+    pre = estimate_station_velocity(sta, p0, p1, pre_settings, **pre_kw)
     flags = list(win.flags)
     flags.append("pre_onset")
     if win.ref == "plate":
