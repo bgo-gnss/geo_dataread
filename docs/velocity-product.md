@@ -72,6 +72,9 @@ Refused outright, with the reason:
 counts each daily epoch's own day, so five daily epochs cover a five-day
 window, and is measured against the station's last epoch when the data stop
 inside the window (the processing lag; flag `truncated@<yr>`, `data_end`).
+A recent window's record therefore changes once the processing catches up
+(data end, gate, k and fingerprint): by design, but not reproducible until
+then.
 
 *Short tier* (`tier = short`): a window failing only the count/cover gates
 keeps each part, horizontal pair or up, whose |v|/σ reaches 5 (8 on two
@@ -98,7 +101,10 @@ inflation reaches 5 only over ~10–14 days.
 
 *Nonlinear flag* (`nonlinear:NEU`): the F of a quadratic against the line
 ≥ 50 in a component (`gps_analysis.NONLINEAR_F`), in windows of 61 days or
-less (`NONLINEAR_MAX_DAYS`: calibrated only that far). Quiet p99 is 23–42 at
+less (`NONLINEAR_MAX_DAYS`: calibrated only that far) and on 7 epochs or more
+in the component (`NONLINEAR_MIN_OBS`: F(1, n−3) is heavy tailed on few
+epochs, white noise reaches 50 in 9 % of 4-epoch, 2 % of 5-epoch windows);
+an exact line gives no F (round-off). Quiet p99 is 23–42 at
 7–61 d, 80 at 91 d; post-dike 14–30 d windows reach 30–310. A flag, not a
 refusal: the rate of a decaying pulse is a mean, not a rate. χ²/ν was not
 used: it depends on the component and on `-u` (quiet p99 N 10, E 16, U 2.5).
@@ -117,6 +123,9 @@ A station with no `.pos` or no stations.cfg entry is refused (`read: …`,
   fit a line in each, and take `k = max(1, 1.4826·MAD(rates) / median σ_formal)`.
 - k is measured on the residual that matches the ref (`K_RESIDUAL`): `plate`
   keeps the seasonal, so a plate rate's σ includes the seasonal slope.
+- Schema 2 (this branch) changed every `input_fingerprint` (the short-tier
+  settings and `data_end` joined it); schema-1 sets read, as schema 2 with
+  the standard-tier defaults, but do not reproduce byte for byte.
 - The order:
   1. the station's own k, on its detrend record window (`empirical_k`);
   2. the stored k(T) table (`empirical_k_table`);
@@ -199,8 +208,10 @@ formal. Open questions for BGÓ:
 `declared` is the raw series less the operator-declared blunder epochs
 (`excluded_epochs.csv`, matched as the cleaned view matches them), with no
 detection. `cleaned` stays available; its limitation follows. `gpsplot ts
---rate` uses the product's view, not the plot's (`--view raw` stays raw), so
-its number is the map's. The k table is built on `declared`
+--rate` uses the product's view, declared, whatever the plot's `--view`, so
+its number is the map's (the raw-view rate is `gps-velocities --view raw`).
+A host without the catalog falls back to raw and says so: flag
+`no_excluded_catalog`, the catalog source in `input_fingerprint`. The k table is built on `declared`
 (`gps-velocities k-table --view declared`; within 0.1 of the cleaned one).
 
 ### The `cleaned` view (Fable code review 2026-10-16)

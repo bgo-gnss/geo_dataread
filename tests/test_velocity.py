@@ -160,6 +160,7 @@ def test_record_round_trips_through_json_with_nan_as_null():
                        "data_end")}  # fmt: skip
     old = vel.VelocityRecord.from_dict({**v1, "schema_version": 1})
     assert old.tier == "standard" and np.isnan(old.snr).all()
+    assert old.schema_version == vel.SCHEMA_VERSION  # rewritten as schema 2
 
 
 def test_set_files_are_sorted_byte_stable_and_gmt_has_accepted_rows(tmp_path):
@@ -369,6 +370,21 @@ def test_short_tier_keeps_a_fast_pair_and_drops_the_quiet_up(monkeypatch):
     assert r.rate[0] == pytest.approx(20.0 * 365.25)
     assert np.isnan(r.rate[2]) and r.parts_refused["up"].startswith("snr=")
     assert r.snr[0] >= vel.SHORT_SNR
+    # the fake read has no excluded-epoch catalog: declared fell back to raw
+    assert "no_excluded_catalog" in r.flags
+
+
+def test_nonlinear_flag_needs_enough_epochs(monkeypatch):
+    day = 1 / 365.25
+    for n, flagged in ((5, False), (8, True)):
+        t = 2015.5 + np.arange(n) * day
+        x = np.arange(n, dtype=float)
+        bend = 3.0 * x * x  # a strong curve, F far above the threshold
+        y = np.vstack([bend, bend, np.zeros(n)])
+        y[:, 1::2] += 0.5  # not exact: a finite F
+        r = _short(monkeypatch, t, y, np.full((3, n), 1.0))
+        assert r.accepted
+        assert any(f.startswith("nonlinear:") for f in r.flags) is flagged, n
 
 
 def test_short_tier_refuses_quiet_windows_and_a_blunder(monkeypatch):

@@ -71,6 +71,7 @@ import numpy.typing as npt
 from gps_analysis.rate_quality import (
     NONLINEAR_F,
     NONLINEAR_MAX_DAYS,
+    NONLINEAR_MIN_OBS,
     SHORT_SNR,
     SHORT_SNR_PAIR,
 )
@@ -188,6 +189,7 @@ class VelocityRecord:
                 f"this reader knows {READ_SCHEMAS}"
             )
         kw = dict(d)
+        kw["schema_version"] = SCHEMA_VERSION  # an old record, upgraded
         for key in ("rate", "sigma", "sigma_formal", "k", "snr", "chi2nu",
                     "f_quadratic"):  # fmt: skip
             if key in kw:
@@ -281,6 +283,8 @@ class WindowRate:
     #: only the count/cover gates failed, with ≥ 2 epochs: the rates are
     #: fitted, for the short tier to judge
     short: bool = False
+    #: the unique epochs the gates counted (finite in all components)
+    n_gate: int = 0
 
 
 def velocity_from_arrays(
@@ -357,7 +361,7 @@ def velocity_from_arrays(
     gap = largest_gap(used) if used.size else None
     return WindowRate(rate, sig, (counts[0], counts[1], counts[2]), span, gap,
                       tuple(reasons), steps, sig_short, chi, fq,
-                      short)  # fmt: skip
+                      short, int(np.unique(used).size))  # fmt: skip
 
 
 # ---------------------------------------------------------------------------
@@ -466,7 +470,9 @@ def _read(
 
         from geo_dataread.gps_views import station_excluded_epochs
 
-        xepochs, xsource = station_excluded_epochs(sta)
+        with warnings.catch_warnings():  # once per station, in the record
+            warnings.simplefilter("ignore")
+            xepochs, xsource = station_excluded_epochs(sta)
         tt = df["yearf"].to_numpy(dtype=np.float64)
         idx = list(_oc.match_declared_epochs(tt, np.asarray(xepochs, float)))
         attrs["excluded_epochs_source"] = xsource
@@ -783,6 +789,8 @@ def estimate_station_velocity(
     if refused is None:
         if attrs.get("outlier_abort"):
             flags.append("outlier_abort")
+        if settings.view == "declared" and attrs.get("excluded_epochs_source") is None:
+            flags.append("no_excluded_catalog")  # declared fell back to raw
         data_end = _data_end(sta, t, t1, settings)
         if data_end is not None:
             # the data stop inside the window (the processing lag): cover
@@ -852,7 +860,7 @@ def estimate_station_velocity(
     snr = signal_to_noise(rate_a, sigma_a)
     if tier == "short":
         assert wr is not None
-        n = int(np.unique(t[np.all(np.isfinite(y), axis=0)]).size)
+        n = wr.n_gate
         th = settings.short_snr_pair if n < 3 else settings.short_snr
         for part, idx, value in (("horizontal", [0, 1], snr[0]), ("up", [2], snr[1])):
             if not (value >= th):  # NaN fails too
@@ -868,10 +876,13 @@ def estimate_station_velocity(
         else:
             flags.append(f"short:n={n}")
     if refused is None and wr is not None:
-        # the F threshold is calibrated up to 61 d only
+        # the F threshold is calibrated up to 61 d and from 7 epochs only
         long_window = t_len * 365.25 > NONLINEAR_MAX_DAYS + 0.5
-        comps = [] if long_window else [name for name, f in zip("NEU", wr.f_quadratic, strict=True)
-                 if np.isfinite(rate_a["NEU".index(name)]) and f >= NONLINEAR_F]  # fmt: skip
+        comps = [] if long_window else [
+            name for c, (name, f) in enumerate(zip("NEU", wr.f_quadratic, strict=True))
+            if np.isfinite(rate_a[c]) and wr.n_epochs[c] >= NONLINEAR_MIN_OBS
+            and f >= NONLINEAR_F
+        ]  # fmt: skip
         if comps:
             flags.append(f"nonlinear:{''.join(comps)}")
     else:
@@ -883,7 +894,8 @@ def estimate_station_velocity(
     fp_extra = {"settings": dataclasses.asdict(settings), "ref": ref,
                 "window": [t0, t1], "record": _record_summary(record),
                 "k": [float(v) for v in kk], "sigma_method": sigma_method,
-                "k_source": k_source, "data_end": data_end}  # fmt: skip
+                "k_source": k_source, "data_end": data_end,
+                "excluded_epochs_source": attrs.get("excluded_epochs_source")}  # fmt: skip
     return VelocityRecord(
         station=sta,
         lon=float(lon),
@@ -1032,6 +1044,7 @@ def write_velocity_set(
         f"# gps-velocities schema {SCHEMA_VERSION}, set {name}, frame {frame}, "
         f"{sum(r.accepted for r in rows)} of {len(rows)} stations accepted\n"
     )
+    n_h = sum(r.accepted and bool(np.isfinite(r.rate[:2]).all()) for r in rows)
     paths = {
         "gmt": out_dir / f"{name}.gmt",
         "csv": out_dir / f"{name}.csv",
@@ -1039,7 +1052,8 @@ def write_velocity_set(
     }
     d, c = _RATE_DECIMALS, _COORD_DECIMALS
     with open(paths["gmt"], "w", encoding="utf-8") as fh:
-        fh.write(head + "# lon lat ve vn sve svn corr_en station  [mm/yr]\n")
+        fh.write(head.replace("accepted", f"accepted, {n_h} with a horizontal rate")
+                 + "# lon lat ve vn sve svn corr_en station  [mm/yr]\n")  # fmt: skip
         for r in rows:
             if not r.accepted or not np.isfinite(r.rate[:2]).all():
                 continue  # refused, or a short-tier record with up alone
