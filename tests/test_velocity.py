@@ -435,10 +435,12 @@ def test_pre_onset_subtracts_the_station_s_own_pre_window_rate(monkeypatch):
     assert r.accepted and r.ref == "pre-onset" and win.ref == "plate"
     assert r.rate[0] == pytest.approx(win.rate[0] - before.rate[0])
     assert r.rate[0] == pytest.approx(80.0, abs=15.0)
-    assert r.sigma[0] == pytest.approx(np.hypot(win.sigma[0], before.sigma[0]))
     assert r.pre_onset is not None and r.pre_onset["rate"][0] == pytest.approx(
         before.rate[0]
     )
+    # the pre-window takes its own k, not the caller's (the window's length)
+    assert r.pre_onset["sigma_method"] != "given_k"
+    assert r.sigma[0] == pytest.approx(np.hypot(win.sigma[0], r.pre_onset["sigma"][0]))
     # no stored seasonal: the record says the pre-window rate aliases it
     assert {"pre_onset", "seasonal:none", "fallback:plate"} <= set(r.flags)
     assert "pre_overlap" not in r.flags
