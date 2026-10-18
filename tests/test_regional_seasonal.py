@@ -118,3 +118,50 @@ def test_a_regional_record_applies_its_seasonal_only() -> None:
     assert np.isfinite(apply_detrend(rec, t, y, terms="periodic")).all()
     with pytest.raises(ValueError, match="seasonal-only"):
         apply_detrend(rec, t, y)
+
+
+def _fake_read(true_amp: dict[str, float], rng: np.random.Generator):
+    """A ``velocity._read`` stand-in: 6 years of daily white noise (σ 1 mm)
+    plus each station's TRUE annual (cos = sin = amp), secular removed."""
+    from gps_analysis.staged import evaluate_group_values
+
+    def read(sta, start, end, settings, *, terms, doc):
+        assert terms == "secular"
+        t = np.arange(start, end, 1 / 365.25)
+        a = true_amp[sta]
+        seas = evaluate_group_values(rs.PERIODIC_NAMES, np.array([a, a, 0, 0]), t)
+        y = np.vstack([seas + rng.normal(0, 1, t.size) for _ in range(3)])
+        return t, y, np.ones_like(y), {}
+
+    return read
+
+
+def test_the_regional_k_entry_is_measured_on_the_predicted_seasonal(
+    monkeypatch,
+) -> None:
+    import geo_dataread.velocity as vel
+
+    stations = {c: _own(2.0) for c in "ABCD"}
+    doc = _doc(**stations)
+    # the stored seasonals all say 2 mm; the truth agrees: k ~ white-noise k
+    monkeypatch.setattr(vel, "_read", _fake_read(dict.fromkeys("ABCD", 2.0),
+                                                 np.random.default_rng(1)))  # fmt: skip
+    good = rs.regional_k_entry(doc, list("ABCD"), _coords, None, days=[91])
+    # A's true seasonal is 8 mm: the neighbours' prediction leaves 6 mm in
+    monkeypatch.setattr(vel, "_read", _fake_read({**dict.fromkeys("BCD", 2.0),
+                                                  "A": 8.0},
+                                                 np.random.default_rng(1)))  # fmt: skip
+    bad = rs.regional_k_entry(doc, ["A"], _coords, None, days=[91])
+    assert good["days"] == [91] and good["n_stations"] == [4]
+    assert good["stations"] == list("ABCD")
+    assert np.all(np.asarray(bad["k"][0]) > 2 * np.asarray(good["k"][0]))
+
+
+def test_the_regional_k_entry_skips_a_station_it_cannot_predict(monkeypatch) -> None:
+    import geo_dataread.velocity as vel
+
+    monkeypatch.setattr(vel, "_read", _fake_read(dict.fromkeys(POS, 2.0),
+                                                 np.random.default_rng(2)))  # fmt: skip
+    doc = _doc(A=_own(2.0), B=_own(2.0), FAR=_own(2.0))
+    got = rs.regional_k_entry(doc, ["FAR", "T"], _coords, None, days=[91])
+    assert got["stations"] == [] and got["days"] == []

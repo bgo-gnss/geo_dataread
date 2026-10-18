@@ -1,8 +1,8 @@
 # Regional seasonal (BGÓ 2026-10-17) — design
 
 **Status:** implemented on branch `feat-regional-seasonal` (gps_analysis,
-geo_dataread); gps_plot/gps_api fail-closed items and the `regional` k(T)
-entry still open. Not deployed.
+geo_dataread, gps_plot, gps_api), with the `regional` k(T) entry
+(`--k-table`). Not deployed.
 
 ## Why
 
@@ -98,6 +98,18 @@ First run on the deployed itrf14 document (2026-10-17): 43 regional records,
 none refused, 21–38 donors each (top weights SENG, SKSH, KRIV, NYLA, HVSK,
 REYK); leave-one-out σ of the annual amplitude 0.77 / 0.57 / 1.93 mm N/E/U
 over the 20 own-seasonal stations within 100 km of a target.
+
+`--k-table` measures the k(T) `regional` entry on the same 20 stations: each
+station's quiet span with its own secular removed, less the seasonal its
+neighbours predict. itrf14 (median N/E/U):
+
+| T | all (own seasonal) | regional | secular (none removed) |
+|---|---|---|---|
+| 61 d | 2.5 / 2.4 / 2.5 | 2.7 / 2.4 / 2.5 | 2.7 / 2.6 / 3.0 |
+| 91 d | 2.8 / 2.6 / 2.6 | 3.3 / 2.6 / 2.7 | 3.3 / 3.2 / 4.1 |
+| 182 d | 3.7 / 3.2 / 3.5 | 4.3 / 3.8 / 3.9 | 5.2 / 4.6 / 6.3 |
+
+U and E gain most; N hardly (as the leave-one-out said).
 
 ## Fail closed (from the consumer audit, 2026-10-17)
 

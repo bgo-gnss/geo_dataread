@@ -248,6 +248,68 @@ def add_regional_seasonals(
     return out, report
 
 
+def regional_k_entry(
+    doc: Mapping[str, Any],
+    validate: Sequence[str],
+    coords: Coords,
+    settings: Any,
+    *,
+    days: Sequence[int] | None = None,
+) -> dict[str, Any]:
+    """The k(T) table's ``regional`` entry, by leave-one-out.
+
+    At each validation station (own estimated seasonal), its quiet span with
+    only its secular removed, less the seasonal PREDICTED from the other
+    stations: what a regional-seasonal station's residual looks like. k(T)
+    per window length as :func:`geo_dataread.velocity.build_k_table`
+    measures it; the per-component median over the stations.
+    """
+    from gps_analysis import empirical_rate_scale
+    from gps_analysis.regional import interpolate_seasonal
+    from gps_analysis.staged import evaluate_group_values
+
+    from geo_dataread import velocity as vel
+
+    days = list(days or vel.K_TABLE_DAYS)
+    stations = doc.get("stations") or {}
+    donors, _ = collect_donors(stations, coords)
+    per: dict[int, list[np.ndarray]] = {}
+    used = []
+    for sta in validate:
+        rec = stations.get(sta)
+        if sta not in donors or not rec or not rec.get("window"):
+            continue
+        lon, lat, _c = donors[sta]
+        got = interpolate_seasonal((lon, lat), donors, exclude=sta)
+        if got.refused is not None:
+            continue
+        w0, w1 = (float(v) for v in rec["window"])
+        try:
+            t, y, s, _ = vel._read(sta, w0, w1, settings, terms="secular", doc=doc)
+        except ValueError:
+            continue
+        seas = np.vstack(
+            [evaluate_group_values(PERIODIC_NAMES, got.coeffs[c], t) for c in range(3)]
+        )
+        resid = y - seas
+        any_k = False
+        for d in days:
+            rs = empirical_rate_scale(t, resid, s, window_years=d / 365.25)
+            if np.all(np.isfinite(rs.k)):
+                per.setdefault(d, []).append(np.asarray(rs.k, dtype=float))
+                any_k = True
+        if any_k:
+            used.append(sta)
+    rows = [(d, np.asarray(per[d])) for d in days if d in per]
+    return {
+        "days": [d for d, _ in rows],
+        "k": [[round(float(v), 4) for v in np.nanmedian(a, axis=0)] for _, a in rows],
+        "n_stations": [int(a.shape[0]) for _, a in rows],
+        "stations": used,
+        "method": "leave-one-out regional seasonal (gps-regional-seasonal)",
+    }
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="gps-regional-seasonal",
@@ -264,6 +326,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--stations", nargs="*", default=(),
                    help="limit the targets to these codes")  # fmt: skip
     p.add_argument("--stamp", default=None, help="fitted_at of the new records")
+    p.add_argument("--k-table", type=Path, default=None,
+                   help="also measure the k(T) `regional` entry by leave-one-out "
+                   "and write it into this k table (gps-velocities k-table)")  # fmt: skip
+    p.add_argument("--frame", default="itrf2014",
+                   help="--k-table: the .pos frame of the series")  # fmt: skip
     return p
 
 
@@ -301,6 +368,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(json.dumps(out, indent=2) + "\n", encoding="utf-8")
     n_new = sum(v.startswith("regional") for v in report.values())
+    if args.k_table is not None:
+        from geo_dataread.velocity import K_RESIDUAL_REGIONAL, VelocitySettings
+
+        table = json.loads(args.k_table.read_text(encoding="utf-8"))
+        entry = regional_k_entry(
+            doc, validate, _coords, VelocitySettings(frame=args.frame)
+        )
+        table.setdefault("residuals", {})[K_RESIDUAL_REGIONAL] = entry
+        args.k_table.write_text(json.dumps(table, indent=2) + "\n", encoding="utf-8")
+        print(f"k(T) regional from {len(entry['stations'])} stations: "
+              f"{dict(zip(entry['days'], entry['k'], strict=True))} -> {args.k_table}")  # fmt: skip
     print(f"wrote {n_new} regional record(s) -> {args.out}")
     return 0
 
