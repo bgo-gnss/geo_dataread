@@ -39,6 +39,7 @@ gps-estimate-detrend = "geo_dataread.detrend_estimate:main"
 gps-realign = "geo_dataread.realign:main"
 gps-baseline-noise = "geo_dataread.baseline_noise:main"
 gps-velocities = "geo_dataread.velocity:main"
+gps-regional-seasonal = "geo_dataread.regional_seasonal:main"
 
 [tool.hatch.metadata]
 allow-direct-references = true

@@ -155,8 +155,15 @@ def secular_from_record(
     model = record.get("model")
     if not isinstance(model, str):
         raise ValueError("record has no model code; cannot save a background")
+    if record.get("seasonal_only"):
+        raise ValueError(
+            "a seasonal-only (regional) record has no background of its own to save"
+        )
     names = list(record.get("param_names") or ())
-    mask = record_group_mask(record, list(SECULAR_GROUPS))
+    try:
+        mask = record_group_mask(record, list(SECULAR_GROUPS))
+    except ValueError as exc:
+        raise ValueError(f"{exc}, so there is no background to save") from exc
     if not mask.any():
         raise ValueError(
             f"model {model!r} has no {list(SECULAR_GROUPS)} terms, so there is "
