@@ -231,9 +231,14 @@ def test_nyla_two_month_window_reads_its_own_k_and_refuses_a_step():
 @pytest.mark.skipif(not _have_pos("THOB"), reason="no local THOB itrf2014 .pos")
 @pytest.mark.usefixtures("_deployed_config_reachable")
 def test_a_station_without_record_falls_back_to_plate_or_is_refused(tmp_path):
+    # THOB without its (regional, 2026-10-18) record: the deployed doc less it
+    deployed = dict(vel._params_doc(vel.VelocitySettings()) or {"stations": {}})
+    deployed["stations"].pop("THOB", None)
+    params = tmp_path / "params.json"
+    params.write_text(json.dumps(deployed))
     win = (dt.date(2026, 8, 15), dt.date(2026, 10, 15))
     r = vel.estimate_station_velocity(
-        "THOB", *win, vel.VelocitySettings(k_table="none")
+        "THOB", *win, vel.VelocitySettings(k_table="none", params=str(params))
     )
     assert r.ref == "plate" and r.ref_requested == "plate-periodic"
     assert "fallback:plate" in r.flags and "background:none" in r.flags
@@ -242,7 +247,7 @@ def test_a_station_without_record_falls_back_to_plate_or_is_refused(tmp_path):
     path = tmp_path / "k.json"
     path.write_text(json.dumps(_table()))
     r2 = vel.estimate_station_velocity(
-        "THOB", *win, vel.VelocitySettings(k_table=str(path))
+        "THOB", *win, vel.VelocitySettings(k_table=str(path), params=str(params))
     )
     assert r2.sigma_method == "empirical_k_table" and r2.k == (2.0, 2.0, 2.0)
     assert r2.k_source["residual"] == "secular"
@@ -251,13 +256,13 @@ def test_a_station_without_record_falls_back_to_plate_or_is_refused(tmp_path):
     # a table built on the raw view: used, but the record says so
     path.write_text(json.dumps({**_table(), "view": "raw", "uncert": 10.0}))
     r3 = vel.estimate_station_velocity(
-        "THOB", *win, vel.VelocitySettings(k_table=str(path))
+        "THOB", *win, vel.VelocitySettings(k_table=str(path), params=str(params))
     )
     assert "k_table_settings_differ" in r3.flags
     assert r3.k_source["table_settings"] == {"view": "raw"}
     np.testing.assert_allclose(r2.rate, r.rate)
     r = vel.estimate_station_velocity(
-        "THOB", *win, vel.VelocitySettings(no_record="refuse", k_table="none")
+        "THOB", *win, vel.VelocitySettings(no_record="refuse", k_table="none", params=str(params))
     )
     assert r.refused == "no_record"
 
@@ -557,3 +562,28 @@ def test_a_regional_seasonal_is_removed_and_flagged_but_is_no_background(
     assert not b.accepted and b.refused.startswith("seasonal_only:")
     got, info = vel.station_rate_scales("ELDC", [0.1], vel.VelocitySettings(), doc={})
     assert got == {} and info["reason"] == "seasonal-only record"
+
+
+@pytest.mark.skipif(not _have_pos("THOB"), reason="no local THOB itrf2014 .pos")
+@pytest.mark.usefixtures("_deployed_config_reachable")
+def test_a_regional_station_takes_the_regional_k_or_flags_its_fallback(tmp_path):
+    doc = dict(vel._params_doc(vel.VelocitySettings()) or {"stations": {}})
+    if not (doc["stations"].get("THOB") or {}).get("seasonal_only"):
+        pytest.skip("THOB has no regional record in the deployed doc")
+    win = (dt.date(2026, 8, 15), dt.date(2026, 10, 15))
+    with_regional = _table()
+    with_regional["residuals"][vel.K_RESIDUAL_REGIONAL] = {
+        "days": [7], "k": [[3.0, 3.0, 3.0]], "n_stations": [20]}  # fmt: skip
+    got = {}
+    for name, table in (("regional", with_regional), ("fallback", _table())):
+        path = tmp_path / f"{name}.json"
+        path.write_text(json.dumps(table))
+        got[name] = vel.estimate_station_velocity(
+            "THOB", *win, vel.VelocitySettings(k_table=str(path))
+        )
+    r, f = got["regional"], got["fallback"]
+    assert r.ref == "plate-periodic" and "seasonal:regional" in r.flags
+    assert r.k == (3.0, 3.0, 3.0) and r.k_source["residual"] == "regional"
+    assert "k:regional_fallback" not in r.flags
+    assert f.k == (2.0, 2.0, 2.0) and f.k_source["residual"] == "secular"
+    assert "k:regional_fallback" in f.flags

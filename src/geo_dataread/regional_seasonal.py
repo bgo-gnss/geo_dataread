@@ -45,8 +45,14 @@ ESTIMATED = "estimated"
 Coords = Callable[[str], tuple[float, float]]
 
 
+#: the fields a donor's seasonal comes from: a change here is a changed
+#: donor; provenance bookkeeping (``groups``) is not
+_DIGEST_KEYS = ("model", "param_names", "components", "fitted_at", "window", "frame")
+
+
 def _digest(record: Mapping[str, Any]) -> str:
-    raw = json.dumps(record, sort_keys=True, default=str).encode()
+    fit = {k: record.get(k) for k in _DIGEST_KEYS}
+    raw = json.dumps(fit, sort_keys=True, default=str).encode()
     return "sha256:" + hashlib.sha256(raw).hexdigest()[:16]
 
 
@@ -173,16 +179,28 @@ def regional_record(
     return record, f"{len(donor_rows)} donors, top {next(iter(got.weights))}"
 
 
+def borrowed_provenance(record: Mapping[str, Any]) -> str | None:
+    """``borrowed:<from>@<prior frame>`` of a carried-over record, else None."""
+    b = record.get("borrowed")
+    if not b:
+        return None
+    b = b if isinstance(b, Mapping) else {}
+    return f"borrowed:{b.get('from') or '?'}@{b.get('prior_frame') or '?'}"
+
+
 def mark_estimated(record: dict[str, Any]) -> None:
-    """Give a fitted record explicit ``estimated`` group provenance (kept
-    when it already says something else, e.g. a store/donor hold)."""
+    """Give a record explicit group provenance: ``estimated`` for a fitted
+    one, ``borrowed:…`` for a carried-over one (its terms were NOT fitted
+    here); a store/donor hold's own provenance is kept."""
     if record.get("seasonal_only"):
         return
+    label = borrowed_provenance(record) or ESTIMATED
+    generic = (None, "", "self", ESTIMATED)
     groups = record.setdefault("groups", {})
     for group in ("secular", "periodic"):
         entry = groups.setdefault(group, {})
-        if not entry.get("provenance") or entry.get("provenance") == "self":
-            entry["provenance"] = ESTIMATED
+        if entry.get("provenance") in generic:
+            entry["provenance"] = label
 
 
 def add_regional_seasonals(

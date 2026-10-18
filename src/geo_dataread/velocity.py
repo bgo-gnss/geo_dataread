@@ -866,6 +866,8 @@ def estimate_station_velocity(
             # bounds it from above (the regional seasonal removes part of it)
             residual = "secular"
             from_table = table_k(table, residual, k_years)
+            if from_table is not None and own is None:
+                flags.append("k:regional_fallback")
         if own is not None:
             kk, sigma_method = own, "empirical_k"
         elif from_table is not None:
@@ -1426,6 +1428,16 @@ def _k_table_main(args: argparse.Namespace) -> int:
         stations, settings, progress=lambda sta: print(sta, file=sys.stderr, end=" ")
     )
     out = Path(args.out).expanduser() if args.out else k_table_path(settings)
+    # the `regional` entry is measured by gps-regional-seasonal --k-table, not
+    # here: carry it over (marked) rather than silently drop it
+    if out.exists():
+        old = json.loads(out.read_text(encoding="utf-8")).get("residuals") or {}
+        if K_RESIDUAL_REGIONAL in old:
+            kept = dict(old[K_RESIDUAL_REGIONAL])
+            kept["carried_over"] = True
+            table["residuals"][K_RESIDUAL_REGIONAL] = kept
+            print(f"kept the '{K_RESIDUAL_REGIONAL}' entry of {out}; re-measure it "
+                  "with gps-regional-seasonal --k-table", file=sys.stderr)  # fmt: skip
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(table, indent=1, sort_keys=True) + "\n", encoding="utf-8")
     print(f"\n{len(table['stations'])} stations -> {out}")

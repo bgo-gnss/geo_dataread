@@ -9,7 +9,7 @@ from geo_dataread import regional_seasonal as rs
 
 NAMES = ["offset", "rate", *rs.PERIODIC_NAMES]
 POS = {"A": (-22.40, 63.90), "B": (-22.30, 63.95), "C": (-22.35, 63.85),
-       "D": (-22.32, 63.88), "T": (-22.36, 63.90), "FAR": (-16.0, 65.0)}  # fmt: skip
+       "D": (-22.32, 63.88), "E": (-22.38, 63.87), "T": (-22.36, 63.90), "FAR": (-16.0, 65.0)}  # fmt: skip
 
 
 def _own(seasonal: float, **extra) -> dict:
@@ -165,3 +165,54 @@ def test_the_regional_k_entry_skips_a_station_it_cannot_predict(monkeypatch) -> 
     doc = _doc(A=_own(2.0), B=_own(2.0), FAR=_own(2.0))
     got = rs.regional_k_entry(doc, ["FAR", "T"], _coords, None, days=[91])
     assert got["stations"] == [] and got["days"] == []
+
+
+def test_a_second_run_over_its_own_output_changes_nothing() -> None:
+    doc = _doc(A=_own(2.0), B=_own(2.0), C=_own(2.0), D=_own(2.0))
+    once, _ = rs.add_regional_seasonals(doc, ["T"], _coords, fitted_at="x")
+    twice, _ = rs.add_regional_seasonals(once, ["T"], _coords, fitted_at="x")
+    assert twice == once  # digests ignore the provenance bookkeeping
+
+
+def test_borrowed_records_say_borrowed_and_holds_keep_their_provenance() -> None:
+    held = _own(2.0, groups={"periodic": {"provenance": "store:SENG"}})
+    carried = _own(2.0, borrowed={"from": "BAUG", "prior_frame": "plate_removed"})
+    # a document a first version marked `estimated` everywhere is corrected
+    carried["groups"] = {"secular": {"provenance": "estimated"}}
+    doc = _doc(A=_own(2.0), B=held, C=carried, D=_own(2.0), E=_own(2.0))
+    out, _ = rs.add_regional_seasonals(doc, ["T"], _coords)
+    st = out["stations"]
+    assert st["B"]["groups"]["periodic"]["provenance"] == "store:SENG"
+    assert st["B"]["groups"]["secular"]["provenance"] == "estimated"
+    for g in ("secular", "periodic"):
+        assert st["C"]["groups"][g]["provenance"] == "borrowed:BAUG@plate_removed"
+    donors = {d["station"] for d in st["T"]["groups"]["periodic"]["donors"]}
+    assert donors == {"A", "D", "E"}  # neither the hold nor the carry-over
+
+
+def test_a_regional_record_is_no_stage_plan_donor() -> None:
+    from geo_dataread.stage_plan import donor_group_values
+
+    out, _ = rs.add_regional_seasonals(
+        _doc(A=_own(2.0), B=_own(2.0), C=_own(2.0)), ["T"], _coords
+    )
+    with pytest.raises(ValueError, match="seasonal-only"):
+        donor_group_values(out["stations"]["T"], "periodic", component=0, donor="T")
+
+
+def test_a_k_table_rebuild_keeps_the_regional_entry(tmp_path, monkeypatch) -> None:
+    import geo_dataread.velocity as vel
+
+    out = tmp_path / "k.json"
+    regional = {"days": [91], "k": [[3.0, 2.6, 2.7]], "n_stations": [20]}
+    out.write_text(json.dumps({"residuals": {vel.K_RESIDUAL_REGIONAL: regional}}))
+    fresh = {"stations": ["A"], "residuals": {"all": {"days": [91],
+             "k": [[2.0, 2.0, 2.0]], "n_stations": [1]}}}  # fmt: skip
+    monkeypatch.setattr(
+        vel, "build_k_table", lambda *a, **k: json.loads(json.dumps(fresh))
+    )
+    monkeypatch.setattr(vel, "select_stations", lambda *a: ["A"])
+    assert vel.main(["k-table", "--out", str(out)]) == 0
+    got = json.loads(out.read_text())["residuals"]
+    assert got["all"] == fresh["residuals"]["all"]
+    assert got[vel.K_RESIDUAL_REGIONAL] == {**regional, "carried_over": True}

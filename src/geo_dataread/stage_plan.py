@@ -585,6 +585,13 @@ def donor_group_values(
     import numpy as np
     from gps_analysis.staged import record_group_mask
 
+    if record.get("seasonal_only"):
+        # its seasonal was interpolated from other stations, not estimated:
+        # holding it would relabel a regional seasonal as donor:STA
+        raise ValueError(
+            f"donor {donor!r}: a seasonal-only ({record.get('detrend_method')}) "
+            "record is no donor"
+        )
     model = record.get("model")
     if not isinstance(model, str):
         raise ValueError(f"donor {donor!r}: record has no model code")

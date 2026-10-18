@@ -2,7 +2,8 @@
 
 **Status:** implemented on branch `feat-regional-seasonal` (gps_analysis,
 geo_dataread, gps_plot, gps_api), with the `regional` k(T) entry
-(`--k-table`). Not deployed.
+(`--k-table`). Deployed to the itrf14 document and k table 2026-10-18
+(backups `*.bak-20261018-preregional`); reviewed (Fable) the same day.
 
 ## Why
 
@@ -82,7 +83,20 @@ A regional record is a **seasonal-only** record:
 Every other record gains `groups.secular.provenance` and
 `groups.periodic.provenance` = `estimated` (a record without a `groups`
 block reads as `estimated`; the existing spelling `self` is read as
-`estimated` too).
+`estimated` too) — except a carried-over record (`borrowed`), which says
+`borrowed:<from>@<prior frame>`, and a store/donor hold, which keeps its own.
+A donor's `digest` covers only its fit (model, param_names, components,
+fitted_at, window, frame), so a second run over its own output is a no-op.
+
+`sigma_pred` is the leave-one-out RMS of the annual amplitude *vector*
+error, stored on all four coefficients: per coefficient that is ≈ √2
+conservative, and the semiannual is not measured separately.
+
+`--k-table` writes its `regional` entry into the given table in place (the
+table, unlike the detrend document, is a derived file). `gps-velocities
+k-table` keeps an existing `regional` entry (marked `carried_over`); a
+regional station whose table has none falls back to the `secular` k and is
+flagged `k:regional_fallback`.
 
 **Writer:** `gps-regional-seasonal --params <detrend doc> --out <merged
 doc>` (`geo_dataread.regional_seasonal`). It needs no time series, only the
@@ -134,9 +148,13 @@ missing secular as zero. These must refuse instead:
 6. gps_api precompute: `_pinned_record` refuses for secular products.
 7. `secular_store.secular_from_record`: refuses a regional record (it would
    re-label it `store:STA`).
-8. `stage_plan`: `_spell`, `resolve_stage_plan` and
-   `check_stage_plan_sources` fall through to the donor branch for an
-   unknown hold kind — make them exhaustive before adding `regional`.
+8. `stage_plan`: `donor_group_values` refuses a seasonal-only donor
+   (done). `_spell`, `resolve_stage_plan` and `check_stage_plan_sources`
+   still fall through to the donor branch for an unknown hold kind — make
+   them exhaustive before adding a `regional` hold kind.
+
+The leaf decides seasonal-only by structure too (`is_seasonal_only`:
+`param_names` without an offset/rate), not only by the flag.
 
 Each gets a test with a seasonal-only fixture record, for `terms=all`,
 `secular`, `periodic` and velocity `background`.
