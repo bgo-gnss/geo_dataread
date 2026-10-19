@@ -273,6 +273,25 @@ def test_detect_view_outliers_abort_degrades():
     assert prov["outlier_abort"] is True and prov["degraded"] is True
 
 
+def test_running_method_needs_no_model_and_no_steps():
+    """§15: with an undeclared step and a year of unrest, and nothing
+    declared, the running window flags the injected blunders and leaves
+    the step alone."""
+    t, y, sigma, _ = _synthetic(n_spikes=0)
+    y = y.copy()
+    n = t.size
+    y[:, n // 2 :] += 80.0  # undeclared step
+    y[:, n // 4 : n // 2] += np.linspace(0.0, 60.0, n // 2 - n // 4)  # unrest
+    blunders = [n // 8, 3 * n // 4]
+    y[:, blunders] += 40.0
+    running = OutlierParams(method="running")
+    flags, prov = gps_views.detect_view_outliers(t, y, sigma, outlier_params=running)
+    assert prov["outlier_abort"] is False and prov["degraded"] is False
+    assert flags[:, blunders].all()
+    assert np.count_nonzero(flags) <= 2 * len(blunders) * y.shape[0]
+    assert flags[:, n // 2 - 3 : n // 2 + 3].sum() == 0  # the step is left alone
+
+
 def test_cleaned_view_preserves_raw_columns(view_env):
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")  # full SENG spans unrest; abort allowed
