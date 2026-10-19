@@ -685,3 +685,42 @@ def test_window_datum_shift_aligns_a_full_span_record(view_env, seng_record):
 def test_window_datum_shift_disjoint_window_raises(view_env):
     with pytest.raises(ValueError, match="no data"):
         gps_views.window_datum_shift("SENG", fstart=1990.0, fend=1991.0, Dir=TOT)
+
+
+def test_icing_days_are_taken_out_then_flagged():
+    """An iced block (days of offset) is not an outlier to the running window
+    — a run of that length is signal — so only the icing index removes it."""
+    t, y, sigma, _ = _synthetic(n_spikes=0)
+    y = y.copy()
+    block = np.arange(600, 612)
+    y[:, block] += 25.0  # twelve iced days
+    running = OutlierParams(method="running")
+    bare, _ = gps_views.detect_view_outliers(t, y, sigma, outlier_params=running)
+    assert not bare[:, block].any()
+    flags, prov = gps_views.detect_view_outliers(
+        t, y, sigma, outlier_params=running, icing_epochs=t[block]
+    )
+    assert flags[:, block].all() and prov["n_icing"] == block.size
+    assert prov["icing"][:, block].all() and prov["icing"].sum() == 3 * block.size
+
+
+def test_icing_days_are_flagged_even_when_detection_fails():
+    t, y, sigma, _ = _synthetic(n_spikes=0)
+    bad = OutlierParams(method="running", max_flag_fraction=1e-9)  # aborts all
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        y2 = y.copy()
+        y2[:, 300] += 40.0
+        flags, prov = gps_views.detect_view_outliers(
+            t, y2, sigma, outlier_params=bad, icing_epochs=t[[500, 501]]
+        )
+    assert prov["outlier_abort"] is True
+    assert flags[:, [500, 501]].all() and flags.sum() == 6
+
+
+def test_no_harvest_means_no_icing_silently(tmp_path):
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        assert gps_views.resolve_icing_epochs("SENG", tmp_path) == ((), None)
+    assert gps_views.resolve_icing_epochs("SENG", False) == ((), None)
+    assert gps_views.resolve_icing_epochs("SENG", [2026.5]) == ((2026.5,), "explicit")
