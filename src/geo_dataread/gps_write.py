@@ -53,6 +53,7 @@ from gps_analysis import OutlierParams
 from geo_dataread.gps_views import (
     detect_view_outliers,
     resolve_excluded_epochs,
+    resolve_icing_epochs,
     resolve_outlier_detection,
     resolve_protect_windows,
     station_step_epochs,
@@ -167,6 +168,7 @@ def write_cleaned_neu(
     protect_windows: str | Path | Sequence[tuple[float, float]] | None = None,
     outlier_overrides: str | Path | None = None,
     exclude_epochs: str | Path | Sequence[float] | None = None,
+    icing: bool | str | Path | Sequence[float] | None = None,
 ) -> dict[str, Any]:
     """Write an outlier-cleaned ``.NEU`` file plus its provenance sidecar.
 
@@ -324,6 +326,7 @@ def write_cleaned_neu(
     # known-bad points force-flagged in every component (the detector errs
     # conservative on ambiguous spikes-on-drift).  Inverse of protect_windows.
     xepochs, xe_source = resolve_excluded_epochs(sta, exclude_epochs)
+    iepochs, ic_source = resolve_icing_epochs(sta, icing)
 
     # detection always in mm so OutlierParams thresholds AND the per-component
     # min_outlier floor are unit-stable (the floor is authored in mm)
@@ -337,6 +340,7 @@ def write_cleaned_neu(
         protect_windows=pwindows,
         min_outlier=floor,
         exclude_epochs=xepochs if xepochs else None,
+        icing_epochs=iepochs if iepochs else None,
     )
 
     degraded = bool(oprov["degraded"])
@@ -403,6 +407,8 @@ def write_cleaned_neu(
             "protect_windows_source": pw_source,
             "excluded_epochs_applied": len(xepochs),
             "excluded_epochs_source": xe_source,
+            "icing_days_applied": int(oprov.get("n_icing", 0)),
+            "icing_source": ic_source,
         },
         "n_total": int(len(neudata)),
         "n_removed": int(np.count_nonzero(union)),

@@ -660,6 +660,51 @@ def resolve_excluded_epochs(
     return tuple(float(e) for e in exclude_epochs), "explicit"
 
 
+def resolve_icing_epochs(
+    sta: str,
+    icing: bool | str | Path | Sequence[float] | None = None,
+    *,
+    ratio: float | None = None,
+) -> tuple[tuple[float, ...], str | None]:
+    """Days with icing suspected for ``sta``, from GAMIT's autcln statistics.
+
+    The harvest (``gps-autcln-harvest``) keeps ``<SITE>.autcln.24hr.csv`` and
+    the network's daily median in the ``.pos`` directory; the days come from
+    :func:`geo_dataread.autcln_stats.icing_days` (network-normalised azimuth
+    mean over the station's own low level, ``ratio`` 2.0 by default).
+
+    - ``None`` / ``True`` — the configured ``pos_dir``;
+    - ``False`` — off: no epochs;
+    - ``str`` / :class:`~pathlib.Path` — a directory holding the harvest;
+    - a sequence of fractional-year epochs — used directly (``"explicit"``).
+
+    No harvest (no ``pos_dir``, no file for the station) is the ordinary case
+    on a host that never harvested: no epochs, source None, and SILENT — the
+    cleaned view then behaves exactly as without the index.
+    """
+    if icing is False:
+        return (), None
+    if icing is not None and icing is not True and not isinstance(icing, (str, Path)):
+        return tuple(float(e) for e in icing), "explicit"
+    from geo_dataread import autcln_stats as _ac
+
+    if isinstance(icing, (str, Path)):
+        directory = Path(icing)
+    else:
+        try:
+            from gps_parser import ConfigParser
+
+            directory = Path(str(ConfigParser().getPostProcessDir("pos_dir")))
+        except Exception:  # noqa: BLE001 - no gpsconfig / no pos_dir: no index
+            return (), None
+    path = _ac.stats_path(directory, sta)
+    if not path.is_file():
+        return (), None
+    params = _ac.IcingParams() if ratio is None else _ac.IcingParams(ratio=ratio)
+    epochs = _ac.icing_epochs(sta, directory, params)
+    return tuple(float(e) for e in epochs), str(path)
+
+
 # ---------------------------------------------------------------------------
 # Declared per-station outlier-parameter overrides (stronger detection levers)
 # ---------------------------------------------------------------------------
@@ -1016,6 +1061,7 @@ def detect_view_outliers(
     min_outlier: npt.ArrayLike | None = None,
     provisional_days: float = PROVISIONAL_DAYS,
     exclude_epochs: npt.ArrayLike | None = None,
+    icing_epochs: npt.ArrayLike | None = None,
 ) -> tuple[BoolArray, dict[str, Any]]:
     """Outlier flags for a series view, with graceful degrade.
 
@@ -1047,6 +1093,14 @@ def detect_view_outliers(
             the detector protects (ambiguous spike-on-drift) is still
             removed.  Declared epochs that fall outside any series epoch
             (beyond the ~9 h matching tolerance) are skipped.
+        icing_epochs: Days with icing suspected [yr] (GAMIT autcln
+            statistics, :func:`resolve_icing_epochs`). Unlike
+            ``exclude_epochs`` they are taken OUT of the detector's input
+            first — a block of iced days would otherwise sit inside the
+            running window's one-sided fits and the abort count and sway
+            the verdict on the clean days around it — then flagged in every
+            component, also when detection fails or aborts.  Their mask is
+            ``provenance["icing"]`` (shaped like ``flags``).
 
     Returns:
         ``(flags, provenance)`` — flags shaped like ``data`` (True =
@@ -1095,6 +1149,23 @@ def detect_view_outliers(
     if sigma2d is not None:
         finite &= np.all(np.isfinite(sigma2d) & (sigma2d > 0.0), axis=0)
 
+    icing = np.zeros(t.shape, dtype=np.bool_)
+    if icing_epochs is not None and np.size(icing_epochs) > 0:
+        idx = _oc.match_declared_epochs(
+            t, np.atleast_1d(np.asarray(icing_epochs, dtype=np.float64))
+        )
+        icing[list(idx)] = True
+    finite &= ~icing  # iced days never reach the detector
+    icing2d = np.broadcast_to(icing, y2d.shape)
+    prov["icing"] = icing2d[0].copy() if y.ndim == 1 else icing2d.copy()
+    prov["n_icing"] = int(np.count_nonzero(icing))
+
+    def _with_icing(mask: BoolArray) -> BoolArray:
+        out = np.array(mask, dtype=np.bool_, copy=True)
+        out |= prov["icing"]
+        prov["n_flagged"] = int(np.count_nonzero(out))
+        return out
+
     try:
         if getattr(outlier_params, "method", "model") == "running":
             # §15 prior-free running window: no trajectory model, and by
@@ -1120,7 +1191,7 @@ def detect_view_outliers(
             )
     except Exception as exc:  # never fail the read (design §0.4)
         _degrade(prov, f"outlier detection failed ({exc}); serving unflagged data")
-        return flags, prov
+        return _with_icing(flags), prov
 
     # §3.5a: the abort is per component. Read it with the module's degrade
     # idiom so an older gps_analysis (scalar abort only) still works and this
@@ -1153,7 +1224,7 @@ def detect_view_outliers(
             "serving those components unflagged",
         )
         if comp_abort.all():
-            return flags, prov
+            return _with_icing(flags), prov
 
     full = np.zeros(y2d.shape, dtype=np.bool_)
     full[:, finite] = np.atleast_2d(detection.flags)
@@ -1173,8 +1244,7 @@ def detect_view_outliers(
     else:
         prov["n_manual_excluded"] = 0
 
-    flags = full[0] if y.ndim == 1 else full
-    prov["n_flagged"] = int(np.count_nonzero(flags))
+    flags = _with_icing(full[0] if y.ndim == 1 else full)
 
     provisional = _provisional_mask(
         detection, t, finite, y2d.shape, provisional_days=provisional_days
@@ -1541,6 +1611,7 @@ def read_gps_view(
     protect_windows: str | Path | Sequence[tuple[float, float]] | None = None,
     outlier_overrides: str | Path | None = None,
     exclude_epochs: str | Path | Sequence[float] | None = None,
+    icing: bool | str | Path | Sequence[float] | None = None,
     frame: str | None = None,
     Dir: str | None = None,
     tType: str = "TOT",
@@ -1627,6 +1698,11 @@ def read_gps_view(
             flagging, these force flagging of known-bad points the
             detector would otherwise protect. A missing / unreadable
             catalog degrades gracefully (warn + no exclusions).
+        icing: Days with icing suspected (GAMIT autcln statistics,
+            :func:`resolve_icing_epochs`): None / True = the harvest in the
+            configured ``pos_dir`` (none there: no icing days, silently),
+            False = off, a directory, or explicit epochs. Taken out before
+            detection and flagged; ``<c>_icing`` columns mark them.
         frame: Series frame tag for the record integrity check. Default:
             the tag of the series' reference frame (:func:`series_frame` —
             ITRF2008 for TOT, the ``pos_id`` product's frame for POS), so a
@@ -1706,6 +1782,8 @@ def read_gps_view(
         "protect_windows_source": None,
         "excluded_epochs_applied": 0,
         "excluded_epochs_source": None,
+        "n_icing": 0,
+        "icing_source": None,
         "outlier_overrides_applied": {},
         "outlier_overrides_source": None,
         "min_outlier": None,
@@ -1737,6 +1815,8 @@ def read_gps_view(
         xepochs, xe_source = resolve_excluded_epochs(sta, exclude_epochs)
         attrs["excluded_epochs_applied"] = len(xepochs)
         attrs["excluded_epochs_source"] = xe_source
+        iepochs, ic_source = resolve_icing_epochs(sta, icing)
+        attrs["icing_source"] = ic_source
         flags, oprov = detect_view_outliers(
             yearf,
             data,
@@ -1746,10 +1826,14 @@ def read_gps_view(
             protect_windows=pwindows,
             min_outlier=resolved.min_outlier,
             exclude_epochs=xepochs if xepochs else None,
+            icing_epochs=iepochs if iepochs else None,
         )
+        attrs["n_icing"] = oprov["n_icing"]
         flags2d = np.atleast_2d(flags)
+        icing2d = np.atleast_2d(oprov["icing"])
         for c, name in enumerate(_COMPONENTS):
             df[f"{name}_outlier"] = flags2d[c]
+            df[f"{name}_icing"] = icing2d[c]
             df[f"{name}_cleaned"] = np.where(flags2d[c], np.nan, data[c])
         attrs["outlier_abort"] = oprov["outlier_abort"]
         attrs["n_flagged"] = oprov["n_flagged"]
