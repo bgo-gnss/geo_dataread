@@ -46,7 +46,12 @@ from typing import Any, cast
 import numpy as np
 import numpy.typing as npt
 import pandas as pd
-from gps_analysis import OutlierParams, apply_detrend, detect_outliers
+from gps_analysis import (
+    OutlierParams,
+    apply_detrend,
+    detect_outliers,
+    detect_outliers_running,
+)
 from gps_analysis import models as ga_models
 from gps_parser import ConfigParser
 from gps_parser import outlier_catalogs as _oc
@@ -1015,7 +1020,10 @@ def detect_view_outliers(
     """Outlier flags for a series view, with graceful degrade.
 
     Wraps :func:`gps_analysis.detect_outliers` (model-aware, signal-
-    protecting detection against a robust ``lineperiodic`` fit) for the
+    protecting detection against a robust ``lineperiodic`` fit) — or, with
+    ``outlier_params.method == "running"``,
+    :func:`gps_analysis.detect_outliers_running` (prior-free running
+    window, design §15; ``step_epochs`` is then not used) — for the
     read path: non-finite epochs are excluded from detection (and never
     flagged), and ANY detection failure — including the leaf's
     excess-candidate abort — degrades to all-False flags with a
@@ -1088,17 +1096,28 @@ def detect_view_outliers(
         finite &= np.all(np.isfinite(sigma2d) & (sigma2d > 0.0), axis=0)
 
     try:
-        detection = detect_outliers(
-            ga_models.lineperiodic,
-            t[finite],
-            y2d[:, finite],
-            None if sigma2d is None else sigma2d[:, finite],
-            step_epochs=step_epochs,
-            protect_windows=protect_windows,
-            min_outlier=min_outlier,
-            params=outlier_params,
-            names=list(_COMPONENTS) if y2d.shape[0] == 3 else None,
-        )
+        if getattr(outlier_params, "method", "model") == "running":
+            # §15 prior-free running window: no trajectory model, and by
+            # design no declared steps (step_epochs is not consulted)
+            detection = detect_outliers_running(
+                t[finite],
+                y2d[:, finite],
+                protect_windows=protect_windows,
+                min_outlier=min_outlier,
+                params=outlier_params,
+            )
+        else:
+            detection = detect_outliers(
+                ga_models.lineperiodic,
+                t[finite],
+                y2d[:, finite],
+                None if sigma2d is None else sigma2d[:, finite],
+                step_epochs=step_epochs,
+                protect_windows=protect_windows,
+                min_outlier=min_outlier,
+                params=outlier_params,
+                names=list(_COMPONENTS) if y2d.shape[0] == 3 else None,
+            )
     except Exception as exc:  # never fail the read (design §0.4)
         _degrade(prov, f"outlier detection failed ({exc}); serving unflagged data")
         return flags, prov

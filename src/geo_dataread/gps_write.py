@@ -280,6 +280,7 @@ def write_cleaned_neu(
     )
     params = resolved.params
     floor = resolved.min_outlier
+    running = getattr(params, "method", "model") == "running"
 
     # the record array that gets written - identical to the raw product
     neudata = gps_read.gamittoNEU(  # type: ignore[no-untyped-call]
@@ -375,8 +376,14 @@ def write_cleaned_neu(
         "cleaned_file": out_path.name,
         "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "detector": {
-            "function": "gps_analysis.detect_outliers",
-            "model": DETECTION_MODEL,
+            # the detector that RAN: the running window (design §15, the
+            # cleaned-view default) fits no trajectory model
+            "function": (
+                "gps_analysis.detect_outliers_running"
+                if running
+                else "gps_analysis.detect_outliers"
+            ),
+            "model": None if running else DETECTION_MODEL,
             "detection_unit": "mm",
             "row_policy": "union",
             # `params` echoes the OutlierParams (its scalar `min_outlier` is

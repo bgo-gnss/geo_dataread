@@ -24,6 +24,7 @@ Pinned here:
 Uses the goldenmaster fixtures (frozen GLOBK series + hermetic gpsconfig).
 """
 
+import functools
 import json
 import os
 import sys
@@ -53,6 +54,24 @@ HEADER_LINES = 2  # gamittoFile: "printing header and file \n" + header line
 # ---------------------------------------------------------------------------
 # environment / helpers
 # ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def model_detector(monkeypatch):
+    """Pin this suite to the MODEL detector.
+
+    Since 2026-10-19 the cleaned view defaults to the prior-free running
+    window (gps_analysis design §15), which by design takes no steps and no
+    model. This suite pins the writer's model-method plumbing — steps and
+    protect windows fed to ``detect_outliers``, spies on it, the
+    abort→DEGRADED path on SENG — so every ``OutlierParams`` built here, in
+    the writer and in the resolver defaults to ``method="model"``. The
+    running path through the same writer is ``test_writer_running_default``.
+    """
+    model = functools.partial(OutlierParams, method="model")
+    monkeypatch.setattr(gps_views, "OutlierParams", model)
+    monkeypatch.setattr(gps_write, "OutlierParams", model)
+    monkeypatch.setitem(globals(), "OutlierParams", model)
 
 
 @pytest.fixture(scope="module")
@@ -1235,3 +1254,24 @@ def test_cleaned_view_records_min_outlier(write_env):
     attrs = df.attrs["gps_view"]
     assert attrs["min_outlier"] == [5.0, 5.0, 10.0]
     assert attrs["min_outlier_source"] == "explicit"
+
+
+def test_writer_running_default(write_env, tmp_path):
+    """The running window (the cleaned-view default since 2026-10-19) cleans
+    full-span SENG — which aborts→DEGRADED under the model method bare."""
+    out = tmp_path / f"{STA}-{REF}_cleaned.NEU"
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        result = gps_write.write_cleaned_neu(
+            STA,
+            out,
+            Dir=TOT,
+            outlier_params=OutlierParams(method="running"),
+            **SAVETIMES_KW,
+        )
+    assert result["degraded"] is False
+    assert Path(result["outfile"]).name == f"{STA}-{REF}_cleaned.NEU"
+    assert result["n_removed"] > 0
+    det = json.loads(Path(result["sidecar"]).read_text())["detector"]
+    assert det["function"] == "gps_analysis.detect_outliers_running"
+    assert det["model"] is None and det["params"]["method"] == "running"
