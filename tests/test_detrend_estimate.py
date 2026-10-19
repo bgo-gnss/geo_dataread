@@ -1373,3 +1373,28 @@ class TestFrames:
         assert [m for m in msgs if m.startswith("warning")] == []
         assert any("NOAM median N -1.05" in m for m in msgs)
         assert any("EURA median N +0.05" in m for m in msgs)
+
+
+def test_icing_days_are_dropped_before_the_fit(tmp_path):
+    """A winter of ice (+15 mm Up, Dec-Feb) fitted as data bends the annual
+    term; dropped first, the injected annual (2 mm cos) comes back."""
+    t, y, sigma = _synthetic_series()
+    winter = (t % 1 > 0.92) | (t % 1 < 0.15)
+    y = y.copy()
+    y[2, winter] += 15.0
+    kw = dict(
+        settings=_settings(),
+        protect_windows=(),
+        outlier_overrides=_empty_overrides(tmp_path),
+    )
+    bent = station_record_from_arrays("DYNG", t, y, sigma, icing=False, **kw)
+    clean = station_record_from_arrays("DYNG", t, y, sigma, icing=t[winter], **kw)
+    assert bent is not None and clean is not None
+
+    def cos_u(rec):
+        return rec["components"][2]["params"][rec["param_names"].index("cos_annual")]
+
+    assert abs(cos_u(clean) - 2.0) < 0.3 < abs(cos_u(bent) - 2.0)
+    assert clean["refs"]["n_icing_dropped"] == int(winter.sum())
+    assert clean["refs"]["icing_source"] == "explicit"
+    assert bent["refs"]["n_icing_dropped"] == 0

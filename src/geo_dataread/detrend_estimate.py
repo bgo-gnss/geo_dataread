@@ -64,6 +64,7 @@ from gps_parser import outlier_catalogs as _oc
 from geo_dataread.gps_views import (
     PLATE_REMOVED_FRAME,
     resolve_outlier_detection,
+    resolve_icing_epochs,
     resolve_protect_windows,
     station_step_epochs,
 )
@@ -559,6 +560,7 @@ def station_record_from_arrays(
     lookup_secular: Any | None = None,
     anchor_window: tuple[float, float] | None = None,
     terms: Sequence[str] | None = None,
+    icing: bool | str | Path | Sequence[float] | None = None,
 ) -> dict[str, Any] | None:
     """Estimate one station's stored-detrend record from ready arrays.
 
@@ -635,6 +637,7 @@ def station_record_from_arrays(
         lookup_secular=lookup_secular,
         anchor_window=anchor_window,
         terms=terms,
+        icing=icing,
     )
     return None if result is None else result.record
 
@@ -945,6 +948,7 @@ def station_estimate_from_arrays(
     lookup_secular: Any | None = None,
     anchor_window: tuple[float, float] | None = None,
     terms: Sequence[str] | None = None,
+    icing: bool | str | Path | Sequence[float] | None = None,
 ) -> StationEstimate | None:
     """As :func:`station_record_from_arrays`, keeping the fit diagnostics.
 
@@ -963,8 +967,20 @@ def station_estimate_from_arrays(
     sigma = np.asarray(sigma, dtype=np.float64)
     finite = _finite_mask(yearf_in, data, sigma)
     n_dropped = int(np.count_nonzero(~finite))
+    # icing days (GAMIT autcln index; none without a harvest) never reach the
+    # fit: winter ice on a radome is otherwise estimated as seasonal signal --
+    # the very term --detrend-terms periodic removes (GFUM: 44 % of days)
+    iepochs, ic_source = resolve_icing_epochs(sta, icing)
+    iced = np.zeros(yearf_in.shape, dtype=bool)
+    if iepochs:
+        from gps_parser import outlier_catalogs as _oc
+
+        idx = list(_oc.match_declared_epochs(yearf_in, np.asarray(iepochs)))
+        iced[idx] = True
+    n_iced = int(np.count_nonzero(iced & finite))
+    finite &= ~iced
     yearf = yearf_in
-    if n_dropped:
+    if n_dropped or n_iced:
         yearf = yearf_in[finite]
         data = data[:, finite]
         sigma = sigma[:, finite]
@@ -1034,6 +1050,8 @@ def station_estimate_from_arrays(
         "steps_source": steps_source,
         "protect_windows_source": pw_source,
         "n_nonfinite_dropped": n_dropped,
+        "n_icing_dropped": n_iced,
+        "icing_source": ic_source,
         # detrend_method records "step_augmented_robust" vs "plain_wls" but
         # NOT which detection stages ran, so a stage-isolated record and a
         # full-pipeline one are otherwise indistinguishable.
@@ -1088,6 +1106,7 @@ def estimate_station(
     terms: Sequence[str] | None = None,
     pos_frame: str | None = None,
     pos_dir: str | None = None,
+    icing: bool | str | Path | Sequence[float] | None = None,
 ) -> StationResult:
     """Read one station's local plate-removed TOT series and estimate it.
 
@@ -1156,6 +1175,7 @@ def estimate_station(
             lookup_donor=lookup_donor,
             lookup_secular=lookup_secular,
             terms=terms,
+            icing=icing,
         )
     except ValueError as exc:
         return StationResult(sta, "error", str(exc))
@@ -1730,6 +1750,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="protect_windows.csv dev override (default: deployed catalog)",
     )
     parser.add_argument(
+        "--no-icing",
+        action="store_true",
+        help="keep the days the GAMIT icing index flags (default: drop them "
+        "before the fit -- the <SITE>.autcln.24hr.csv harvest in the .pos "
+        "directory; none there = nothing dropped)",
+    )
+    parser.add_argument(
         "--outlier-overrides",
         type=Path,
         default=None,
@@ -1944,6 +1971,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             lookup_donor=donor_lookup,
             pos_frame=pos_frame,
             pos_dir=args.pos_dir,
+            icing=(False if args.no_icing else (args.pos_dir or None)),
         )
         print(f"{sta}: [{result.status}] {result.detail}")
         prior = prior_doc.get(sta)
