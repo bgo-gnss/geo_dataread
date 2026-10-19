@@ -332,7 +332,7 @@ class IcingParams:
     min_days: int = 60  # fewer days in the window: whole-record quantile
     clip_sum: float = SIGELV_CLIP_SUM  # A + B above this: flagged regardless
     exit_ratio: float = 1.5  # an episode lasts while above this (hysteresis)
-    max_gap_days: int = 3  # bridge gaps up to this long between flagged days
+    max_gap_days: int = 5  # bridge gaps up to this long between flagged days
 
 
 def icing_days(
@@ -354,7 +354,9 @@ def icing_days(
       at 1.5-2.0 inside an obvious episode, the network itself disturbed);
       a day without statistics neither ends nor extends it;
     - a gap of at most ``max_gap_days`` (unflagged or no statistics) between
-      two flagged days is bridged — the ice does not leave for a day.
+      two flagged days is bridged — the ice does not leave for a day (5 since
+      2026-10-19: GFUM 2026-10-11..14 had no okada statistics; median flagged
+      share 1.5 → 1.8 %).
 
     The index is every calendar day from the first to the last day of
     ``stats``, so a bridged day without statistics is still a flagged day.
