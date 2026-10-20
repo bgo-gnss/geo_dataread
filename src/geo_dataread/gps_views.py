@@ -705,6 +705,52 @@ def resolve_icing_epochs(
     return tuple(float(e) for e in epochs), str(path)
 
 
+#: the ``.pos`` product the snow index reads, whatever the caller holds: one
+#: series for every caller (view, writer, estimator, plot), so they all flag
+#: the same days (OLAC: itrf08 176, itrf14 178 days -- near, not equal)
+SNOW_FRAME = "itrf14"
+
+
+def resolve_snow_epochs(
+    sta: str,
+    snow: bool | str | Path | Sequence[float] | None = None,
+) -> tuple[tuple[float, ...], str | None]:
+    """Days with ``sta``'s antenna buried in snow (:mod:`geo_dataread.snow_burial`).
+
+    Same switch as :func:`resolve_icing_epochs` (None / True = the configured
+    ``pos_dir``, False = off, a directory, or explicit epochs). The index
+    needs the station's autcln harvest AND its full 24 h ``.pos`` series of
+    :data:`SNOW_FRAME` in that directory — read here, whatever window,
+    reference or frame the caller holds, so every caller sees the same days.
+    Either missing: no epochs, silently.
+    """
+    if snow is False:
+        return (), None
+    if snow is not None and snow is not True and not isinstance(snow, (str, Path)):
+        return tuple(float(e) for e in snow), "explicit"
+    from geo_dataread import autcln_stats as _ac
+    from geo_dataread import snow_burial as _sb
+
+    if isinstance(snow, (str, Path)):
+        directory = Path(snow)
+    else:
+        try:
+            from gps_parser import ConfigParser
+
+            directory = Path(str(ConfigParser().getPostProcessDir("pos_dir")))
+        except Exception:  # noqa: BLE001 - no gpsconfig / no pos_dir: no index
+            return (), None
+    path = _ac.stats_path(directory, sta)
+    if not path.is_file():
+        return (), None
+    try:
+        positions = _sb.read_daily_up_series(sta, frame=SNOW_FRAME, pos_dir=directory)
+    except Exception:  # noqa: BLE001 - no .pos for the station/frame: no index
+        return (), None
+    epochs = _sb.snow_epochs(sta, directory, positions)
+    return tuple(float(e) for e in epochs), str(path)
+
+
 # ---------------------------------------------------------------------------
 # Declared per-station outlier-parameter overrides (stronger detection levers)
 # ---------------------------------------------------------------------------
@@ -1116,6 +1162,8 @@ def detect_view_outliers(
     exclude_epochs: npt.ArrayLike | None = None,
     icing_epochs: npt.ArrayLike | None = None,
     icing_mode: str = "keep",
+    snow_epochs: npt.ArrayLike | None = None,
+    snow_mode: str = "keep",
 ) -> tuple[BoolArray, dict[str, Any]]:
     """Outlier flags for a series view, with graceful degrade.
 
@@ -1158,6 +1206,13 @@ def detect_view_outliers(
             — kept out of detection, NOT flagged: the data stay, the mask
             says which; ``"remove"`` — also flagged in every component, also
             when detection fails or aborts.
+        snow_epochs: Days with the antenna buried in snow [yr]
+            (:func:`resolve_snow_epochs`). Taken out of the detector's input
+            like ``icing_epochs``, but their mask ``provenance["snow"]``
+            marks the UP component only — snow lifts Up and leaves North and
+            East alone (OLAC: Up +99 mm, N/E 1-3 mm). A 1-D ``data`` is
+            taken to be that Up.
+        snow_mode: ``"keep"`` (default) or ``"remove"``, as ``icing_mode``.
 
     Returns:
         ``(flags, provenance)`` — flags shaped like ``data`` (True =
@@ -1218,13 +1273,28 @@ def detect_view_outliers(
     prov["icing"] = icing2d[0].copy() if y.ndim == 1 else icing2d.copy()
     prov["n_icing"] = int(np.count_nonzero(icing))
 
-    if icing_mode not in ("keep", "remove"):
-        raise ValueError(f"icing_mode must be 'keep' or 'remove', got {icing_mode!r}")
+    snow = np.zeros(t.shape, dtype=np.bool_)
+    if snow_epochs is not None and np.size(snow_epochs) > 0:
+        idx = _oc.match_declared_epochs(
+            t, np.atleast_1d(np.asarray(snow_epochs, dtype=np.float64))
+        )
+        snow[list(idx)] = True
+    finite &= ~snow  # buried days never reach the detector either
+    snow2d = np.zeros(y2d.shape, dtype=np.bool_)
+    snow2d[-1] = snow  # Up only (the last component; a 1-D series is Up)
+    prov["snow"] = snow2d[0].copy() if y.ndim == 1 else snow2d
+    prov["n_snow"] = int(np.count_nonzero(snow))
+
+    for name, mode in (("icing_mode", icing_mode), ("snow_mode", snow_mode)):
+        if mode not in ("keep", "remove"):
+            raise ValueError(f"{name} must be 'keep' or 'remove', got {mode!r}")
 
     def _with_icing(mask: BoolArray) -> BoolArray:
         out = np.array(mask, dtype=np.bool_, copy=True)
         if icing_mode == "remove":
             out |= prov["icing"]
+        if snow_mode == "remove":
+            out |= prov["snow"]
         prov["n_flagged"] = int(np.count_nonzero(out))
         return out
 
@@ -1698,6 +1768,8 @@ def read_gps_view(
     exclude_epochs: str | Path | Sequence[float] | None = None,
     icing: bool | str | Path | Sequence[float] | None = None,
     icing_mode: str = "keep",
+    snow: bool | str | Path | Sequence[float] | None = None,
+    snow_mode: str = "keep",
     frame: str | None = None,
     Dir: str | None = None,
     tType: str = "TOT",
@@ -1791,6 +1863,10 @@ def read_gps_view(
             detection; ``<c>_icing`` columns mark them.
         icing_mode: ``"keep"`` (default) keeps them in ``<c>_cleaned`` (they
             are suspected, not decided); ``"remove"`` cleans them out too.
+        snow: Days with the antenna buried in snow
+            (:func:`resolve_snow_epochs`; same switch as ``icing``). Kept out
+            of detection; ``<c>_snow`` columns mark them — Up only.
+        snow_mode: As ``icing_mode``, for the snow days (Up only).
         frame: Series frame tag for the record integrity check. Default:
             the tag of the series' reference frame (:func:`series_frame` —
             ITRF2008 for TOT, the ``pos_id`` product's frame for POS), so a
@@ -1872,6 +1948,8 @@ def read_gps_view(
         "excluded_epochs_source": None,
         "n_icing": 0,
         "icing_source": None,
+        "n_snow": 0,
+        "snow_source": None,
         "outlier_overrides_applied": {},
         "outlier_overrides_source": None,
         "min_outlier": None,
@@ -1905,6 +1983,8 @@ def read_gps_view(
         attrs["excluded_epochs_source"] = xe_source
         iepochs, ic_source = resolve_icing_epochs(sta, icing)
         attrs["icing_source"] = ic_source
+        sepochs, sn_source = resolve_snow_epochs(sta, snow)
+        attrs["snow_source"] = sn_source
         flags, oprov = detect_view_outliers(
             yearf,
             data,
@@ -1916,14 +1996,20 @@ def read_gps_view(
             exclude_epochs=xepochs if xepochs else None,
             icing_epochs=iepochs if iepochs else None,
             icing_mode=icing_mode,
+            snow_epochs=sepochs if sepochs else None,
+            snow_mode=snow_mode,
         )
         attrs["n_icing"] = oprov["n_icing"]
         attrs["icing_mode"] = icing_mode
+        attrs["n_snow"] = oprov["n_snow"]
+        attrs["snow_mode"] = snow_mode
         flags2d = np.atleast_2d(flags)
         icing2d = np.atleast_2d(oprov["icing"])
+        snow2d = np.atleast_2d(oprov["snow"])
         for c, name in enumerate(_COMPONENTS):
             df[f"{name}_outlier"] = flags2d[c]
             df[f"{name}_icing"] = icing2d[c]
+            df[f"{name}_snow"] = snow2d[c]
             df[f"{name}_cleaned"] = np.where(flags2d[c], np.nan, data[c])
         attrs["outlier_abort"] = oprov["outlier_abort"]
         attrs["n_flagged"] = oprov["n_flagged"]
