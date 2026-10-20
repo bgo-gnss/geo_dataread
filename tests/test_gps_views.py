@@ -789,3 +789,33 @@ def test_a_one_sided_candidate_at_the_series_start_stays_protected():
         t, y, sigma, outlier_params=OutlierParams(method="running")
     )
     assert not flags[:, 2].any()
+
+
+def test_station_step_components_masks_by_component(tmp_path):
+    """One epoch declared as an N row and an E row ORs to a horizontal-only
+    step; an untagged (ALL) step applies everywhere."""
+    p = tmp_path / "steps.yaml"
+    p.write_text(
+        "schema_version: 1\n"
+        "stations:\n"
+        "  GJOG:\n"
+        "    - epoch_yearf: 2020.471311\n"
+        "      component: N\n"
+        "      kind: earthquake\n"
+        "    - epoch_yearf: 2020.471311\n"
+        "      component: E\n"
+        "      kind: earthquake\n"
+        "    - epoch_yearf: 2023.5\n"
+        "      kind: equipment\n"
+    )
+    epochs, mask, source = gps_views.station_step_components("GJOG", steps=p)
+    np.testing.assert_array_equal(epochs, [2020.471311, 2023.5])
+    np.testing.assert_array_equal(mask, [[True, True, False], [True, True, True]])
+    assert source == str(p)
+
+
+def test_station_step_components_degrades_like_the_epochs(tmp_path):
+    epochs, mask, source = gps_views.station_step_components(
+        "GJOG", steps=tmp_path / "missing.yaml"
+    )
+    assert epochs.size == 0 and mask.shape == (0, 3) and source is None

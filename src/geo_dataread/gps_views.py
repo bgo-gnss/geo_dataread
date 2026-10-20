@@ -335,9 +335,11 @@ def read_step_catalog(path: str | Path | None = None) -> dict[str, tuple[float, 
     Because ``detect_outliers`` takes a FLAT ``step_epochs`` array applied
     across all components (amplitudes are estimated per-component), the
     per-station value returned here is the sorted, de-duplicated UNION of
-    every declared epoch for the station — a step declared for one
-    component only picks up a ~0 estimated amplitude on the others
-    (harmless).
+    every declared epoch for the station. That is right for cleaning; it is
+    NOT right for the detrend fit, where a free amplitude on a component
+    the step does not apply to absorbs any slow signal straddling the epoch
+    (Tjörnes 2020: a fake Up step of +11..16 mm). The estimator reads the
+    per-component mask from :func:`station_step_components`.
 
     Args:
         path: Explicit catalog path; None resolves via
@@ -363,6 +365,30 @@ def read_step_catalog(path: str | Path | None = None) -> dict[str, tuple[float, 
         marker: tuple(sorted({record.epoch_yearf for record in recs}))
         for marker, recs in records.items()
     }
+
+
+def station_step_components(
+    sta: str, *, steps: str | Path | None = None
+) -> tuple[FloatArray, BoolArray, str | None]:
+    """Declared step epochs with the components each applies to.
+
+    Same resolution and graceful degrade as :func:`station_step_epochs`
+    (whose epochs these are); adds a ``(K, 3)`` bool mask over north, east,
+    up, row k for epoch k. Several entries at one epoch (e.g. one ``N`` and
+    one ``E`` row) OR together.
+    """
+    epochs, source = station_step_epochs(sta, steps=steps)
+    mask = np.ones((epochs.size, 3), dtype=np.bool_)
+    if not epochs.size or source is None:
+        return epochs, mask, source
+    records = _oc.read_steps(source).get(sta, ())
+    mask[:] = False
+    for k, epoch in enumerate(epochs):
+        for rec in records:
+            if rec.epoch_yearf == epoch:
+                for c, name in enumerate(("north", "east", "up")):
+                    mask[k, c] |= rec.applies_to(name)
+    return epochs, mask, source
 
 
 def station_step_epochs(
