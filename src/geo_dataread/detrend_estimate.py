@@ -67,7 +67,7 @@ from geo_dataread.gps_views import (
     resolve_icing_epochs,
     resolve_snow_epochs,
     resolve_protect_windows,
-    station_step_epochs,
+    station_step_components,
 )
 
 __all__ = [
@@ -1003,9 +1003,20 @@ def station_estimate_from_arrays(
 
     if settings.steps is not None:
         step_epochs = np.asarray(settings.steps, dtype=np.float64)
+        step_mask = np.ones((step_epochs.size, 3), dtype=np.bool_)
         steps_source: str | None = settings.window_source
     else:
-        step_epochs, steps_source = station_step_epochs(sta, steps=steps_catalog)
+        step_epochs, step_mask, steps_source = station_step_components(
+            sta, steps=steps_catalog
+        )
+    if stage_plan is not None and not step_mask.all():
+        # _restage refits every step in every component, which would quietly
+        # free the amplitudes the catalog pins at 0. Refuse rather than store
+        # a record that contradicts steps.yaml.
+        raise ValueError(
+            f"{sta}: per-component steps (steps.yaml `component`) are not "
+            f"supported together with a stage plan"
+        )
 
     pwindows, pw_source = resolve_protect_windows(sta, protect_windows)
     resolved = resolve_outlier_detection(
@@ -1033,6 +1044,7 @@ def station_estimate_from_arrays(
         sigma,
         segments=settings.segments,
         step_epochs=(step_epochs if step_epochs.size else None),
+        step_mask=(step_mask if step_epochs.size else None),
         min_span_years=settings.min_span_years,
         min_epochs=settings.min_epochs,
         max_gap_years=settings.max_gap_years,
