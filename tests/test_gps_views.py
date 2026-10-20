@@ -31,7 +31,7 @@ from cases import TOT, build_config_dir  # noqa: E402
 import geo_dataread.gps_read as gpsr  # noqa: E402
 from geo_dataread import gps_views  # noqa: E402
 from gps_analysis import (  # noqa: E402
-    DETREND_METHOD_ROBUST,
+    DETREND_METHOD_RUNNING,
     OutlierParams,
     estimate_detrend,
     evaluate_record,
@@ -77,7 +77,9 @@ def seng_record(seng_plate):
     est = estimate_detrend(
         "lineperiodic", yearf, data, Ddata, window=WINDOW, frame=FRAME
     )
-    assert est.detrend_method == DETREND_METHOD_ROBUST
+    # robust (an outlier stage ran, no abort); the running window since
+    # 2026-10-19, the model detector before
+    assert not est.outlier_abort
     return est.to_record(fitted_at="2026-07-14T00:00:00Z")
 
 
@@ -335,7 +337,9 @@ def test_detrended_view_is_pure_apply(view_env, params_file, seng_record):
             err_msg=f"{name}: detrended view must equal raw - stored trajectory",
         )
     attrs = df.attrs["gps_view"]
-    assert attrs["detrend_method"] == DETREND_METHOD_ROBUST
+    assert (
+        attrs["detrend_method"] == DETREND_METHOD_RUNNING
+    )  # the record's own tag, passed through
     assert attrs["frame"] == FRAME
     assert attrs["record_version"] == 1
     assert attrs["fitted_at"] == "2026-07-14T00:00:00Z"
@@ -698,7 +702,7 @@ def test_icing_days_are_taken_out_then_flagged():
     bare, _ = gps_views.detect_view_outliers(t, y, sigma, outlier_params=running)
     assert not bare[:, block].any()
     flags, prov = gps_views.detect_view_outliers(
-        t, y, sigma, outlier_params=running, icing_epochs=t[block]
+        t, y, sigma, outlier_params=running, icing_epochs=t[block], icing_mode="remove"
     )
     assert flags[:, block].all() and prov["n_icing"] == block.size
     assert prov["icing"][:, block].all() and prov["icing"].sum() == 3 * block.size
@@ -712,7 +716,12 @@ def test_icing_days_are_flagged_even_when_detection_fails():
         y2 = y.copy()
         y2[:, 300] += 40.0
         flags, prov = gps_views.detect_view_outliers(
-            t, y2, sigma, outlier_params=bad, icing_epochs=t[[500, 501]]
+            t,
+            y2,
+            sigma,
+            outlier_params=bad,
+            icing_epochs=t[[500, 501]],
+            icing_mode="remove",
         )
     assert prov["outlier_abort"] is True
     assert flags[:, [500, 501]].all() and flags.sum() == 6
@@ -724,3 +733,59 @@ def test_no_harvest_means_no_icing_silently(tmp_path):
         assert gps_views.resolve_icing_epochs("SENG", tmp_path) == ((), None)
     assert gps_views.resolve_icing_epochs("SENG", False) == ((), None)
     assert gps_views.resolve_icing_epochs("SENG", [2026.5]) == ((2026.5,), "explicit")
+
+
+def test_icing_mode_keep_keeps_the_days_and_says_which():
+    """The default: suspected, not decided -- out of detection, not flagged."""
+    t, y, sigma, _ = _synthetic(n_spikes=0)
+    y = y.copy()
+    block = np.arange(600, 612)
+    y[:, block] += 25.0
+    y[:, 300] += 40.0  # a real blunder elsewhere
+    running = OutlierParams(method="running")
+    flags, prov = gps_views.detect_view_outliers(
+        t, y, sigma, outlier_params=running, icing_epochs=t[block]
+    )
+    assert not flags[:, block].any() and flags[:, 300].all()
+    assert prov["icing"][:, block].all() and prov["n_icing"] == block.size
+    with pytest.raises(ValueError, match="icing_mode"):
+        gps_views.detect_view_outliers(
+            t, y, sigma, icing_epochs=t[block], icing_mode="hide"
+        )
+
+
+def test_a_one_sided_candidate_before_an_icing_spell_is_decided():
+    """GFUM 2026-09: a blunder just before weeks of icing stayed yellow
+    (provisional) because "recent" was measured on the detector's input,
+    which the iced days are kept out of. Measured from the real end, it is
+    old and decided: an outlier. A blunder in the last days stays pending."""
+    t, y, sigma, _ = _synthetic(n_spikes=0)
+    y = y.copy()
+    n = t.size
+    iced = np.arange(n - 40, n)  # the last 40 days iced
+    y[:, n - 42] += 40.0  # just before the spell: one side only
+    running = OutlierParams(method="running")
+    flags, prov = gps_views.detect_view_outliers(
+        t, y, sigma, outlier_params=running, icing_epochs=t[iced]
+    )
+    assert (
+        flags[:, n - 42].all() and not np.asarray(prov["provisional"])[:, n - 42].any()
+    )
+    y2 = y.copy()
+    y2[:, n - 42] -= 40.0
+    y2[:, n - 3] += 40.0  # the newest days, no icing: still pending
+    flags2, prov2 = gps_views.detect_view_outliers(t, y2, sigma, outlier_params=running)
+    assert (
+        not flags2[:, n - 3].any() and np.asarray(prov2["provisional"])[:, n - 3].all()
+    )
+
+
+def test_a_one_sided_candidate_at_the_series_start_stays_protected():
+    """The start of a read window is not a blunder: missing BEFORE side."""
+    t, y, sigma, _ = _synthetic(n_spikes=0)
+    y = y.copy()
+    y[:, 2] += 40.0
+    flags, _ = gps_views.detect_view_outliers(
+        t, y, sigma, outlier_params=OutlierParams(method="running")
+    )
+    assert not flags[:, 2].any()
