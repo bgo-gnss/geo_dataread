@@ -1007,8 +1007,13 @@ def _provisional_mask(
     shape: tuple[int, ...],
     *,
     provisional_days: float,
+    end_epoch: float | None = None,
 ) -> BoolArray:
     """Recent candidates protected on INDETERMINATE step evidence.
+
+    "Recent" counts from ``end_epoch`` (the series' real last epoch,
+    icing days included) when given, else the last epoch detection saw: a
+    block of iced days at the end must not keep older verdicts pending.
 
     ``detection.suspected_events`` carries the per-cluster step-evidence
     statistic, and ``NaN`` there is precisely "no usable post-flank, so a
@@ -1035,7 +1040,8 @@ def _provisional_mask(
     if t_fin.size == 0:
         return provisional
 
-    cutoff = float(t_fin[-1]) - provisional_days / _DAYS_PER_YEAR
+    last = float(t_fin[-1]) if end_epoch is None else float(end_epoch)
+    cutoff = last - provisional_days / _DAYS_PER_YEAR
     index = np.flatnonzero(finite)
     candidates = np.atleast_2d(raw_candidates)
     for event in events:
@@ -1050,6 +1056,53 @@ def _provisional_mask(
     return provisional
 
 
+def _aged_one_sided(
+    detection: Any,
+    t: npt.NDArray[np.float64],
+    finite: BoolArray,
+    shape: tuple[int, ...],
+    *,
+    cutoff: float,
+    reach: float,
+) -> BoolArray:
+    """One-sided running-window candidates older than ``cutoff`` [yr],
+    judged from BEFORE only.
+
+    The running detector surfaces a candidate it could judge from one side
+    only as an indeterminate ``"step"`` SuspectedEvent and does not flag it;
+    once it is no longer recent there is nothing left to wait for -- but
+    only when the missing side is AFTER it (data stopped: an icing spell,
+    an outage). A missing BEFORE side is the series start, the start of the
+    read window, or the end of a long gap: there a level change cannot be
+    told from a blunder, so those stay protected. ``reach`` [yr] is the
+    running window's ``running_max_reach_days``. Graceful on a reduced
+    detection object (empty mask).
+    """
+    out = np.zeros(shape, dtype=np.bool_)
+    events = getattr(detection, "suspected_events", None)
+    raw = getattr(detection, "candidates", None)
+    if not events or raw is None:
+        return out
+    t_fin = t[finite]
+    index = np.flatnonzero(finite)
+    cand = np.atleast_2d(raw)
+    for e in events:
+        if e.kind != "step" or not math.isnan(e.step_evidence):
+            continue
+        if float(e.t_end) >= cutoff:
+            continue  # still recent: provisional
+        i = e.i_start
+        before = np.count_nonzero((t_fin < t_fin[i]) & (t_fin >= t_fin[i] - reach))
+        after = np.count_nonzero((t_fin > t_fin[i]) & (t_fin <= t_fin[i] + reach))
+        if before < after:
+            continue  # the missing side is BEFORE: start / gap end, protected
+        span = np.zeros(t_fin.size, dtype=np.bool_)
+        span[e.i_start : e.i_end + 1] = True
+        span &= cand[e.component]
+        out[e.component, index[span]] = True
+    return out
+
+
 def detect_view_outliers(
     yearf: npt.ArrayLike,
     data: npt.ArrayLike,
@@ -1062,6 +1115,7 @@ def detect_view_outliers(
     provisional_days: float = PROVISIONAL_DAYS,
     exclude_epochs: npt.ArrayLike | None = None,
     icing_epochs: npt.ArrayLike | None = None,
+    icing_mode: str = "keep",
 ) -> tuple[BoolArray, dict[str, Any]]:
     """Outlier flags for a series view, with graceful degrade.
 
@@ -1098,9 +1152,12 @@ def detect_view_outliers(
             ``exclude_epochs`` they are taken OUT of the detector's input
             first — a block of iced days would otherwise sit inside the
             running window's one-sided fits and the abort count and sway
-            the verdict on the clean days around it — then flagged in every
-            component, also when detection fails or aborts.  Their mask is
+            the verdict on the clean days around it.  Their mask is
             ``provenance["icing"]`` (shaped like ``flags``).
+        icing_mode: ``"keep"`` (default, BGÓ 2026-10-19: they are SUSPECTED)
+            — kept out of detection, NOT flagged: the data stay, the mask
+            says which; ``"remove"`` — also flagged in every component, also
+            when detection fails or aborts.
 
     Returns:
         ``(flags, provenance)`` — flags shaped like ``data`` (True =
@@ -1155,14 +1212,19 @@ def detect_view_outliers(
             t, np.atleast_1d(np.asarray(icing_epochs, dtype=np.float64))
         )
         icing[list(idx)] = True
+    t_end = float(t[finite][-1]) if finite.any() else None  # icing days included
     finite &= ~icing  # iced days never reach the detector
     icing2d = np.broadcast_to(icing, y2d.shape)
     prov["icing"] = icing2d[0].copy() if y.ndim == 1 else icing2d.copy()
     prov["n_icing"] = int(np.count_nonzero(icing))
 
+    if icing_mode not in ("keep", "remove"):
+        raise ValueError(f"icing_mode must be 'keep' or 'remove', got {icing_mode!r}")
+
     def _with_icing(mask: BoolArray) -> BoolArray:
         out = np.array(mask, dtype=np.bool_, copy=True)
-        out |= prov["icing"]
+        if icing_mode == "remove":
+            out |= prov["icing"]
         prov["n_flagged"] = int(np.count_nonzero(out))
         return out
 
@@ -1229,6 +1291,24 @@ def detect_view_outliers(
     full = np.zeros(y2d.shape, dtype=np.bool_)
     full[:, finite] = np.atleast_2d(detection.flags)
 
+    # Running window: a one-sided candidate (it disagrees with the only side
+    # that has data) is pending only while recent; older than
+    # provisional_days from the series' real end it is decided -- an outlier
+    # like any other (BGÓ 2026-10-19: they stayed yellow for weeks when an
+    # icing spell followed them).
+    if getattr(outlier_params, "method", "model") == "running" and t_end is not None:
+        aged = _aged_one_sided(
+            detection,
+            t,
+            finite,
+            y2d.shape,
+            cutoff=t_end - provisional_days / _DAYS_PER_YEAR,
+            reach=float(getattr(outlier_params, "running_max_reach_days", 20.0))
+            / _DAYS_PER_YEAR,
+        )
+        full |= aged
+        prov["n_one_sided_decided"] = int(np.count_nonzero(aged))
+
     # Manual-removal lever: operator-declared blunder epochs force-flagged in
     # EVERY component, independent of the detector (which errs conservative on
     # ambiguous spikes-on-drift).  Match declared yearf to series indices via
@@ -1247,7 +1327,12 @@ def detect_view_outliers(
     flags = _with_icing(full[0] if y.ndim == 1 else full)
 
     provisional = _provisional_mask(
-        detection, t, finite, y2d.shape, provisional_days=provisional_days
+        detection,
+        t,
+        finite,
+        y2d.shape,
+        provisional_days=provisional_days,
+        end_epoch=t_end,
     )
     prov["provisional"] = provisional[0] if y.ndim == 1 else provisional
     prov["n_provisional"] = int(np.count_nonzero(provisional))
@@ -1612,6 +1697,7 @@ def read_gps_view(
     outlier_overrides: str | Path | None = None,
     exclude_epochs: str | Path | Sequence[float] | None = None,
     icing: bool | str | Path | Sequence[float] | None = None,
+    icing_mode: str = "keep",
     frame: str | None = None,
     Dir: str | None = None,
     tType: str = "TOT",
@@ -1701,8 +1787,10 @@ def read_gps_view(
         icing: Days with icing suspected (GAMIT autcln statistics,
             :func:`resolve_icing_epochs`): None / True = the harvest in the
             configured ``pos_dir`` (none there: no icing days, silently),
-            False = off, a directory, or explicit epochs. Taken out before
-            detection and flagged; ``<c>_icing`` columns mark them.
+            False = off, a directory, or explicit epochs. Kept out of
+            detection; ``<c>_icing`` columns mark them.
+        icing_mode: ``"keep"`` (default) keeps them in ``<c>_cleaned`` (they
+            are suspected, not decided); ``"remove"`` cleans them out too.
         frame: Series frame tag for the record integrity check. Default:
             the tag of the series' reference frame (:func:`series_frame` —
             ITRF2008 for TOT, the ``pos_id`` product's frame for POS), so a
@@ -1827,8 +1915,10 @@ def read_gps_view(
             min_outlier=resolved.min_outlier,
             exclude_epochs=xepochs if xepochs else None,
             icing_epochs=iepochs if iepochs else None,
+            icing_mode=icing_mode,
         )
         attrs["n_icing"] = oprov["n_icing"]
+        attrs["icing_mode"] = icing_mode
         flags2d = np.atleast_2d(flags)
         icing2d = np.atleast_2d(oprov["icing"])
         for c, name in enumerate(_COMPONENTS):

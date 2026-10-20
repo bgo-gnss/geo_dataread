@@ -169,6 +169,7 @@ def write_cleaned_neu(
     outlier_overrides: str | Path | None = None,
     exclude_epochs: str | Path | Sequence[float] | None = None,
     icing: bool | str | Path | Sequence[float] | None = None,
+    icing_mode: str = "keep",
 ) -> dict[str, Any]:
     """Write an outlier-cleaned ``.NEU`` file plus its provenance sidecar.
 
@@ -341,6 +342,7 @@ def write_cleaned_neu(
         min_outlier=floor,
         exclude_epochs=xepochs if xepochs else None,
         icing_epochs=iepochs if iepochs else None,
+        icing_mode=icing_mode,
     )
 
     degraded = bool(oprov["degraded"])
@@ -408,6 +410,7 @@ def write_cleaned_neu(
             "excluded_epochs_applied": len(xepochs),
             "excluded_epochs_source": xe_source,
             "icing_days_applied": int(oprov.get("n_icing", 0)),
+            "icing_mode": icing_mode,
             "icing_source": ic_source,
         },
         "n_total": int(len(neudata)),
