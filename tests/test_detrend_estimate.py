@@ -1398,3 +1398,29 @@ def test_icing_days_are_dropped_before_the_fit(tmp_path):
     assert clean["refs"]["n_icing_dropped"] == int(winter.sum())
     assert clean["refs"]["icing_source"] == "explicit"
     assert bent["refs"]["n_icing_dropped"] == 0
+
+
+def test_snow_days_are_dropped_before_the_fit(tmp_path):
+    """A buried winter (+60 mm Up) dropped first; the refs say so, and a
+    record without snow days keeps its refs as before (no snow keys)."""
+    t, y, sigma = _synthetic_series()
+    winter = (t % 1 > 0.92) | (t % 1 < 0.15)
+    y = y.copy()
+    y[2, winter] += 60.0
+    kw = dict(
+        settings=_settings(),
+        protect_windows=(),
+        outlier_overrides=_empty_overrides(tmp_path),
+        icing=False,
+    )
+    bent = station_record_from_arrays("DYNG", t, y, sigma, snow=False, **kw)
+    clean = station_record_from_arrays("DYNG", t, y, sigma, snow=t[winter], **kw)
+    assert bent is not None and clean is not None
+
+    def cos_u(rec):
+        return rec["components"][2]["params"][rec["param_names"].index("cos_annual")]
+
+    assert abs(cos_u(clean) - 2.0) < 0.3 < abs(cos_u(bent) - 2.0)
+    assert clean["refs"]["n_snow_dropped"] == int(winter.sum())
+    assert clean["refs"]["snow_source"] == "explicit"
+    assert "n_snow_dropped" not in bent["refs"] and "snow_source" not in bent["refs"]
