@@ -369,6 +369,56 @@ def pos_path(
     )
 
 
+def _header_lonlat(path: Path) -> tuple[float, float] | None:
+    """(lon, lat) in degrees, lon in [-180, 180), from a ``.pos`` header's
+    ``NEU Reference position`` -- the header only, never the rows."""
+    opener = gzip.open if path.suffix == ".gz" else open
+    with opener(path, "rt", errors="replace") as fh:
+        for _ in range(40):
+            line = fh.readline()
+            if not line or line.startswith("*YYYYMMDD"):
+                break
+            if line.startswith("NEU Reference position"):
+                try:
+                    lat, lon = (float(x) for x in line.partition(":")[2].split()[:2])
+                except ValueError:
+                    return None
+                return ((lon + 180.0) % 360.0) - 180.0, lat
+    return None
+
+
+def pos_stations(
+    prod_id: str = DEFAULT_PROD_ID,
+    directory: str | Path | None = None,
+    region: tuple[float, float, float, float] | None = None,
+) -> list[tuple[str, float, float]]:
+    """Every station with a ``.pos`` series of ``prod_id`` in ``directory``.
+
+    ``(STA, lon, lat)`` sorted by station, the position read from each file's
+    header (cheap: no rows are parsed). Files under the product's earlier names
+    (:data:`LEGACY_IDS`) count, as in :func:`pos_path`. ``region`` (W, E, S, N
+    in degrees, lon in [-180, 180)) keeps only stations inside it; a file
+    whose header has no readable position is then left out.
+    """
+    d = Path(directory) if directory is not None else Path(DEFAULT_POS_DIR)
+    prod_id = _RENAMED.get(prod_id, prod_id)
+    found: dict[str, Path] = {}
+    for pid in (prod_id, *LEGACY_IDS.get(prod_id, ())):
+        for suffix in (".pos", ".pos.gz"):
+            for path in sorted(d.glob(f"*.{pid}{suffix}")):
+                found.setdefault(path.name.split(".", 1)[0].upper(), path)
+    out: list[tuple[str, float, float]] = []
+    for sta in sorted(found):
+        ll = _header_lonlat(found[sta])
+        lon, lat = ll if ll is not None else (float("nan"), float("nan"))
+        if region is not None:
+            w, e, s_, n = region
+            if ll is None or not (w <= lon <= e and s_ <= lat <= n):
+                continue
+        out.append((sta, lon, lat))
+    return out
+
+
 def apriori_xyz(sta: str, path: str | Path | None = None) -> FloatArray | None:
     """The station's a-priori ECEF coordinate ``(3,)`` from ``station_coord.xyz``.
 

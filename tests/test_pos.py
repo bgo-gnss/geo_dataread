@@ -321,3 +321,27 @@ def test_frame_name_is_the_full_itrf_name():
     assert frame_name("igb20") == "itrf2020"
     assert frame_name("imo.24hr_itrf08") == "itrf2008"
     assert frame_name("itrf2014") == "itrf2014"
+
+
+def _pos_header(path, sta, lat, lon_east):
+    path.write_text(
+        "PBO Station Position Time Series. Reference Frame : IGb14\n"
+        f"4-character ID: {sta}\n"
+        f"NEU Reference position :    {lat:.10f}  {lon_east:.10f} 100.0 (IGb14/WGS84)\n"
+        "*YYYYMMDD HHMMSS\n"
+    )
+
+
+def test_pos_stations_lists_headers_legacy_names_and_region(tmp_path):
+    from geo_dataread.pos import pos_stations
+
+    _pos_header(tmp_path / "GRAN.imo.24hr_itrf14.pos", "GRAN", 65.9186, 342.4214)
+    _pos_header(tmp_path / "REYK.imo.daily_igb14.pos", "REYK", 64.1388, 338.0447)
+    _pos_header(tmp_path / "ONSA.imo.24hr_itrf14.pos", "ONSA", 57.3953, 11.9255)
+    _pos_header(tmp_path / "GRAN.imo.24hr_itrf20.pos", "GRAN", 65.9186, 342.4214)
+    got = pos_stations("imo.24hr_itrf14", tmp_path)
+    assert [s for s, _, _ in got] == ["GRAN", "ONSA", "REYK"]
+    lon = dict((s, lo) for s, lo, _ in got)
+    assert lon["GRAN"] == pytest.approx(-17.5786, abs=1e-3)
+    iceland = pos_stations("imo.24hr_itrf14", tmp_path, (-25.5, -12.5, 62.5, 67.5))
+    assert [s for s, _, _ in iceland] == ["GRAN", "REYK"]
