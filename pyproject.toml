@@ -41,6 +41,7 @@ gps-baseline-noise = "geo_dataread.baseline_noise:main"
 gps-velocities = "geo_dataread.velocity:main"
 gps-regional-seasonal = "geo_dataread.regional_seasonal:main"
 gps-autcln-harvest = "geo_dataread.autcln_stats:main"
+gps-network-days = "geo_dataread.network_days:main"
 
 [tool.hatch.metadata]
 allow-direct-references = true

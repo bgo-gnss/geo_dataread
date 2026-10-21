@@ -65,6 +65,7 @@ from geo_dataread.gps_views import (
     PLATE_REMOVED_FRAME,
     resolve_outlier_detection,
     resolve_icing_epochs,
+    resolve_network_epochs,
     resolve_snow_epochs,
     resolve_protect_windows,
     station_step_components,
@@ -563,6 +564,7 @@ def station_record_from_arrays(
     terms: Sequence[str] | None = None,
     icing: bool | str | Path | Sequence[float] | None = None,
     snow: bool | str | Path | Sequence[float] | None = None,
+    network: bool | str | Path | Sequence[float] | None = None,
 ) -> dict[str, Any] | None:
     """Estimate one station's stored-detrend record from ready arrays.
 
@@ -641,6 +643,7 @@ def station_record_from_arrays(
         terms=terms,
         icing=icing,
         snow=snow,
+        network=network,
     )
     return None if result is None else result.record
 
@@ -953,6 +956,7 @@ def station_estimate_from_arrays(
     terms: Sequence[str] | None = None,
     icing: bool | str | Path | Sequence[float] | None = None,
     snow: bool | str | Path | Sequence[float] | None = None,
+    network: bool | str | Path | Sequence[float] | None = None,
 ) -> StationEstimate | None:
     """As :func:`station_record_from_arrays`, keeping the fit diagnostics.
 
@@ -995,8 +999,19 @@ def station_estimate_from_arrays(
         buried[idx] = True
     n_buried = int(np.count_nonzero(buried & finite))
     finite &= ~buried
+    # and the network's bad solution days (network_days: every station off
+    # at once -- an offset the fit must not see)
+    nepochs, nw_source = resolve_network_epochs(network)
+    bad_day = np.zeros(yearf_in.shape, dtype=bool)
+    if nepochs:
+        from gps_parser import outlier_catalogs as _oc
+
+        idx = list(_oc.match_declared_epochs(yearf_in, np.asarray(nepochs)))
+        bad_day[idx] = True
+    n_network = int(np.count_nonzero(bad_day & finite))
+    finite &= ~bad_day
     yearf = yearf_in
-    if n_dropped or n_iced or n_buried:
+    if n_dropped or n_iced or n_buried or n_network:
         yearf = yearf_in[finite]
         data = data[:, finite]
         sigma = sigma[:, finite]
@@ -1083,6 +1098,11 @@ def station_estimate_from_arrays(
         # only when the index dropped something: a station without snow days
         # keeps its refs (and so its record) byte-identical
         **({"n_snow_dropped": n_buried, "snow_source": sn_source} if n_buried else {}),
+        **(
+            {"n_network_dropped": n_network, "network_source": nw_source}
+            if n_network
+            else {}
+        ),
         # detrend_method records "step_augmented_robust" vs "plain_wls" but
         # NOT which detection stages ran, so a stage-isolated record and a
         # full-pipeline one are otherwise indistinguishable.
@@ -1139,6 +1159,7 @@ def estimate_station(
     pos_dir: str | None = None,
     icing: bool | str | Path | Sequence[float] | None = None,
     snow: bool | str | Path | Sequence[float] | None = None,
+    network: bool | str | Path | Sequence[float] | None = None,
 ) -> StationResult:
     """Read one station's local plate-removed TOT series and estimate it.
 
@@ -1209,6 +1230,7 @@ def estimate_station(
             terms=terms,
             icing=icing,
             snow=snow,
+            network=network,
         )
     except ValueError as exc:
         return StationResult(sta, "error", str(exc))
@@ -1790,6 +1812,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         "directory; none there = nothing dropped)",
     )
     parser.add_argument(
+        "--no-network",
+        action="store_true",
+        help="keep the network days (default: drop them before the fit -- "
+        "network_days.<frame>.csv from gps-network-days in the .pos "
+        "directory; none there = nothing dropped)",
+    )
+    parser.add_argument(
         "--no-snow",
         action="store_true",
         help="keep the days the snow-burial index flags (default: drop them "
@@ -2013,6 +2042,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             pos_dir=args.pos_dir,
             icing=(False if args.no_icing else (args.pos_dir or None)),
             snow=(False if args.no_snow else (args.pos_dir or None)),
+            network=(False if args.no_network else (args.pos_dir or None)),
         )
         print(f"{sta}: [{result.status}] {result.detail}")
         prior = prior_doc.get(sta)
