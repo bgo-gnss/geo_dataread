@@ -816,6 +816,77 @@ def resolve_network_epochs(
     return _nd.network_epochs(path), str(path)
 
 
+def resolve_common_mode(
+    common: bool | str | Path | None = None,
+) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64], str | None]:
+    """The daily network common mode (``network_cm.<NETWORK_FRAME>.csv``).
+
+    ``(epochs, values, source)``: noon fractional years (D,), the common mode
+    (3, D) [mm, N/E/U], NaN where it was not estimated. Switch as
+    :func:`resolve_network_epochs` (None / True = ``pos_dir``, False = off,
+    a directory or the CSV). No file: empty arrays, silently.
+    """
+    empty = (np.zeros(0), np.zeros((3, 0)), None)
+    if common is False:
+        return empty
+    from geo_dataread import network_days as _nd
+
+    if isinstance(common, (str, Path)):
+        path = Path(common)
+        if path.is_dir():
+            path = _nd.common_mode_path(path)
+    else:
+        try:
+            from gps_parser import ConfigParser
+
+            directory = Path(str(ConfigParser().getPostProcessDir("pos_dir")))
+        except Exception:  # noqa: BLE001 - no gpsconfig / no pos_dir: none
+            return empty
+        path = _nd.common_mode_path(directory)
+    if not path.is_file():
+        return empty
+    df = _nd.read_common_mode(path)
+    epochs = _nd.noon_yearf(pd.DatetimeIndex(df["date"]))
+    values = df[["cm_north", "cm_east", "cm_up"]].to_numpy(dtype=np.float64).T
+    return epochs, values, str(path)
+
+
+def subtract_common_mode(
+    yearf: npt.ArrayLike,
+    data: npt.ArrayLike,
+    epochs: npt.ArrayLike,
+    values: npt.ArrayLike,
+    *,
+    scale: float = 1.0,
+) -> tuple[npt.NDArray[np.float64], int]:
+    """``data`` minus the common mode on the days it was estimated.
+
+    Equation: ``y'_{c,i} = y_{c,i} − scale·cm_{c,d(i)}`` where epoch i matches
+    day d (``match_declared_epochs`` tolerance) and ``cm`` is finite; every
+    other epoch is unchanged. ``scale`` converts the stored mm to the
+    caller's unit (1e-3 for metres). A 1-D ``data`` is taken to be Up.
+
+    Returns:
+        ``(corrected, n_epochs_corrected)`` — a new array, ``data`` untouched.
+    """
+    t = np.asarray(yearf, dtype=np.float64)
+    y = np.array(data, dtype=np.float64, copy=True)
+    ep = np.asarray(epochs, dtype=np.float64)
+    cm = np.atleast_2d(np.asarray(values, dtype=np.float64))
+    if ep.size == 0 or t.size == 0:
+        return y, 0
+    # nearest stored day per series epoch, kept only within the catalog tolerance
+    j = np.clip(np.searchsorted(ep, t), 1, ep.size - 1)
+    j = np.where(np.abs(ep[j - 1] - t) <= np.abs(ep[j] - t), j - 1, j)
+    near = np.abs(ep[j] - t) <= 1e-3  # yr, ~9 h: match_declared_epochs' tolerance
+    rows = cm if y.ndim == 2 else cm[-1:]
+    shift = np.where(near[None, :], rows[:, j], np.nan)
+    have = np.isfinite(shift)
+    y2 = np.atleast_2d(y)
+    y2[have] -= scale * shift[have]
+    return (y2 if y.ndim == 2 else y2[0]), int(np.count_nonzero(have.any(axis=0)))
+
+
 # ---------------------------------------------------------------------------
 # Declared per-station outlier-parameter overrides (stronger detection levers)
 # ---------------------------------------------------------------------------

@@ -39,11 +39,14 @@ import pandas as pd
 
 from gps_analysis import OutlierParams, detect_outliers_running
 from gps_analysis.network import (
+    COMMON_MODE_MIN_STATIONS,
     NETWORK_DOMINANT_SIGMA,
     NETWORK_MIN_STATIONS,
     NETWORK_PARTIAL_SHARE,
     NETWORK_SHARE,
+    common_mode,
     day_scores,
+    midpoint_residuals,
     network_days,
 )
 
@@ -51,6 +54,20 @@ from gps_analysis.network import (
 #: the caller holds: a bad day belongs to the processing chain, and okada's
 #: itrf08/itrf14 share their solutions (gamit-p01's IGb20 will need its own)
 NETWORK_FRAME = "itrf14"
+
+#: the plotting box (gps_plot ICELAND_REGION): W, E, S, N
+ICELAND_REGION = (-25.5, -12.5, 62.5, 67.5)
+
+CM_COLUMNS = (
+    "date",
+    "cm_north",
+    "cm_east",
+    "cm_up",
+    "n_north",
+    "n_east",
+    "n_up",
+    "provisional",
+)
 
 COLUMNS = (
     "date",
@@ -95,6 +112,44 @@ def noon_yearf(days: Sequence[dt.date] | pd.DatetimeIndex) -> np.ndarray:
     return np.asarray(out, dtype=np.float64)
 
 
+def _read_series(
+    sta: str,
+    directory: str | Path,
+    frame: str,
+    drop_epochs: Sequence[float] = (),
+) -> tuple[np.ndarray, np.ndarray] | None:
+    """The station's full 24 h series (mm, plate), its icing and snow days
+    and ``drop_epochs`` left out; None when unreadable or under 30 epochs."""
+    from geo_dataread import gps_read
+    from geo_dataread.gps_views import resolve_icing_epochs, resolve_snow_epochs
+    from geo_dataread.pos import pos_product
+    from gps_parser import outlier_catalogs as _oc
+
+    try:
+        yearf, data, _dd, _off = gps_read.getData(  # type: ignore[no-untyped-call]
+            sta,
+            ref="plate",
+            Dir=str(directory),
+            tType="POS",
+            uncert=15,
+            pos_id=pos_product(frame),
+        )
+    except Exception:  # noqa: BLE001 - a station that cannot be read: nothing
+        return None
+    t = np.asarray(yearf, dtype=np.float64)
+    y = np.asarray(data, dtype=np.float64)
+    keep = np.isfinite(t) & np.all(np.isfinite(y), axis=0)
+    drops: list[tuple[float, ...]] = [tuple(drop_epochs)]
+    for resolve in (resolve_icing_epochs, resolve_snow_epochs):
+        drops.append(resolve(sta, directory)[0])
+    for epochs in drops:
+        if epochs:
+            idx = _oc.match_declared_epochs(t, np.asarray(epochs))
+            keep[list(idx)] = False
+    t, y = t[keep], y[:, keep]
+    return (t, y) if t.size >= 30 else None
+
+
 def station_votes(
     sta: str, directory: str | Path, frame: str = NETWORK_FRAME
 ) -> tuple[np.ndarray, np.ndarray] | None:
@@ -104,35 +159,12 @@ def station_votes(
     Icing and snow days are left out before detection, as in the cleaned
     view, so a buried antenna never votes.
     """
-    from geo_dataread import gps_read
-    from geo_dataread.gps_views import resolve_icing_epochs, resolve_snow_epochs
-    from geo_dataread.pos import pos_product
-    from gps_parser import outlier_catalogs as _oc
-
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        try:
-            yearf, data, _dd, _off = gps_read.getData(  # type: ignore[no-untyped-call]
-                sta,
-                ref="plate",
-                Dir=str(directory),
-                tType="POS",
-                uncert=15,
-                pos_id=pos_product(frame),
-            )
-        except Exception:  # noqa: BLE001 - a station that cannot be read: no votes
+        series = _read_series(sta, directory, frame)
+        if series is None:
             return None
-        t = np.asarray(yearf, dtype=np.float64)
-        y = np.asarray(data, dtype=np.float64)
-        keep = np.isfinite(t) & np.all(np.isfinite(y), axis=0)
-        for resolve in (resolve_icing_epochs, resolve_snow_epochs):
-            epochs, _src = resolve(sta, directory)
-            if epochs:
-                idx = _oc.match_declared_epochs(t, np.asarray(epochs))
-                keep[list(idx)] = False
-        t, y = t[keep], y[:, keep]
-        if t.size < 30:
-            return None
+        t, y = series
         try:
             det = detect_outliers_running(t, y, params=OutlierParams())
         except Exception:  # noqa: BLE001 - detection failure: no votes
@@ -140,9 +172,145 @@ def station_votes(
     return _days(t), day_scores(det)
 
 
+def station_residuals(
+    sta: str,
+    directory: str | Path,
+    frame: str = NETWORK_FRAME,
+    network_epochs: Sequence[float] = (),
+) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
+    """One station's ``(days, residuals, one_sided)`` for the common mode:
+    midpoint residuals (3, N) [mm], the network days left out like the
+    icing and snow days."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        series = _read_series(sta, directory, frame, network_epochs)
+        if series is None:
+            return None
+        t, y = series
+        r, one = midpoint_residuals(t, y)
+    return _days(t), r, one
+
+
 def _votes(args: tuple[str, str, str]) -> tuple[str, object]:
     sta, directory, frame = args
     return sta, station_votes(sta, directory, frame)
+
+
+def _residuals(args: tuple[str, str, str, tuple[float, ...]]) -> tuple[str, object]:
+    sta, directory, frame, epochs = args
+    return sta, station_residuals(sta, directory, frame, epochs)
+
+
+def active_area_stations(path: str | Path | None = None) -> frozenset[str]:
+    """Every station of a ``volcanic_areas`` area in station_areas.yaml --
+    the active deformation kept out of the common mode (none on a host
+    without the file)."""
+    import yaml
+
+    from geo_dataread.events import (
+        STATION_AREAS_FILENAME,
+        STATION_AREAS_KEY,
+        _gpsconfig_file,
+    )
+
+    resolved = (
+        _gpsconfig_file(STATION_AREAS_KEY, STATION_AREAS_FILENAME)
+        if path is None
+        else Path(path)
+    )
+    if resolved is None or not resolved.is_file():
+        return frozenset()
+    doc = yaml.safe_load(resolved.read_text(encoding="utf-8")) or {}
+    out: set[str] = set()
+    for area in (doc.get("volcanic_areas") or {}).values():
+        out |= {str(x).upper() for x in (area or {}).get("stations") or ()}
+    return frozenset(out)
+
+
+def common_mode_stations(
+    directory: str | Path, frame: str = NETWORK_FRAME
+) -> list[str]:
+    """Stations the common mode is stacked from: in the Iceland box and in
+    no volcanic area -- so a regional signal cannot leak into everyone."""
+    from geo_dataread.pos import pos_product, pos_stations
+
+    active = active_area_stations()
+    return [
+        s
+        for s, _lon, _lat in pos_stations(pos_product(frame), directory, ICELAND_REGION)
+        if s not in active
+    ]
+
+
+def scan_common_mode(
+    stations: Sequence[str],
+    directory: str | Path,
+    *,
+    network_epochs: Sequence[float] = (),
+    frame: str = NETWORK_FRAME,
+    workers: int | None = None,
+) -> pd.DataFrame:
+    """The daily network common mode (:data:`CM_COLUMNS`), one row per day
+    with any residual; ``cm_*`` NaN where fewer than 15 stations voted."""
+    jobs = [(s, str(directory), frame, tuple(network_epochs)) for s in stations]
+    got: list[tuple[np.ndarray, np.ndarray, np.ndarray]] = []
+    with ProcessPoolExecutor(max_workers=workers) as pool:
+        for _sta, res in pool.map(_residuals, jobs):
+            if res is not None:
+                got.append(res)  # type: ignore[arg-type]
+    if not got:
+        return pd.DataFrame(columns=list(CM_COLUMNS))
+    axis = np.unique(np.concatenate([d for d, _r, _o in got]))
+    r = np.full((len(got), 3, axis.size), np.nan)
+    one = np.zeros(r.shape, dtype=bool)
+    for i, (days, ri, oi) in enumerate(got):
+        j = np.searchsorted(axis, days)
+        r[i][:, j] = ri
+        one[i][:, j] = oi
+    cm = common_mode(r, one, min_stations=COMMON_MODE_MIN_STATIONS)
+    return pd.DataFrame(
+        {
+            "date": axis,
+            "cm_north": np.round(cm.value[0], 2),
+            "cm_east": np.round(cm.value[1], 2),
+            "cm_up": np.round(cm.value[2], 2),
+            "n_north": cm.n[0],
+            "n_east": cm.n[1],
+            "n_up": cm.n[2],
+            "provisional": cm.provisional.astype(int),
+        }
+    )
+
+
+def common_mode_path(directory: str | Path, frame: str = NETWORK_FRAME) -> Path:
+    """``<directory>/network_cm.<frame>.csv``."""
+    return Path(directory) / f"network_cm.{frame}.csv"
+
+
+def write_common_mode(
+    table: pd.DataFrame,
+    path: str | Path,
+    *,
+    frame: str = NETWORK_FRAME,
+    n_stations: int = 0,
+) -> Path:
+    """Write the daily common mode WHOLE (atomic), with a provenance header."""
+    header = (
+        f"# gps-network-days common mode frame={frame} "
+        f"created={dt.datetime.now(dt.UTC):%Y-%m-%dT%H:%M:%SZ} "
+        f"stations={n_stations} min_stations={COMMON_MODE_MIN_STATIONS} "
+        "residual=midpoint-of-one-sided-lines stack=median unit=mm\n"
+    )
+    out = table.copy()
+    out["date"] = pd.to_datetime(out["date"]).dt.strftime("%Y-%m-%d")
+    return _atomic_csv(out, Path(path), header, CM_COLUMNS)
+
+
+def read_common_mode(path: str | Path) -> pd.DataFrame:
+    """The table written by :func:`write_common_mode` (``date`` parsed)."""
+    df = pd.read_csv(path, comment="#")
+    df["date"] = pd.to_datetime(df["date"])
+    return df
 
 
 def scan(
@@ -208,11 +376,18 @@ def write_network_days(
     )
     out = table.copy()
     out["date"] = pd.to_datetime(out["date"]).dt.strftime("%Y-%m-%d")
+    return _atomic_csv(out, path, header, COLUMNS)
+
+
+def _atomic_csv(
+    df: pd.DataFrame, path: Path, header: str, columns: Sequence[str]
+) -> Path:
+    """Header + CSV through a temp file and an atomic rename."""
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=path.name, suffix=".tmp")
     try:
         with os.fdopen(fd, "w") as fh:
             fh.write(header)
-            out.to_csv(fh, index=False, columns=list(COLUMNS))
+            df.to_csv(fh, index=False, columns=list(columns))
         os.replace(tmp, path)
     except BaseException:
         Path(tmp).unlink(missing_ok=True)
@@ -255,6 +430,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     ap.add_argument(
         "--dry-run", action="store_true", help="print the days, write nothing"
     )
+    ap.add_argument(
+        "--no-common-mode",
+        action="store_true",
+        help="skip the daily network common mode (network_cm.<frame>.csv)",
+    )
     a = ap.parse_args(argv)
     from geo_dataread.pos import pos_product, pos_stations
 
@@ -282,4 +462,19 @@ def main(argv: Sequence[str] | None = None) -> int:
     out = Path(a.out) if a.out else network_days_path(directory, a.frame)
     write_network_days(table, out, frame=a.frame, n_stations=used)
     print(f"wrote {out}")
+    if a.no_common_mode:
+        return 0
+    # second pass: the common mode, on the series WITHOUT the decided days
+    epochs = tuple(float(v) for v in noon_yearf(pd.DatetimeIndex(decided["date"])))
+    cm_stations = common_mode_stations(directory, a.frame)
+    cm = scan_common_mode(
+        cm_stations, directory, network_epochs=epochs, frame=a.frame, workers=a.workers
+    )
+    cm_out = common_mode_path(out.parent, a.frame)
+    write_common_mode(cm, cm_out, frame=a.frame, n_stations=len(cm_stations))
+    have = cm[["cm_north", "cm_east", "cm_up"]].notna().all(axis=1)
+    print(
+        f"common mode ({a.frame}): {int(have.sum())} days from "
+        f"{len(cm_stations)} stations outside the volcanic areas; wrote {cm_out}"
+    )
     return 0

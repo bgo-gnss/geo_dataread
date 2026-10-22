@@ -123,3 +123,53 @@ def test_network_days_are_flagged_even_when_detection_fails() -> None:
         )
     assert prov["outlier_abort"] is True
     assert flags[:, 100].all() and flags.sum() == 3
+
+
+def _cm_table() -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "date": pd.to_datetime(["2025-01-10", "2025-01-11", "2025-01-12"]),
+            "cm_north": [1.0, np.nan, -2.0],
+            "cm_east": [0.5, 3.0, 0.0],
+            "cm_up": [4.0, 0.0, 8.0],
+            "n_north": [40, 10, 40],
+            "n_east": [40, 40, 40],
+            "n_up": [40, 40, 40],
+            "provisional": [0, 0, 1],
+        }
+    )
+
+
+def test_common_mode_round_trip_and_resolver(tmp_path) -> None:
+    path = nd.write_common_mode(
+        _cm_table(), nd.common_mode_path(tmp_path), n_stations=95
+    )
+    assert path.name == "network_cm.itrf14.csv"
+    epochs, values, src = gps_views.resolve_common_mode(tmp_path)
+    assert src == str(path) and values.shape == (3, 3) and np.isnan(values[0, 1])
+    assert nd._days(epochs).astype(str).tolist() == [
+        "2025-01-10",
+        "2025-01-11",
+        "2025-01-12",
+    ]
+    assert gps_views.resolve_common_mode(False)[2] is None
+    assert gps_views.resolve_common_mode(tmp_path / "nowhere")[0].size == 0
+
+
+def test_subtract_common_mode_matches_days_and_skips_nan() -> None:
+    days = pd.date_range("2025-01-09", periods=5, freq="D")
+    t = nd.noon_yearf(days)
+    y = np.zeros((3, 5))
+    epochs, values = (
+        nd.noon_yearf(pd.DatetimeIndex(_cm_table()["date"])),
+        _cm_table()[["cm_north", "cm_east", "cm_up"]].to_numpy().T,
+    )
+    out, n = gps_views.subtract_common_mode(t, y, epochs, values)
+    assert n == 3 and not np.shares_memory(out, y) and (y == 0).all()
+    assert out[:, 0].tolist() == [0, 0, 0] and out[:, 4].tolist() == [0, 0, 0]
+    assert out[:, 1].tolist() == [-1.0, -0.5, -4.0]
+    assert out[0, 2] == 0.0 and out[1, 2] == -3.0  # NaN north: unchanged
+    metres, _ = gps_views.subtract_common_mode(t, y, epochs, values, scale=1e-3)
+    assert metres[2, 3] == -8e-3
+    up, _ = gps_views.subtract_common_mode(t, y[2], epochs, values)  # 1-D = Up
+    assert up.tolist() == [0.0, -4.0, 0.0, -8.0, 0.0]
