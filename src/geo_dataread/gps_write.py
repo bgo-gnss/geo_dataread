@@ -54,6 +54,7 @@ from geo_dataread.gps_views import (
     detect_view_outliers,
     resolve_excluded_epochs,
     resolve_icing_epochs,
+    resolve_network_epochs,
     resolve_snow_epochs,
     resolve_outlier_detection,
     resolve_protect_windows,
@@ -173,6 +174,8 @@ def write_cleaned_neu(
     icing_mode: str = "keep",
     snow: bool | str | Path | Sequence[float] | None = None,
     snow_mode: str = "keep",
+    network: bool | str | Path | Sequence[float] | None = None,
+    network_mode: str = "remove",
 ) -> dict[str, Any]:
     """Write an outlier-cleaned ``.NEU`` file plus its provenance sidecar.
 
@@ -332,6 +335,7 @@ def write_cleaned_neu(
     xepochs, xe_source = resolve_excluded_epochs(sta, exclude_epochs)
     iepochs, ic_source = resolve_icing_epochs(sta, icing)
     sepochs, sn_source = resolve_snow_epochs(sta, snow)
+    nepochs, nw_source = resolve_network_epochs(network)
 
     # detection always in mm so OutlierParams thresholds AND the per-component
     # min_outlier floor are unit-stable (the floor is authored in mm)
@@ -349,6 +353,8 @@ def write_cleaned_neu(
         icing_mode=icing_mode,
         snow_epochs=sepochs if sepochs else None,
         snow_mode=snow_mode,
+        network_epochs=nepochs if nepochs else None,
+        network_mode=network_mode,
     )
 
     degraded = bool(oprov["degraded"])
@@ -421,6 +427,9 @@ def write_cleaned_neu(
             "snow_days_applied": int(oprov.get("n_snow", 0)),
             "snow_mode": snow_mode,
             "snow_source": sn_source,
+            "network_days_applied": int(oprov.get("n_network", 0)),
+            "network_mode": network_mode,
+            "network_source": nw_source,
         },
         "n_total": int(len(neudata)),
         "n_removed": int(np.count_nonzero(union)),

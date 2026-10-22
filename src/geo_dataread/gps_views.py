@@ -777,6 +777,116 @@ def resolve_snow_epochs(
     return tuple(float(e) for e in epochs), str(path)
 
 
+def resolve_network_epochs(
+    network: bool | str | Path | Sequence[float] | None = None,
+) -> tuple[tuple[float, ...], str | None]:
+    """The network days (:mod:`geo_dataread.network_days`): whole-solution
+    bad days, the same for every station.
+
+    Same switch as :func:`resolve_icing_epochs` (None / True = the list in the
+    configured ``pos_dir``, False = off, a directory or the CSV itself, or
+    explicit epochs). The list is the ``decided`` days of
+    ``network_days.<NETWORK_FRAME>.csv`` whatever frame the caller holds — a
+    bad day belongs to the processing chain. No list: no epochs, silently.
+    """
+    if network is False:
+        return (), None
+    if (
+        network is not None
+        and network is not True
+        and not isinstance(network, (str, Path))
+    ):
+        return tuple(float(e) for e in network), "explicit"
+    from geo_dataread import network_days as _nd
+
+    if isinstance(network, (str, Path)):
+        path = Path(network)
+        if path.is_dir():
+            path = _nd.network_days_path(path)
+    else:
+        try:
+            from gps_parser import ConfigParser
+
+            directory = Path(str(ConfigParser().getPostProcessDir("pos_dir")))
+        except Exception:  # noqa: BLE001 - no gpsconfig / no pos_dir: no list
+            return (), None
+        path = _nd.network_days_path(directory)
+    if not path.is_file():
+        return (), None
+    return _nd.network_epochs(path), str(path)
+
+
+def resolve_common_mode(
+    common: bool | str | Path | None = None,
+) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64], str | None]:
+    """The daily network common mode (``network_cm.<NETWORK_FRAME>.csv``).
+
+    ``(epochs, values, source)``: noon fractional years (D,), the common mode
+    (3, D) [mm, N/E/U], NaN where it was not estimated. Switch as
+    :func:`resolve_network_epochs` (None / True = ``pos_dir``, False = off,
+    a directory or the CSV). No file: empty arrays, silently.
+    """
+    empty = (np.zeros(0), np.zeros((3, 0)), None)
+    if common is False:
+        return empty
+    from geo_dataread import network_days as _nd
+
+    if isinstance(common, (str, Path)):
+        path = Path(common)
+        if path.is_dir():
+            path = _nd.common_mode_path(path)
+    else:
+        try:
+            from gps_parser import ConfigParser
+
+            directory = Path(str(ConfigParser().getPostProcessDir("pos_dir")))
+        except Exception:  # noqa: BLE001 - no gpsconfig / no pos_dir: none
+            return empty
+        path = _nd.common_mode_path(directory)
+    if not path.is_file():
+        return empty
+    df = _nd.read_common_mode(path)
+    epochs = _nd.noon_yearf(pd.DatetimeIndex(df["date"]))
+    values = df[["cm_north", "cm_east", "cm_up"]].to_numpy(dtype=np.float64).T
+    return epochs, values, str(path)
+
+
+def subtract_common_mode(
+    yearf: npt.ArrayLike,
+    data: npt.ArrayLike,
+    epochs: npt.ArrayLike,
+    values: npt.ArrayLike,
+    *,
+    scale: float = 1.0,
+) -> tuple[npt.NDArray[np.float64], int]:
+    """``data`` minus the common mode on the days it was estimated.
+
+    Equation: ``y'_{c,i} = y_{c,i} − scale·cm_{c,d(i)}`` where epoch i matches
+    day d (``match_declared_epochs`` tolerance) and ``cm`` is finite; every
+    other epoch is unchanged. ``scale`` converts the stored mm to the
+    caller's unit (1e-3 for metres). A 1-D ``data`` is taken to be Up.
+
+    Returns:
+        ``(corrected, n_epochs_corrected)`` — a new array, ``data`` untouched.
+    """
+    t = np.asarray(yearf, dtype=np.float64)
+    y = np.array(data, dtype=np.float64, copy=True)
+    ep = np.asarray(epochs, dtype=np.float64)
+    cm = np.atleast_2d(np.asarray(values, dtype=np.float64))
+    if ep.size == 0 or t.size == 0:
+        return y, 0
+    # nearest stored day per series epoch, kept only within the catalog tolerance
+    j = np.clip(np.searchsorted(ep, t), 1, ep.size - 1)
+    j = np.where(np.abs(ep[j - 1] - t) <= np.abs(ep[j] - t), j - 1, j)
+    near = np.abs(ep[j] - t) <= 1e-3  # yr, ~9 h: match_declared_epochs' tolerance
+    rows = cm if y.ndim == 2 else cm[-1:]
+    shift = np.where(near[None, :], rows[:, j], np.nan)
+    have = np.isfinite(shift)
+    y2 = np.atleast_2d(y)
+    y2[have] -= scale * shift[have]
+    return (y2 if y.ndim == 2 else y2[0]), int(np.count_nonzero(have.any(axis=0)))
+
+
 # ---------------------------------------------------------------------------
 # Declared per-station outlier-parameter overrides (stronger detection levers)
 # ---------------------------------------------------------------------------
@@ -1190,6 +1300,8 @@ def detect_view_outliers(
     icing_mode: str = "keep",
     snow_epochs: npt.ArrayLike | None = None,
     snow_mode: str = "keep",
+    network_epochs: npt.ArrayLike | None = None,
+    network_mode: str = "remove",
 ) -> tuple[BoolArray, dict[str, Any]]:
     """Outlier flags for a series view, with graceful degrade.
 
@@ -1239,6 +1351,14 @@ def detect_view_outliers(
             East alone (OLAC: Up +99 mm, N/E 1-3 mm). A 1-D ``data`` is
             taken to be that Up.
         snow_mode: ``"keep"`` (default) or ``"remove"``, as ``icing_mode``.
+        network_epochs: Network days [yr] — whole-solution bad days
+            (:func:`resolve_network_epochs`). Taken out of the detector's
+            input like ``icing_epochs`` (a bad day's offset must not sway the
+            side lines of its neighbours); mask ``provenance["network"]``
+            in EVERY component.
+        network_mode: ``"remove"`` (default — the solution is known bad)
+            flags them in every component, also when detection fails;
+            ``"keep"`` only marks them.
 
     Returns:
         ``(flags, provenance)`` — flags shaped like ``data`` (True =
@@ -1306,12 +1426,27 @@ def detect_view_outliers(
         )
         snow[list(idx)] = True
     finite &= ~snow  # buried days never reach the detector either
+
+    network = np.zeros(t.shape, dtype=np.bool_)
+    if network_epochs is not None and np.size(network_epochs) > 0:
+        idx = _oc.match_declared_epochs(
+            t, np.atleast_1d(np.asarray(network_epochs, dtype=np.float64))
+        )
+        network[list(idx)] = True
+    finite &= ~network  # nor do the network's bad days
+    network2d = np.broadcast_to(network, y2d.shape)
+    prov["network"] = network2d[0].copy() if y.ndim == 1 else network2d.copy()
+    prov["n_network"] = int(np.count_nonzero(network))
     snow2d = np.zeros(y2d.shape, dtype=np.bool_)
     snow2d[-1] = snow  # Up only (the last component; a 1-D series is Up)
     prov["snow"] = snow2d[0].copy() if y.ndim == 1 else snow2d
     prov["n_snow"] = int(np.count_nonzero(snow))
 
-    for name, mode in (("icing_mode", icing_mode), ("snow_mode", snow_mode)):
+    for name, mode in (
+        ("icing_mode", icing_mode),
+        ("snow_mode", snow_mode),
+        ("network_mode", network_mode),
+    ):
         if mode not in ("keep", "remove"):
             raise ValueError(f"{name} must be 'keep' or 'remove', got {mode!r}")
 
@@ -1321,6 +1456,8 @@ def detect_view_outliers(
             out |= prov["icing"]
         if snow_mode == "remove":
             out |= prov["snow"]
+        if network_mode == "remove":
+            out |= prov["network"]
         prov["n_flagged"] = int(np.count_nonzero(out))
         return out
 
@@ -1796,6 +1933,8 @@ def read_gps_view(
     icing_mode: str = "keep",
     snow: bool | str | Path | Sequence[float] | None = None,
     snow_mode: str = "keep",
+    network: bool | str | Path | Sequence[float] | None = None,
+    network_mode: str = "remove",
     frame: str | None = None,
     Dir: str | None = None,
     tType: str = "TOT",
@@ -1893,6 +2032,12 @@ def read_gps_view(
             (:func:`resolve_snow_epochs`; same switch as ``icing``). Kept out
             of detection; ``<c>_snow`` columns mark them — Up only.
         snow_mode: As ``icing_mode``, for the snow days (Up only).
+        network: Network days — whole-solution bad days
+            (:func:`resolve_network_epochs`; same switch as ``icing``). Kept
+            out of detection; ``<c>_network`` columns mark them (every
+            component).
+        network_mode: ``"remove"`` (default: the solution is known bad)
+            cleans them out of ``<c>_cleaned``; ``"keep"`` only marks them.
         frame: Series frame tag for the record integrity check. Default:
             the tag of the series' reference frame (:func:`series_frame` —
             ITRF2008 for TOT, the ``pos_id`` product's frame for POS), so a
@@ -2011,6 +2156,8 @@ def read_gps_view(
         attrs["icing_source"] = ic_source
         sepochs, sn_source = resolve_snow_epochs(sta, snow)
         attrs["snow_source"] = sn_source
+        nepochs, nw_source = resolve_network_epochs(network)
+        attrs["network_source"] = nw_source
         flags, oprov = detect_view_outliers(
             yearf,
             data,
@@ -2024,16 +2171,22 @@ def read_gps_view(
             icing_mode=icing_mode,
             snow_epochs=sepochs if sepochs else None,
             snow_mode=snow_mode,
+            network_epochs=nepochs if nepochs else None,
+            network_mode=network_mode,
         )
         attrs["n_icing"] = oprov["n_icing"]
         attrs["icing_mode"] = icing_mode
         attrs["n_snow"] = oprov["n_snow"]
         attrs["snow_mode"] = snow_mode
+        attrs["n_network"] = oprov["n_network"]
+        attrs["network_mode"] = network_mode
         flags2d = np.atleast_2d(flags)
         icing2d = np.atleast_2d(oprov["icing"])
         snow2d = np.atleast_2d(oprov["snow"])
+        network2d = np.atleast_2d(oprov["network"])
         for c, name in enumerate(_COMPONENTS):
             df[f"{name}_outlier"] = flags2d[c]
+            df[f"{name}_network"] = network2d[c]
             df[f"{name}_icing"] = icing2d[c]
             df[f"{name}_snow"] = snow2d[c]
             df[f"{name}_cleaned"] = np.where(flags2d[c], np.nan, data[c])
