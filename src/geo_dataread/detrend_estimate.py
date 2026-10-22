@@ -81,6 +81,7 @@ __all__ = [
     "StationFitSettings",
     "StationResult",
     "default_fit_catalog_path",
+    "fit_catalog_key",
     "read_fit_catalog",
     "resolve_fit_settings",
     "StationEstimate",
@@ -124,6 +125,7 @@ so."""
 
 FIT_CATALOG_COLUMNS = (
     "sta",
+    "frame",
     "window_start",
     "window_end",
     "segments",
@@ -133,9 +135,23 @@ FIT_CATALOG_COLUMNS = (
     "steps",
     "comment",
 )
-"""Current ``fit_windows.csv`` column set."""
+"""Current ``fit_windows.csv`` column set.
 
-_LEGACY_FIT_CATALOG_COLUMNS = tuple(c for c in FIT_CATALOG_COLUMNS if c != "segments")
+``frame`` (2026-10-22) scopes a row to one reference frame (``itrf08`` —
+also the joined TOT, which shares its frame tag — ``itrf14``, ``itrf20``,
+or any :func:`geo_dataread.pos.pos_frame` alias); empty = every frame. A
+station may have one row per frame plus one unscoped row; the scoped row
+wins in its frame (:func:`resolve_fit_settings`). Before it, a window
+chosen for one frame applied to all of them (RHOF 2012.66, chosen on
+itrf14, cut the TOT fit too)."""
+
+_PRE_FRAME_FIT_CATALOG_COLUMNS = tuple(c for c in FIT_CATALOG_COLUMNS if c != "frame")
+"""The pre-``frame`` column set (2026-08 → 2026-10-22), still accepted:
+every row unscoped."""
+
+_LEGACY_FIT_CATALOG_COLUMNS = tuple(
+    c for c in _PRE_FRAME_FIT_CATALOG_COLUMNS if c != "segments"
+)
 """The pre-``segments`` column set, still accepted verbatim.
 
 The header check is an exact tuple match on purpose: this catalog changes
@@ -147,7 +163,11 @@ called "known" grew.  A missing ``segments`` cell reads as empty = single
 window, which is what every existing row means.
 """
 
-_FIT_CATALOG_HEADERS = (FIT_CATALOG_COLUMNS, _LEGACY_FIT_CATALOG_COLUMNS)
+_FIT_CATALOG_HEADERS = (
+    FIT_CATALOG_COLUMNS,
+    _PRE_FRAME_FIT_CATALOG_COLUMNS,
+    _LEGACY_FIT_CATALOG_COLUMNS,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -175,6 +195,16 @@ class FitCatalogRow:
     min_span_years: float | None = None
     steps: tuple[float, ...] | None = None
     comment: str = ""
+    frame: str | None = None
+
+
+def fit_catalog_key(sta: str, frame: str | None = None) -> str:
+    """The :func:`read_fit_catalog` key of a row: ``STA`` (every frame) or
+    ``STA@itrf14`` (one frame, normalised by
+    :func:`geo_dataread.pos.pos_frame`)."""
+    from geo_dataread.pos import pos_frame
+
+    return sta.upper() if frame is None else f"{sta.upper()}@{pos_frame(frame)}"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -304,8 +334,9 @@ def _parse_segments_cell(
 def read_fit_catalog(path: str | Path) -> dict[str, FitCatalogRow]:
     """Read a per-station fit catalog (``fit_windows.csv``).
 
-    Format: exactly the columns :data:`FIT_CATALOG_COLUMNS`, with ``#``
-    comment lines and blank lines allowed; one row per station; blank
+    Format: exactly the columns :data:`FIT_CATALOG_COLUMNS` (or an older
+    layout), with ``#`` comment lines and blank lines allowed; one row per
+    station and ``frame`` (empty = every frame); blank
     field = keep the global default; ``steps`` is a ``;``-separated list
     of fractional-year step epochs.
 
@@ -318,7 +349,9 @@ def read_fit_catalog(path: str | Path) -> dict[str, FitCatalogRow]:
         path: Catalog path.
 
     Returns:
-        ``{station: FitCatalogRow}`` (station markers upper-cased).
+        ``{key: FitCatalogRow}`` keyed by :func:`fit_catalog_key` —
+        ``STA`` for an unscoped row, ``STA@itrf14`` for a frame's own.
+        Look rows up with :func:`resolve_fit_settings`, not by station.
 
     Raises:
         FileNotFoundError: When the catalog does not exist.
@@ -350,9 +383,16 @@ def read_fit_catalog(path: str | Path) -> dict[str, FitCatalogRow]:
         sta = str(row.get("sta") or "").strip().upper()
         if not sta:
             raise ValueError(f"{resolved}: fit-catalog row without a 'sta' marker")
-        if sta in catalog:
+        raw_frame = str(row.get("frame") or "").strip()
+        try:
+            key = fit_catalog_key(sta, raw_frame or None)
+        except ValueError as exc:
+            raise ValueError(f"{resolved}: station {sta}: {exc}") from None
+        if key in catalog:
             raise ValueError(
-                f"{resolved}: duplicate row for station {sta} — one row per station"
+                f"{resolved}: duplicate row for station {sta}"
+                + (f" frame {raw_frame}" if raw_frame else "")
+                + " — one row per station and frame"
             )
         try:
             window_start = _parse_optional_float(
@@ -406,7 +446,7 @@ def read_fit_catalog(path: str | Path) -> dict[str, FitCatalogRow]:
                 f"{resolved}: station {sta}: window_end {window_end} <= "
                 f"window_start {window_start}"
             )
-        catalog[sta] = FitCatalogRow(
+        catalog[key] = FitCatalogRow(
             window_start=window_start,
             window_end=window_end,
             segments=segments,
@@ -415,6 +455,7 @@ def read_fit_catalog(path: str | Path) -> dict[str, FitCatalogRow]:
             min_span_years=min_span,
             steps=steps,
             comment=str(row.get("comment") or "").strip(),
+            frame=key.partition("@")[2] or None,
         )
     return catalog
 
@@ -425,14 +466,21 @@ def resolve_fit_settings(
     defaults: FitDefaults,
     *,
     catalog_source: str | None = None,
+    frame: str | None = None,
 ) -> StationFitSettings:
     """Merge the global defaults with a station's catalog row.
 
     Field-by-field: a catalog value overrides the default; a blank (None)
     catalog field — or a station without a row — keeps the default (open
     window bounds, leaf gates).
+
+    The row is the station's row for ``frame`` when the catalog has one,
+    else its unscoped row — never another frame's. ``frame`` None is
+    ``itrf08`` (the TOT / okada ``.pos`` frame), as everywhere in the
+    package.
     """
-    row = (catalog or {}).get(sta)
+    cat = catalog or {}
+    row = cat.get(fit_catalog_key(sta, frame or "itrf08")) or cat.get(sta.upper())
     if row is None:
         return StationFitSettings(
             segments=((None, None),),
@@ -443,6 +491,8 @@ def resolve_fit_settings(
             window_source="defaults",
         )
     source = catalog_source if catalog_source is not None else "fit_catalog"
+    if row.frame:
+        source = f"{source} [{row.frame}]"
     return StationFitSettings(
         segments=(
             row.segments
@@ -2018,7 +2068,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"{sta}: [skip] detrend_status.csv{note}")
             continue
         settings = resolve_fit_settings(
-            sta, catalog, defaults, catalog_source=catalog_source
+            sta, catalog, defaults, catalog_source=catalog_source, frame=pos_frame
         )
         settings = prior_window(settings, prior_doc.get(sta))
         entry = station_models.get(sta)

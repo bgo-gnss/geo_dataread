@@ -1424,3 +1424,64 @@ def test_snow_days_are_dropped_before_the_fit(tmp_path):
     assert clean["refs"]["n_snow_dropped"] == int(winter.sum())
     assert clean["refs"]["snow_source"] == "explicit"
     assert "n_snow_dropped" not in bent["refs"] and "snow_source" not in bent["refs"]
+
+
+_FRAME_HEADER = (
+    "sta,frame,window_start,window_end,segments,max_gap_years,min_epochs,"
+    "min_span_years,steps,comment\n"
+)
+
+
+class TestFrameColumn:
+    """fit_windows.csv rows scoped to one frame (2026-10-22): a window chosen
+    on itrf14 must not cut the TOT/itrf08 fit (RHOF 2012.66)."""
+
+    def _catalog(self, tmp_path: Path, body: str) -> dict[str, Any]:
+        path = tmp_path / "fit_windows.csv"
+        path.write_text(_FRAME_HEADER + body)
+        return de.read_fit_catalog(path)
+
+    def test_scoped_row_wins_in_its_frame_only(self, tmp_path: Path) -> None:
+        cat = self._catalog(
+            tmp_path,
+            "RHOF,igb14,2012.66,,,,,,,outage\nRHOF,,2001.0,,,2.0,,,,all frames\n",
+        )
+        assert sorted(cat) == ["RHOF", "RHOF@itrf14"]  # igb14 -> itrf14
+        d = FitDefaults()
+        s14 = resolve_fit_settings("RHOF", cat, d, catalog_source="c", frame="itrf14")
+        assert s14.window == (2012.66, None) and s14.window_source == "c [itrf14]"
+        assert s14.max_gap_years == d.max_gap_years  # the scoped row alone
+        for frame in (None, "itrf08", "itrf20"):
+            s = resolve_fit_settings("RHOF", cat, d, frame=frame)
+            assert s.window == (2001.0, None) and s.max_gap_years == 2.0
+
+    def test_a_scoped_row_alone_leaves_other_frames_on_defaults(
+        self, tmp_path: Path
+    ) -> None:
+        cat = self._catalog(tmp_path, "RHOF,itrf14,2012.66,,,,,,,\n")
+        s = resolve_fit_settings("RHOF", cat, FitDefaults())  # itrf08 / TOT
+        assert s.window_source == "defaults" and s.window == (None, None)
+
+    def test_itrf08_rows_are_the_tot_rows(self, tmp_path: Path) -> None:
+        cat = self._catalog(tmp_path, "SELF,itrf2008,2002.1,,,,,,,\n")
+        assert resolve_fit_settings("SELF", cat, FitDefaults()).window[0] == 2002.1
+
+    def test_duplicates_are_per_frame(self, tmp_path: Path) -> None:
+        with pytest.raises(ValueError, match="duplicate row for station RHOF frame"):
+            self._catalog(
+                tmp_path, "RHOF,itrf14,2012.0,,,,,,,\nRHOF,igb14,2013.0,,,,,,,\n"
+            )
+
+    def test_an_unknown_frame_is_refused(self, tmp_path: Path) -> None:
+        with pytest.raises(ValueError, match="RHOF: unknown frame"):
+            self._catalog(tmp_path, "RHOF,itrf05,2012.0,,,,,,,\n")
+
+    def test_the_pre_frame_layout_still_reads(self, tmp_path: Path) -> None:
+        path = tmp_path / "fit_windows.csv"
+        path.write_text(_SEG_HEADER + "RHOF,2012.66,,,,,,,\n")
+        cat = de.read_fit_catalog(path)
+        assert cat["RHOF"].frame is None
+        assert (
+            resolve_fit_settings("RHOF", cat, FitDefaults(), frame="itrf14").window[0]
+            == 2012.66
+        )
