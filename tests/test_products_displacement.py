@@ -137,8 +137,8 @@ def test_end_window_closes_at_the_last_epoch() -> None:
 def test_refusals() -> None:
     v = _view(days=50)
     s = DisplacementSettings()
-    assert (
-        displacement_from_view(v, (2030.0, 2030.5), s)[2] == "no epochs in the period"
+    assert displacement_from_view(v, (2030.0, 2030.5), s)[2] == (
+        "no epochs in the period (last data 2024-02-19)"
     )
     short = displacement_from_view(v, (2024.0, 2024.0 + 7 * DAY), s)[2]
     assert short and "shorter than two" in short
@@ -553,3 +553,58 @@ def test_help_lists_every_option_and_examples(
     for action in sub._actions:
         if action.dest != "help":
             assert action.help, action.dest
+
+
+def test_as_velocity_gmt_rows_are_whole(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _patch_load(monkeypatch, {"AAAA": _view(), "BBBB": _view(seed=7)})
+    out = tmp_path / "vel" / "set"
+    rc = cli.main(
+        ["displacement", "AAAA", "BBBB", "--period", "20240201:20240701",
+         "--as-velocity", "-o", str(out), "-q"]
+    )  # fmt: skip
+    assert rc == 0
+    rows = [
+        line.split()
+        for line in (tmp_path / "vel" / "set.gmt").read_text().splitlines()
+        if not line.startswith("#")
+    ]
+    assert len(rows) == 2
+    for r in rows:
+        assert len(r) == 8 and "nan" not in r
+
+
+def test_a_station_without_a_plate_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    _patch_load(monkeypatch, {})
+
+    def no_plate(sta, start, end, source, *, doc=None):
+        raise KeyError(f"station {sta} has no plate in the platefile")
+
+    monkeypatch.setattr(pdisp, "load", no_plate)
+    rs = estimate_displacements(["ALGO"], (2024.2, 2024.5))
+    assert rs.records[0].refused and "no plate" in rs.records[0].refused
+
+
+def test_metres_say_the_nested_units() -> None:
+    v = _view()
+    vals, _, _ = displacement_from_view(v, (2024.2, 2024.5), DisplacementSettings())
+    rec = DisplacementRecord(
+        station="SYNT",
+        lon=0.0,
+        lat=0.0,
+        period=(2024.2, 2024.5),
+        period_dates=("a", "b"),
+        frame="itrf2014",
+        series="x",
+        session="24h",
+        ref="plate-periodic",
+        ref_requested="plate-periodic",
+        view="declared",
+        method="ends",
+        sigma_method="s",
+        **vals,
+    )
+    m = rec.scaled("m")
+    assert m.units == "m" and m.ends is not None and m.ends["units"] == "mm"
+    assert m.displacement[0] == pytest.approx(rec.displacement[0] / 1000)

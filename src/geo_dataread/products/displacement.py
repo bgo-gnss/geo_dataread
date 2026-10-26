@@ -160,7 +160,9 @@ def displacement_from_view(
     finite = view.t[np.isfinite(view.y).any(axis=0)]
     in_period = finite[(finite >= p0) & (finite < p1)]
     if in_period.size == 0:
-        return {}, flags, "no epochs in the period"
+        before = finite[finite < p0]
+        hint = f" (last data {_iso(float(before[-1]))})" if before.size else ""
+        return {}, flags, f"no epochs in the period{hint}"
     last = float(in_period[-1])
     # the end window closes at the last epoch: the newest days of a period
     # running to today are not there yet (processing lag, flagged past
@@ -196,7 +198,7 @@ def displacement_from_view(
                 flags,
                 (
                     f"no epochs in the {key} window "
-                    f"{_iso(lo)}..{_iso(hi - DAY_YEARS)}{hint}"
+                    f"{_iso(lo)}..{_iso(hi - 0.5 * DAY_YEARS)}{hint}"
                 ),
             )
     disp, sig = [], []
@@ -482,7 +484,7 @@ def to_velocity(rec: DisplacementRecord) -> VelocityRecord:
         rate=(float(v[0]), float(v[1]), float(v[2])),
         sigma=(float(s[0]), float(s[1]), float(s[2])),
         sigma_formal=nan3, sigma_method=f"({rec.sigma_method})/T",
-        k=nan3, k_source={"span_years": span}, corr_en=math.nan, record=None,
+        k=nan3, k_source={"span_years": span}, corr_en=0.0, record=None,
         steps_in_window=(), outlier_abort=False, n_flagged=0,
         flags=rec.flags, refused=rec.refused, software=rec.software,
         input_fingerprint=rec.input_fingerprint, kind="from_displacement",
@@ -539,7 +541,7 @@ def estimate_station_displacement(
     pad = PAD_DAYS * DAY_YEARS
     try:
         view = load(sta, p0 - pad, p1 + pad, src, doc=doc)
-    except (OSError, ValueError) as err:
+    except (OSError, ValueError, KeyError) as err:
         return DisplacementRecord(**base, ref=src.ref, refused=f"read: {err}")
     from geo_dataread.gps_views import station_step_epochs
 

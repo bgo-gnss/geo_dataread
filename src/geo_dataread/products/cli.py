@@ -107,7 +107,11 @@ def select(
             )
         }
         if want_all or not picked:
-            picked |= found
+            # the network's own stations (stations.cfg), not the global
+            # IGS sites the .pos products also carry
+            from geo_dataread.velocity import select_stations
+
+            picked |= found & set(select_stations([], None))
         else:  # a box narrows the named stations
             picked &= found
     return sorted(picked)
@@ -117,7 +121,7 @@ def _common(p: argparse.ArgumentParser) -> None:
     g = p.add_argument_group("stations")
     g.add_argument(
         "stations", nargs="*",
-        help="station markers (SENG THOB …), or 'all' for every station with a series",
+        help="station markers (SENG THOB …), or 'all' for every stations.cfg station with a series",
     )  # fmt: skip
     g.add_argument(
         "--area", help="the members of a station_areas.yaml area (reykjanes …)"
