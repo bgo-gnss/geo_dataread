@@ -1,0 +1,6 @@
+# gps-velocities schema 3, set refuse, frame itrf2014, 0 of 4 stations accepted
+station,lon,lat,ve,vn,vu,sve,svn,svu,corr_en,n_epochs,window_start,window_end,ref,frame,plate,sigma_method,k_e,k_n,k_u,flags,refused,tier,snr_h,snr_u,parts_refused
+AAAA,-22.040000,64.000000,,,,,,,,0,2015.2000,2015.4000,background,itrf2014,,empirical_k_table,1.95,1.85,1.37,,no_record,standard,,,
+BBBB,-22.040000,64.000000,,,,,,,,0,2015.2000,2015.4000,background,itrf2014,,empirical_k_table,1.95,1.85,1.37,,no_record,standard,,,
+CCCC,-22.040000,64.000000,,,,,,,,0,2015.2000,2015.4000,background,itrf2014,,empirical_k_table,1.95,1.85,1.37,,no_record,standard,,,
+DDDD,-22.040000,64.000000,,,,,,,,0,2015.2000,2015.4000,background,itrf2014,,empirical_k_table,1.95,1.85,1.37,,no_record,standard,,,

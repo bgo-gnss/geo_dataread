@@ -1,0 +1,6 @@
+# gps-velocities schema 3, set preonset, frame itrf2014, 3 of 4 stations accepted
+station,lon,lat,ve,vn,vu,sve,svn,svu,corr_en,n_epochs,window_start,window_end,ref,frame,plate,sigma_method,k_e,k_n,k_u,flags,refused,tier,snr_h,snr_u,parts_refused
+AAAA,-22.040000,64.000000,4.022,-6.071,2.033,9.414,7.733,7.823,0.000,53,2016.3500,2016.5000,pre-onset,itrf2014,,pre_onset(empirical_k_table, empirical_k_table),1.89,1.79,1.34,fallback:plate|background:none|no_excluded_catalog|pre_onset|seasonal:none,,standard,0.9,0.3,
+BBBB,-22.040000,64.000000,-6.632,-3.354,4.354,8.938,9.817,6.835,0.000,53,2016.3500,2016.5000,pre-onset,itrf2014,,pre_onset(empirical_k_table, empirical_k_table),1.89,1.79,1.35,fallback:plate|background:none|no_excluded_catalog|pre_onset|seasonal:none,,standard,0.8,0.6,
+CCCC,-22.040000,64.000000,305.985,302.789,301.224,8.889,9.045,5.317,0.000,51,2016.3500,2016.5000,pre-onset,itrf2014,,pre_onset(empirical_k_table, empirical_k_table),1.89,1.79,1.35,fallback:plate|background:none|no_excluded_catalog|pre_onset|seasonal:none,,standard,48.0,56.7,
+DDDD,-22.040000,64.000000,,,,,,,,0,2016.3500,2016.5000,pre-onset,itrf2014,,pre_onset(empirical_k_table, empirical_k_table),,,,fallback:plate|background:none|pre_onset|seasonal:none,read: no data for station DDDD,standard,,,

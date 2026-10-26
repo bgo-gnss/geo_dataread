@@ -1,0 +1,6 @@
+# gps-velocities schema 3, set episode, frame itrf2014, 3 of 4 stations accepted
+station,lon,lat,ve,vn,vu,sve,svn,svu,corr_en,n_epochs,window_start,window_end,ref,frame,plate,sigma_method,k_e,k_n,k_u,flags,refused,tier,snr_h,snr_u,parts_refused
+AAAA,-22.040000,64.000000,-23.718,11.128,1.647,2.988,2.499,2.181,0.000,122,2016.2500,2016.6000,plate,itrf2014,,empirical_k_table,2.05,1.95,1.42,background:none|no_excluded_catalog,,standard,9.0,0.8,
+BBBB,-22.040000,64.000000,6.177,-2.265,-3.995,2.761,2.896,2.061,0.000,121,2016.2500,2016.6000,plate,itrf2014,,empirical_k_table,2.05,1.95,1.42,background:none|no_excluded_catalog,,standard,2.4,1.9,
+CCCC,-22.040000,64.000000,192.951,323.173,403.822,5.425,5.758,3.887,0.000,114,2016.2500,2016.6000,plate,itrf2014,,empirical_k_table,2.05,1.95,1.42,background:none|no_excluded_catalog,,standard,66.4,103.9,
+DDDD,-22.040000,64.000000,,,,,,,,0,2016.2500,2016.6000,plate,itrf2014,,empirical_k_table,2.05,1.95,1.42,background:none,read: no data for station DDDD,standard,,,
