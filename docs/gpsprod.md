@@ -107,3 +107,12 @@ blunder from the onset of motion, so it flags and keeps the number.
 `--days N [--end B]` (the N days ending B, default today), or `--period`
 alone (dates and event names). `--since`/`--last` remain as the old names
 of `--start`/`--days`.
+
+### The σ screen (`-u`, 2026-10-26, BGÓ)
+
+`gpsprod displacement` drops solutions with a formal σ above 100 mm by
+default (10 for `--method rate`, the velocity product's screen). The day of
+an event is a noisy solution (SENG 10 Nov 2023: σ 9/15/36 mm N/E/U) but it
+is exactly the day asked for; its σ is carried into the displacement. The
+10 mm screen made `--period 20231110:20231111 --ends 1` refuse SENG and THOB.
+Broken solutions (SENG Jan 2024, σ ≈ 3 m) stay out.

@@ -729,3 +729,13 @@ def test_a_step_refuses_only_a_window_that_straddles_it() -> None:
         v, p, DisplacementSettings(), step_epochs=[first + 0.1 * DAY]
     )
     assert refused is not None and refused.startswith("step_in_end_window@")
+
+
+def test_sigma_screen_defaults() -> None:
+    p = cli.build_parser()
+    ends = p.parse_args(["displacement", "X", "--days", "3"])
+    rate = p.parse_args(["displacement", "X", "--days", "3", "--method", "rate"])
+    given = p.parse_args(["displacement", "X", "--days", "3", "-u", "15"])
+    assert cli._source(ends).uncert == 100.0
+    assert cli._source(rate).uncert == 10.0
+    assert cli._source(given).uncert == 15.0

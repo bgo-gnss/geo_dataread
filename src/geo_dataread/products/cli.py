@@ -184,8 +184,10 @@ def _common(p: argparse.ArgumentParser) -> None:
         help="difference every station against STA (a baseline STATION − STA)",
     )  # fmt: skip
     g.add_argument(
-        "-u", "--uncert", type=float, default=10.0, metavar="MM",
-        help="drop solutions with a formal σ above MM (default 10)",
+        "-u", "--uncert", type=float, metavar="MM",
+        help="drop solutions with a formal σ above MM. Default 100 for "
+        "displacements (an event day is noisy but wanted; its σ is carried), "
+        "10 for --method rate (the velocity product's)",
     )  # fmt: skip
     g.add_argument(
         "--pos-dir",
@@ -272,13 +274,26 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+#: formal-σ screen [mm]: a displacement keeps the noisy solution of an event
+#: day (σ says how noisy); a rate takes the velocity product's screen
+UNCERT_DISPLACEMENT = 100.0
+UNCERT_RATE = 10.0
+
+
+def default_uncert(args: argparse.Namespace) -> float:
+    return (
+        UNCERT_RATE if getattr(args, "method", None) == "rate" else UNCERT_DISPLACEMENT
+    )
+
+
 def _source(args: argparse.Namespace) -> Source:
     if args.ref and args.keep_seasonal and args.ref != "plate":
         raise SystemExit("gpsprod: --keep-seasonal is --ref plate; not both")
     ref = args.ref or ("plate" if args.keep_seasonal else "plate-periodic")
     return Source(
         frame=args.frame, session=args.session, view=args.view, ref=ref,
-        uncert=args.uncert, pos_dir=args.pos_dir, params=args.params,
+        uncert=args.uncert if args.uncert is not None else default_uncert(args),
+        pos_dir=args.pos_dir, params=args.params,
         steps=args.steps, relative_to=args.relative_to,
     )  # fmt: skip
 
