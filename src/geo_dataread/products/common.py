@@ -89,6 +89,10 @@ class DisplacementRecord:
     relative_to: str | None = None
     period_names: tuple[str, ...] = ()
     ends: dict[str, Any] | None = None
+    #: method step: the event, the two lines, the windows, the k used
+    step: dict[str, Any] | None = None
+    #: method rate: the velocity record the displacement was projected from
+    rate: dict[str, Any] | None = None
     flags: tuple[str, ...] = ()
     refused: str | None = None
     input_fingerprint: str = ""
@@ -123,11 +127,15 @@ class DisplacementRecord:
         if units == self.units:
             return self
         factor = {("mm", "m"): 1e-3, ("m", "mm"): 1e3}[(self.units, units)]
+        # the provenance dicts (ends, step, rate) keep the product's own
+        # units, mm and mm/yr; they say so
         return dataclasses.replace(
             self,
             displacement=_vec3(x * factor for x in self.displacement),
             sigma=_vec3(x * factor for x in self.sigma),
             units=units,
+            ends=None if self.ends is None else {**self.ends, "units": "mm"},
+            step=None if self.step is None else {**self.step, "units": "mm, mm/yr"},
         )
 
 

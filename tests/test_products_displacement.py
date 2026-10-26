@@ -137,8 +137,8 @@ def test_end_window_closes_at_the_last_epoch() -> None:
 def test_refusals() -> None:
     v = _view(days=50)
     s = DisplacementSettings()
-    assert (
-        displacement_from_view(v, (2030.0, 2030.5), s)[2] == "no epochs in the period"
+    assert displacement_from_view(v, (2030.0, 2030.5), s)[2] == (
+        "no epochs in the period (last data 2024-02-19)"
     )
     short = displacement_from_view(v, (2024.0, 2024.0 + 7 * DAY), s)[2]
     assert short and "shorter than two" in short
@@ -280,7 +280,18 @@ def test_cli_displacement_and_alias(
         and "gpsprod displacement AAAA --period 20240201:20240701" in captured.err
     )
     with pytest.raises(SystemExit):
-        cli.main(["displacement", "AAAA", "--since", "20240101", "--last", "3"])
+        cli.main(
+            [
+                "displacement",
+                "AAAA",
+                "--start",
+                "20240101",
+                "--days",
+                "3",
+                "--end",
+                "20240110",
+            ]
+        )
     with pytest.raises(SystemExit):
         cli.main(
             [
@@ -293,3 +304,442 @@ def test_cli_displacement_and_alias(
                 "3",
             ]
         )
+
+
+# --------------------------------------------------------------------------
+# step 2: event periods, step, rate, conversions, help
+# --------------------------------------------------------------------------
+
+
+def _events():
+    from geo_dataread.events import Event
+
+    return [
+        Event(
+            "reykjanes-2023-11-10-dike",
+            "dike",
+            dt.date(2023, 11, 10),
+            dt.date(2023, 11, 10),
+            "reykjanes",
+        ),
+        Event(
+            "sundhnukur-2023-12-eruption",
+            "eruption",
+            dt.date(2023, 12, 18),
+            dt.date(2023, 12, 21),
+            "reykjanes",
+        ),
+        Event(
+            "sundhnukur-2024-01-eruption",
+            "eruption",
+            dt.date(2024, 1, 14),
+            dt.date(2024, 1, 16),
+            "reykjanes",
+        ),
+    ]
+
+
+def test_event_periods() -> None:
+    ev = _events()
+    today = dt.date(2026, 10, 26)
+    p = resolve_period("2023-11-10-dike:2023-12-eruption", events=ev, today=today)
+    assert p.dates == ("2023-11-11", "2023-12-17")
+    assert p.names == ("reykjanes-2023-11-10-dike", "sundhnukur-2023-12-eruption")
+    assert resolve_period("after:2023-11-10-dike", events=ev, today=today).dates == (
+        "2023-11-11",
+        "2026-10-26",
+    )
+    assert resolve_period("20231001:2023-11-10-dike", events=ev).dates == (
+        "2023-10-01",
+        "2023-11-09",
+    )
+    assert resolve_period("2023-12-eruption", events=ev).dates == (
+        "2023-12-18",
+        "2023-12-21",
+    )
+    with pytest.raises(ValueError, match="names 2 events"):
+        resolve_period("eruption:", events=ev)
+    with pytest.raises(ValueError, match="no event"):
+        resolve_period("2022-dike:", events=ev)
+
+
+def test_step_recovers_a_dike_and_refuses_thin_sides() -> None:
+    from geo_dataread.products.displacement import step_from_view
+
+    v = _view(rate=(10.0, 10.0, 10.0), noise=0.5, seed=8)
+    onset = 2024.3
+    jump = np.array([50.0, -80.0, 30.0])
+    v.y[:, v.t > onset] += jump[:, None]
+    ev = (onset, onset + DAY, "dike")
+    vals, flags, refused = step_from_view(
+        v, (2024.0, 2024.6), ev, DisplacementSettings(method="step")
+    )
+    assert refused is None
+    for i in range(3):
+        # the jump plus one day of the 10 mm/yr background (the event day)
+        assert (
+            abs(vals["displacement"][i] - (jump[i] + 10.0 * DAY)) < 3 * vals["sigma"][i]
+        )
+    assert vals["step"]["event"] == "dike"
+    assert vals["step"]["lines"]["before"]["north"]["n"] == 10
+    gappy = dataclasses.replace(v, y=v.y.copy())
+    gappy.y[:, (v.t > onset) & (v.t < onset + 7 * DAY)] = np.nan
+    _, _, refused = step_from_view(
+        gappy, (2024.0, 2024.6), ev, DisplacementSettings(method="step")
+    )
+    assert (
+        refused is not None
+        and refused.startswith("step: after ")
+        and "cover=" in refused
+    )
+    _, _, refused = step_from_view(
+        v, (2024.0, 2024.2), ev, DisplacementSettings(method="step")
+    )
+    assert refused and "not inside the period" in refused
+
+
+def test_event_bounds() -> None:
+    from geo_dataread.products.displacement import event_bounds
+
+    ev, areas = _events(), {"reykjanes": frozenset({"THOB"})}
+    period = window_bounds(dt.date(2023, 11, 1), dt.date(2023, 12, 10))
+    s = DisplacementSettings(method="step")
+    got = event_bounds("THOB", period, s, events=ev, areas=areas)
+    assert not isinstance(got, str) and got[2] == "reykjanes-2023-11-10-dike"
+    assert got[1] - got[0] == pytest.approx(DAY, rel=1e-3)
+    wide = window_bounds(dt.date(2023, 11, 1), dt.date(2024, 2, 1))
+    msg = event_bounds("THOB", wide, s, events=ev, areas=areas)
+    assert isinstance(msg, str) and "3 dikes/eruptions" in msg
+    assert isinstance(event_bounds("HOFN", period, s, events=ev, areas=areas), str)
+    at = event_bounds(
+        "HOFN",
+        period,
+        DisplacementSettings(method="step", at="20231110"),
+        events=None,
+        areas=None,
+    )
+    assert not isinstance(at, str) and at[2] == "2023-11-10"
+    eid = event_bounds(
+        "HOFN",
+        wide,
+        DisplacementSettings(method="step", event="2024-01"),
+        events=ev,
+        areas=areas,
+    )
+    assert not isinstance(eid, str) and eid[2] == "sundhnukur-2024-01-eruption"
+
+
+def _vrec(rate=(10.0, -20.0, 4.0), sigma=(1.0, 2.0, 0.5), window=(2024.0, 2024.5)):
+    from geo_dataread.velocity import VelocityRecord
+
+    nan3 = (math.nan,) * 3
+    return VelocityRecord(
+        station="SYNT",
+        lon=-22.0,
+        lat=64.0,
+        frame="itrf2014",
+        plate="EURA",
+        ref="plate-periodic",
+        ref_requested="plate-periodic",
+        series="imo.24hr_itrf14",
+        view="declared",
+        uncert=10.0,
+        window=window,
+        span_used=window,
+        n_epochs=(180, 180, 180),
+        largest_gap=1.0,
+        method="wls",
+        model="linear",
+        rate=rate,
+        sigma=sigma,
+        sigma_formal=nan3,
+        sigma_method="empirical_k",
+        k=(3.0, 3.0, 3.0),
+        k_source={},
+        corr_en=0.0,
+        record=None,
+        steps_in_window=(),
+        outlier_abort=False,
+        n_flagged=0,
+        flags=("nonlinear:N",),
+        refused=None,
+        software={},
+        input_fingerprint="abc",
+    )
+
+
+def test_conversions_round_trip() -> None:
+    from geo_dataread.products.displacement import to_displacement, to_velocity
+
+    v = _vrec()
+    d = to_displacement(v)
+    assert d.displacement == pytest.approx((5.0, -10.0, 2.0))
+    assert d.sigma == pytest.approx((0.5, 1.0, 0.25))
+    assert d.method == "rate" and d.flags == ("nonlinear:N",) and d.rate is not None
+    back = to_velocity(d)
+    assert back.rate == pytest.approx(v.rate, rel=1e-12)
+    assert back.sigma == pytest.approx(v.sigma, rel=1e-12)
+    assert back.method == "from_displacement:rate"
+    # a refused velocity stays refused
+    from dataclasses import replace
+
+    r = to_displacement(replace(v, refused="n_obs=2<5", rate=(math.nan,) * 3))
+    assert r.refused == "n_obs=2<5" and not r.accepted
+
+
+def test_ends_to_velocity_uses_the_window_centres() -> None:
+    from geo_dataread.products.displacement import displacement_span
+
+    v = _view(noise=0.2, seed=9)
+    p = (2024.2, 2024.2 + 200 * DAY)
+    vals, _, _ = displacement_from_view(v, p, DisplacementSettings())
+    rec = DisplacementRecord(
+        station="SYNT",
+        lon=0.0,
+        lat=0.0,
+        period=p,
+        period_dates=("a", "b"),
+        frame="itrf2014",
+        series="x",
+        session="24h",
+        ref="plate-periodic",
+        ref_requested="plate-periodic",
+        view="declared",
+        method="ends",
+        sigma_method="s",
+        **vals,
+    )
+    from geo_dataread.products.displacement import to_velocity
+
+    assert displacement_span(rec) == pytest.approx(195 * DAY, rel=1e-3)
+    assert to_velocity(rec).rate[0] == pytest.approx(20.0, abs=0.5)
+
+
+def test_rate_method_is_the_velocity_product(monkeypatch: pytest.MonkeyPatch) -> None:
+    import geo_dataread.velocity as vel
+
+    seen = {}
+
+    def fake(sta, start, end, settings, *, doc=None, coords=None):
+        seen["args"] = (sta, start, end, settings.ref, settings.view)
+        return _vrec(window=(start, end))
+
+    monkeypatch.setattr(vel, "estimate_station_velocity", fake)
+    from geo_dataread.products.displacement import estimate_station_displacement
+
+    rec = estimate_station_displacement(
+        "SYNT", (2024.0, 2024.5), DisplacementSettings(method="rate"), coords=(0.0, 0.0)
+    )
+    assert seen["args"] == ("SYNT", 2024.0, 2024.5, "plate-periodic", "declared")
+    assert rec.displacement == pytest.approx((5.0, -10.0, 2.0))
+    assert rec.rate and rec.rate["input_fingerprint"] == "abc"
+    bad = estimate_station_displacement(
+        "SYNT",
+        (2024.0, 2024.5),
+        DisplacementSettings(method="rate", source=Source(ref="itrf")),
+        coords=(0.0, 0.0),
+    )
+    assert bad.refused and bad.refused.startswith("rate: ref itrf")
+
+
+def test_help_lists_every_option_and_examples(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with pytest.raises(SystemExit):
+        cli.main(["displacement", "--help"])
+    out = capsys.readouterr().out
+    for opt in (
+        "--method",
+        "--ends",
+        "--neighbour-days",
+        "--event",
+        "--at",
+        "--step-window",
+        "--as-velocity",
+        "--relative-to",
+        "--keep-seasonal",
+        "--units",
+        "--region",
+    ):
+        assert opt in out, opt
+    assert "examples:" in out and "periods (--period):" in out and "methods:" in out
+    p = cli.build_parser()
+    sub = p._subparsers._group_actions[0].choices["displacement"]  # type: ignore[union-attr]
+    for action in sub._actions:
+        if action.dest != "help":
+            assert action.help, action.dest
+
+
+def test_as_velocity_gmt_rows_are_whole(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _patch_load(monkeypatch, {"AAAA": _view(), "BBBB": _view(seed=7)})
+    out = tmp_path / "vel" / "set"
+    rc = cli.main(
+        ["displacement", "AAAA", "BBBB", "--period", "20240201:20240701",
+         "--as-velocity", "-o", str(out), "-q"]
+    )  # fmt: skip
+    assert rc == 0
+    rows = [
+        line.split()
+        for line in (tmp_path / "vel" / "set.gmt").read_text().splitlines()
+        if not line.startswith("#")
+    ]
+    assert len(rows) == 2
+    for r in rows:
+        assert len(r) == 8 and "nan" not in r
+
+
+def test_a_station_without_a_plate_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    _patch_load(monkeypatch, {})
+
+    def no_plate(sta, start, end, source, *, doc=None):
+        raise KeyError(f"station {sta} has no plate in the platefile")
+
+    monkeypatch.setattr(pdisp, "load", no_plate)
+    rs = estimate_displacements(["ALGO"], (2024.2, 2024.5))
+    assert rs.records[0].refused and "no plate" in rs.records[0].refused
+
+
+def test_metres_say_the_nested_units() -> None:
+    v = _view()
+    vals, _, _ = displacement_from_view(v, (2024.2, 2024.5), DisplacementSettings())
+    rec = DisplacementRecord(
+        station="SYNT",
+        lon=0.0,
+        lat=0.0,
+        period=(2024.2, 2024.5),
+        period_dates=("a", "b"),
+        frame="itrf2014",
+        series="x",
+        session="24h",
+        ref="plate-periodic",
+        ref_requested="plate-periodic",
+        view="declared",
+        method="ends",
+        sigma_method="s",
+        **vals,
+    )
+    m = rec.scaled("m")
+    assert m.units == "m" and m.ends is not None and m.ends["units"] == "mm"
+    assert m.displacement[0] == pytest.approx(rec.displacement[0] / 1000)
+
+
+def test_points_is_end_point_minus_start_point() -> None:
+    v = _view(noise=1.0, seed=10)
+    p = (2024.2, 2024.2 + 20 * DAY)
+    vals, flags, refused = displacement_from_view(
+        v, p, DisplacementSettings(method="points")
+    )
+    assert refused is None
+    inside = np.flatnonzero((v.t >= p[0]) & (v.t < p[1]))
+    i0, i1 = inside[0], inside[-1]
+    for c in range(3):
+        assert vals["displacement"][c] == pytest.approx(v.y[c, i1] - v.y[c, i0])
+    assert vals["ends"]["start"]["north"]["n"] == 1 and vals["ends"]["days"] == 0
+    assert not any(f.startswith(("start_at", "end_at")) for f in flags)
+
+
+def test_points_takes_the_nearest_epochs_and_names_them() -> None:
+    v = _view(noise=1.0, seed=11)
+    p = (2024.2, 2024.2 + 20 * DAY)
+    inside = np.flatnonzero((v.t >= p[0]) & (v.t < p[1]))
+    v.y[:, inside[:2]] = np.nan  # the first two days missing
+    v.y[0, inside[-1]] = np.nan  # the last day lacks north: not a whole epoch
+    vals, flags, refused = displacement_from_view(
+        v, p, DisplacementSettings(method="points")
+    )
+    assert refused is None
+    assert any(f.startswith("start_at:") for f in flags)
+    assert any(f.startswith("end_at:") for f in flags)
+    assert vals["displacement"][1] == pytest.approx(
+        v.y[1, inside[-2]] - v.y[1, inside[2]]
+    )
+    one = displacement_from_view(
+        v, (p[0], p[0] + 3 * DAY), DisplacementSettings(method="points")
+    )
+    assert one[2] == "points: fewer than two epochs in the period"
+
+
+def test_end_check_looks_outside_the_period() -> None:
+    """A fast but steady motion inside the period, quiet outside: the ends
+    agree with their outer neighbours, so nothing is disputed (a line
+    through the inside days would cross the motion)."""
+    rng = np.random.default_rng(12)
+    t = 2024.0 + (np.arange(120) + 0.5) * DAY
+    p = (2024.0 + 50 * DAY, 2024.0 + 60 * DAY)
+    y = np.zeros((3, t.size))
+    ramp = np.clip((t - p[0]) / (p[1] - p[0]), 0, 1) * 300.0
+    y += ramp + rng.normal(0, 1, (3, t.size))
+    # a quiet station whose ends sit on a 300 mm ramp: the inside line would
+    # dispute them; the outside one (before/after the ramp) does not
+    v = StationView("SYNT", t, y, np.ones_like(y), "plate-periodic")
+    period = (p[0] - 0.5 * DAY, p[1] + 1.5 * DAY)
+    vals, flags, refused = displacement_from_view(
+        v, period, DisplacementSettings(method="points")
+    )
+    assert refused is None
+    assert not any(f.startswith("end_disputed") for f in flags), flags
+    assert vals["displacement"][0] == pytest.approx(300.0, abs=5)
+
+
+def test_start_end_days() -> None:
+    today = dt.date(2026, 10, 26)
+    assert resolve_period(start="20231109", end="20231112").dates == (
+        "2023-11-09",
+        "2023-11-12",
+    )
+    assert resolve_period(start="20231109", days=4).dates == (
+        "2023-11-09",
+        "2023-11-12",
+    )
+    assert resolve_period(days=30, end="20241031").dates == ("2024-10-02", "2024-10-31")
+    assert resolve_period(days=1, today=today).dates == ("2026-10-26", "2026-10-26")
+    assert resolve_period(start="20261001", today=today).dates[1] == "2026-10-26"
+    for bad in (
+        {"start": "20231109", "days": 4, "end": "20231112"},
+        {"spec": "20231109:20231112", "start": "20231109"},
+        {"start": "20231109", "since": "20231109"},
+        {"days": 0},
+        {"end": "20231112"},
+    ):
+        with pytest.raises(ValueError):
+            resolve_period(**bad)  # type: ignore[arg-type]
+
+
+def test_cli_start_days_and_old_names(monkeypatch: pytest.MonkeyPatch, capsys) -> None:
+    _patch_load(monkeypatch, {"AAAA": _view(start=2024.0, days=400)})
+    for argv in (
+        ["--start", "20240201", "--days", "30"],
+        ["--since", "20240201", "--end", "20240301"],
+        ["--last", "30", "--end", "20240302"],
+    ):
+        assert cli.main(["displacement", "AAAA", "-q", *argv]) == 0
+        assert "AAAA" in capsys.readouterr().out
+
+
+def test_a_step_refuses_only_a_window_that_straddles_it() -> None:
+    v = _view()
+    p = (2024.2, 2024.2 + 100 * DAY)
+    first = v.t[np.flatnonzero(v.t >= p[0])[0]]
+    # a step after the first epoch of a one-day window: one solution, fine
+    one = DisplacementSettings(ends_days=1)
+    _, flags, refused = displacement_from_view(
+        v, p, one, step_epochs=[first + 0.1 * DAY]
+    )
+    assert refused is None and "steps_in_period" in flags
+    # the same step inside a five-day window: its mean would straddle it
+    _, _, refused = displacement_from_view(
+        v, p, DisplacementSettings(), step_epochs=[first + 0.1 * DAY]
+    )
+    assert refused is not None and refused.startswith("step_in_end_window@")
+
+
+def test_sigma_screen_defaults() -> None:
+    p = cli.build_parser()
+    ends = p.parse_args(["displacement", "X", "--days", "3"])
+    rate = p.parse_args(["displacement", "X", "--days", "3", "--method", "rate"])
+    given = p.parse_args(["displacement", "X", "--days", "3", "-u", "15"])
+    assert cli._source(ends).uncert == 100.0
+    assert cli._source(rate).uncert == 10.0
+    assert cli._source(given).uncert == 15.0

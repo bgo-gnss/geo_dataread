@@ -8,10 +8,10 @@ One place, one estimator for every number about station motion
 ## Step 1 — `gpsprod displacement` (method `ends`)
 
 ```bash
-gpsprod displacement SENG THOB --since 20231112           # screen table
+gpsprod displacement SENG THOB --start 20231112           # screen table
 gpsprod displacement --area reykjanes --period 20240901:20241031 -o d.csv
-gpsprod displacement SENG --relative-to SKSH --last 30
-gpsprod displacement all --last 7 --ends 1                # one day per end
+gpsprod displacement SENG --relative-to SKSH --days 30
+gpsprod displacement all --days 7 --ends 1                # one day per end
 ```
 
 - **Level at each end** = inverse-variance mean of the `--ends N` whole days
@@ -41,3 +41,78 @@ gpsprod displacement all --last 7 --ends 1                # one day per end
   method, period, σ method, input fingerprint and software versions.
 - `gps-displacemnts` (TOT, ITRF2008, end day − start day; its CLI was broken)
   now translates to `gpsprod displacement` and says so.
+
+## Step 2 — `step`, `rate`, conversions, event names
+
+```bash
+gpsprod displacement --area reykjanes --method step --event 2024-03-02-dike
+gpsprod displacement THOB --method step --at 20231110 --step-window 20
+gpsprod displacement THOB --method rate --period 20250101:20250601
+gpsprod displacement THOB --period 2023-11-10-dike:2023-12-eruption --as-velocity
+gpsprod displacement --area reykjanes --period after:2023-11-10-dike -o d.csv
+```
+
+- **Event names in periods** (`events.yaml` id, or a part naming one event):
+  as a start = the day after the event's last day; as an end = the day before
+  its onset. `DIKE:ERUPTION` = the quiet between; `after:EVENT` or `EVENT:` =
+  from it to today; `EVENT` alone = its own days. Names go into the records'
+  `period_names`.
+- **`step`**: lines through `--step-window` (10, BGÓ 2026-10-26: 20–30 d over-extrapolated THOB E by 4–5 cm after the dike) days before the onset and
+  after the last day (event days in neither), each evaluated at the event's
+  edge: Δ = f_after(last day + 1) − f_before(onset); a multi-day eruption's
+  displacement includes the motion during it. Each side passes the velocity
+  product's gates (≥ 5 epochs, ≥ 80 % cover, no declared step) or the station
+  is refused (`step: after cover=0.43<0.8`). σ: each line's level σ ×
+  max(k_day, √χ²/ν), its rate σ × k(T) — the station's own k(T), else the
+  k(T) table, else 5 (`--relative-to` and 8 h: table or 5, flagged
+  `k:baseline_unmeasured` / `k:session_unmeasured`). A curved side (F of a
+  quadratic > the product's threshold) is flagged `step_nonlinear:<side>:<c>`
+  — post-dike relaxation. The event: `--event`, `--at DATE` (one day), or
+  the station's one dike/eruption in the period (none or several: refused).
+  With `--event`/`--at` and no period, the period is the event ± the window.
+- **`rate`**: the velocity product's record over the period × its length
+  (velocity → displacement; σ the product's σ × T; its flags kept). Valid
+  for steady motion only: an event inside the period inflates σ (χ²). Not
+  yet for `--relative-to` or 8 h (step 3), nor `--ref itrf`.
+- **Conversions**: `products.to_displacement(VelocityRecord, period)` (d = v·T)
+  and `products.to_velocity(DisplacementRecord)` (v = d/T, T between the
+  end-window centres for `ends`, the period otherwise) — exact inverses;
+  `--as-velocity` prints/writes the velocity product's table/files.
+
+### `points` — end point minus start point (2026-10-26, BGÓ)
+
+```bash
+gpsprod displacement SENG THOB SKSH --method points --period 20231109:20231112
+```
+
+The last epoch of the period minus the first (all three components
+present), no averaging. In fast motion a mean over days moves the
+effective date: SENG East over the dike is −815 mm with single days
+(9 → 12 Nov) and −929 mm with 5-day ends over 1–20 Nov. Missing end days:
+the nearest whole epochs inside the period, named in `start_at`/`end_at`.
+`--ends 1` gives the same number when both end days exist, and refuses
+otherwise.
+
+The end check (`--ends ≤ 2` and `points`) now fits its line through the
+days OUTSIDE the period (before the start, after the end), the inside only
+when outside is too thin, never across a declared step — a line through the
+inside days crossed the very motion being measured. A flag that remains is
+real: SENG on 9 Nov 2023 sits 18 mm East of the line through 4–8 Nov (the
+motion began the day before the dike); for one day the check cannot tell a
+blunder from the onset of motion, so it flags and keeps the number.
+
+### Periods by options (2026-10-26, BGÓ)
+
+`--start A --end B` (both days in), `--start A --days N` (N days from A),
+`--days N [--end B]` (the N days ending B, default today), or `--period`
+alone (dates and event names). `--since`/`--last` remain as the old names
+of `--start`/`--days`.
+
+### The σ screen (`-u`, 2026-10-26, BGÓ)
+
+`gpsprod displacement` drops solutions with a formal σ above 100 mm by
+default (10 for `--method rate`, the velocity product's screen). The day of
+an event is a noisy solution (SENG 10 Nov 2023: σ 9/15/36 mm N/E/U) but it
+is exactly the day asked for; its σ is carried into the displacement. The
+10 mm screen made `--period 20231110:20231111 --ends 1` refuse SENG and THOB.
+Broken solutions (SENG Jan 2024, σ ≈ 3 m) stay out.
