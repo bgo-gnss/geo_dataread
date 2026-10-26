@@ -381,13 +381,17 @@ def test_step_recovers_a_dike_and_refuses_thin_sides() -> None:
             abs(vals["displacement"][i] - (jump[i] + 10.0 * DAY)) < 3 * vals["sigma"][i]
         )
     assert vals["step"]["event"] == "dike"
-    assert vals["step"]["lines"]["before"]["north"]["n"] == 30
+    assert vals["step"]["lines"]["before"]["north"]["n"] == 10
     gappy = dataclasses.replace(v, y=v.y.copy())
-    gappy.y[:, (v.t > onset) & (v.t < onset + 20 * DAY)] = np.nan
+    gappy.y[:, (v.t > onset) & (v.t < onset + 7 * DAY)] = np.nan
     _, _, refused = step_from_view(
         gappy, (2024.0, 2024.6), ev, DisplacementSettings(method="step")
     )
-    assert refused is not None and refused.startswith("step: after cover=")
+    assert (
+        refused is not None
+        and refused.startswith("step: after ")
+        and "cover=" in refused
+    )
     _, _, refused = step_from_view(
         v, (2024.0, 2024.2), ev, DisplacementSettings(method="step")
     )

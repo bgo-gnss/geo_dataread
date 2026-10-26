@@ -101,7 +101,7 @@ class DisplacementSettings:
     ends_days: int = 5
     neighbour_days: int = 5
     #: step: days of line on each side of the event
-    step_window_days: int = 30
+    step_window_days: int = 10
     #: step: the event (an events.yaml id or part of one); None: the
     #: station's one dike/eruption inside the period
     event: str | None = None

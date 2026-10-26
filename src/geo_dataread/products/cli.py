@@ -74,6 +74,19 @@ examples:
   gpsprod displacement THOB --period 2023-11-10-dike:2023-12-eruption --as-velocity
   gpsprod displacement HOFN --start 20200101 --keep-seasonal --units m -o h.jsonl
 
+flags (a note on a row; the number is still given):
+  end_disputed:<start|end>:<N|E|U>
+         that end day does not agree with the days right next to it (a line
+         through the 5 days outside the period, > 4 sigma off). Around a dike
+         or eruption this is the rapid movement itself; on a quiet station it
+         points at a bad solution. Only with one or two days per end.
+  end_unchecked:...   too few neighbour days to check that end
+  steps_in_period     a declared step lies inside the period (expected for events)
+  start_at/end_at:D   points: the end day had no solution; D was used
+  end_early:Nd        the data stop N days before the period ends
+  step_nonlinear:<before|after>:<c>   step: that side curves (relaxation)
+  fallback:plate      no detrend record: only the plate removed
+
 output: a table on screen, or -o FILE (.csv with a # provenance header, or
 .jsonl); every row says frame, ref, view, method, period and its sigma method.
 With --as-velocity, -o DIR/NAME writes NAME.gmt, NAME.csv and NAME.jsonl
@@ -264,8 +277,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--at", metavar="DATE", help="step: a one-day event on DATE instead of --event"
     )
     g.add_argument(
-        "--step-window", type=int, default=30, metavar="DAYS",
-        help="step: days of line on each side of the event (default 30)",
+        "--step-window", type=int, default=10, metavar="DAYS",
+        help="step: days of line on each side of the event (default 10: fast motion after an event bends a longer line)",
     )  # fmt: skip
     g.add_argument(
         "--as-velocity", action="store_true",

@@ -57,7 +57,7 @@ gpsprod displacement --area reykjanes --period after:2023-11-10-dike -o d.csv
   its onset. `DIKE:ERUPTION` = the quiet between; `after:EVENT` or `EVENT:` =
   from it to today; `EVENT` alone = its own days. Names go into the records'
   `period_names`.
-- **`step`**: lines through `--step-window` (30) days before the onset and
+- **`step`**: lines through `--step-window` (10, BGÓ 2026-10-26: 20–30 d over-extrapolated THOB E by 4–5 cm after the dike) days before the onset and
   after the last day (event days in neither), each evaluated at the event's
   edge: Δ = f_after(last day + 1) − f_before(onset); a multi-day eruption's
   displacement includes the motion during it. Each side passes the velocity
