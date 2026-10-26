@@ -608,3 +608,61 @@ def test_metres_say_the_nested_units() -> None:
     m = rec.scaled("m")
     assert m.units == "m" and m.ends is not None and m.ends["units"] == "mm"
     assert m.displacement[0] == pytest.approx(rec.displacement[0] / 1000)
+
+
+def test_points_is_end_point_minus_start_point() -> None:
+    v = _view(noise=1.0, seed=10)
+    p = (2024.2, 2024.2 + 20 * DAY)
+    vals, flags, refused = displacement_from_view(
+        v, p, DisplacementSettings(method="points")
+    )
+    assert refused is None
+    inside = np.flatnonzero((v.t >= p[0]) & (v.t < p[1]))
+    i0, i1 = inside[0], inside[-1]
+    for c in range(3):
+        assert vals["displacement"][c] == pytest.approx(v.y[c, i1] - v.y[c, i0])
+    assert vals["ends"]["start"]["north"]["n"] == 1 and vals["ends"]["days"] == 0
+    assert not any(f.startswith(("start_at", "end_at")) for f in flags)
+
+
+def test_points_takes_the_nearest_epochs_and_names_them() -> None:
+    v = _view(noise=1.0, seed=11)
+    p = (2024.2, 2024.2 + 20 * DAY)
+    inside = np.flatnonzero((v.t >= p[0]) & (v.t < p[1]))
+    v.y[:, inside[:2]] = np.nan  # the first two days missing
+    v.y[0, inside[-1]] = np.nan  # the last day lacks north: not a whole epoch
+    vals, flags, refused = displacement_from_view(
+        v, p, DisplacementSettings(method="points")
+    )
+    assert refused is None
+    assert any(f.startswith("start_at:") for f in flags)
+    assert any(f.startswith("end_at:") for f in flags)
+    assert vals["displacement"][1] == pytest.approx(
+        v.y[1, inside[-2]] - v.y[1, inside[2]]
+    )
+    one = displacement_from_view(
+        v, (p[0], p[0] + 3 * DAY), DisplacementSettings(method="points")
+    )
+    assert one[2] == "points: fewer than two epochs in the period"
+
+
+def test_end_check_looks_outside_the_period() -> None:
+    """A fast but steady motion inside the period, quiet outside: the ends
+    agree with their outer neighbours, so nothing is disputed (a line
+    through the inside days would cross the motion)."""
+    rng = np.random.default_rng(12)
+    t = 2024.0 + (np.arange(120) + 0.5) * DAY
+    p = (2024.0 + 50 * DAY, 2024.0 + 60 * DAY)
+    y = np.zeros((3, t.size))
+    ramp = np.clip((t - p[0]) / (p[1] - p[0]), 0, 1) * 300.0
+    y += ramp + rng.normal(0, 1, (3, t.size))
+    # a quiet station whose ends sit on a 300 mm ramp: the inside line would
+    # dispute them; the outside one (before/after the ramp) does not
+    v = StationView("SYNT", t, y, np.ones_like(y), "plate-periodic")
+    period = (p[0] - 0.5 * DAY, p[1] + 1.5 * DAY)
+    vals, flags, refused = displacement_from_view(
+        v, period, DisplacementSettings(method="points")
+    )
+    assert refused is None
+    assert not any(f.startswith("end_disputed") for f in flags), flags
+    assert vals["displacement"][0] == pytest.approx(300.0, abs=5)

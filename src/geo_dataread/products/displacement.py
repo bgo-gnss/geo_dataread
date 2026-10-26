@@ -17,6 +17,17 @@ the period does (the processing lag), flagged ``end_early`` past 1.5 days.
 A declared step inside an end window refuses the station; one inside the
 period is the point of a displacement and only flagged.
 
+Method ``points``: the last epoch of the period minus the first (all three
+components present), no averaging — for fast motion, where a mean over
+days moves the effective epoch. The epochs used are in ``ends``; when they
+are not the period's first/last day the record says ``start_at``/``end_at``.
+σ as an end level of one epoch; each end is checked as ``ends_days ≤ 2``.
+
+The end check (``ends_days ≤ 2`` and ``points``) fits its line through the
+``neighbour_days`` OUTSIDE the period — before the start, after the end —
+and only falls back to the days inside when outside is too thin, so it
+never draws a line across the motion being measured (or a declared step).
+
 Method ``step``: the jump across one event. A line is fitted to the
 ``step_window_days`` before the event's onset and another to the days after
 its last day (the event's own days are in neither), each evaluated at the
@@ -68,7 +79,7 @@ if TYPE_CHECKING:
     from geo_dataread.events import Event
     from geo_dataread.velocity import VelocityRecord, VelocitySettings
 
-METHODS = ("ends", "step", "rate")
+METHODS = ("ends", "points", "step", "rate")
 #: days read beyond the period on each side: the daily σ factors and the
 #: cleaned view's detector see context, not just the period
 PAD_DAYS = 60
@@ -170,10 +181,27 @@ def displacement_from_view(
     end_edge = min(p1, last + 0.5 * step)
     if p1 - end_edge > (END_LAG_DAYS + 0.5) * DAY_YEARS:
         flags.append(f"end_early:{(p1 - end_edge) / DAY_YEARS:.0f}d")
-    w_start = (p0, p0 + n_days * DAY_YEARS)
-    w_end = (end_edge - n_days * DAY_YEARS, end_edge)
-    if w_end[0] < w_start[1]:
-        return {}, flags, f"period shorter than two {n_days}-day end windows"
+    if settings.method == "points":
+        # the first and the last epoch of the period with all three
+        # components: end point minus start point, no averaging
+        whole = view.t[np.isfinite(view.y).all(axis=0)]
+        whole = whole[(whole >= p0) & (whole < end_edge)]
+        if whole.size < 2:
+            return {}, flags, "points: fewer than two epochs in the period"
+        t_s, t_e = float(whole[0]), float(whole[-1])
+        half = 0.5 * step
+        w_start = (t_s - half, t_s + half)
+        w_end = (t_e - half, t_e + half)
+        n_days = 1
+        if t_s - p0 > step:
+            flags.append(f"start_at:{_iso(t_s)}")
+        if end_edge - t_e > step:
+            flags.append(f"end_at:{_iso(t_e)}")
+    else:
+        w_start = (p0, p0 + n_days * DAY_YEARS)
+        w_end = (end_edge - n_days * DAY_YEARS, end_edge)
+        if w_end[0] < w_start[1]:
+            return {}, flags, f"period shorter than two {n_days}-day end windows"
     for e in sorted(float(x) for x in step_epochs):
         if w_start[0] <= e < w_start[1] or w_end[0] <= e < w_end[1]:
             return {}, flags, f"step_in_end_window@{_iso(e)}"
@@ -203,7 +231,7 @@ def displacement_from_view(
             )
     disp, sig = [], []
     ends: dict[str, Any] = {
-        "days": n_days,
+        "days": n_days if settings.method == "ends" else 0,
         "window_start": list(w_start),
         "window_end": list(w_end),
         "k_day": k_day,
@@ -236,17 +264,30 @@ def displacement_from_view(
             }  # fmt: skip
         if n_days <= 2:
             m = settings.neighbour_days * DAY_YEARS
-            for key, lv, nb in (
-                ("start", a, (w_start[1], w_start[1] + m)),
-                ("end", b, (w_end[0] - m, w_end[0])),
+            # the days OUTSIDE the period first (before the start, after the
+            # end): a line through the days inside would cross the very
+            # motion being measured; inside only when outside is too thin
+            for key, lv, sides in (
+                (
+                    "start",
+                    a,
+                    ((w_start[0] - m, w_start[0]), (w_start[1], w_start[1] + m)),
+                ),
+                ("end", b, ((w_end[1], w_end[1] + m), (w_end[0] - m, w_end[0]))),
             ):
-                chk = neighbour_check(
-                    view.t, view.y[i], view.sigma[i],
-                    end=lv, neighbour=nb, k_day=k_day[i],
-                )  # fmt: skip
-                if chk.disputed:
+                chk = None
+                for nb in sides:
+                    if any(nb[0] <= float(e) < nb[1] for e in step_epochs):
+                        continue  # a declared step in the neighbour days
+                    chk = neighbour_check(
+                        view.t, view.y[i], view.sigma[i],
+                        end=lv, neighbour=nb, k_day=k_day[i],
+                    )  # fmt: skip
+                    if chk.disputed is not None:
+                        break
+                if chk is not None and chk.disputed:
                     flags.append(f"end_disputed:{key}:{comp[0].upper()}")
-                elif chk.disputed is None:
+                elif chk is None or chk.disputed is None:
                     flags.append(f"end_unchecked:{key}:{comp[0].upper()}")
     values = {"displacement": tuple(disp), "sigma": tuple(sig), "ends": ends}
     return values, flags, None
@@ -632,6 +673,8 @@ def method_meta(settings: DisplacementSettings) -> dict[str, Any]:
     """The method's own settings, for a set's provenance header."""
     if settings.method == "ends":
         return {"ends_days": settings.ends_days, "sigma": SIGMA_METHOD}
+    if settings.method == "points":
+        return {"ends": "first and last epoch", "sigma": SIGMA_METHOD}
     if settings.method == "step":
         return {
             "event": settings.event or settings.at or "the one in the period",

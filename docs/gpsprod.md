@@ -78,3 +78,25 @@ gpsprod displacement --area reykjanes --period after:2023-11-10-dike -o d.csv
   and `products.to_velocity(DisplacementRecord)` (v = d/T, T between the
   end-window centres for `ends`, the period otherwise) — exact inverses;
   `--as-velocity` prints/writes the velocity product's table/files.
+
+### `points` — end point minus start point (2026-10-26, BGÓ)
+
+```bash
+gpsprod displacement SENG THOB SKSH --method points --period 20231109:20231112
+```
+
+The last epoch of the period minus the first (all three components
+present), no averaging. In fast motion a mean over days moves the
+effective date: SENG East over the dike is −815 mm with single days
+(9 → 12 Nov) and −929 mm with 5-day ends over 1–20 Nov. Missing end days:
+the nearest whole epochs inside the period, named in `start_at`/`end_at`.
+`--ends 1` gives the same number when both end days exist, and refuses
+otherwise.
+
+The end check (`--ends ≤ 2` and `points`) now fits its line through the
+days OUTSIDE the period (before the start, after the end), the inside only
+when outside is too thin, never across a declared step — a line through the
+inside days crossed the very motion being measured. A flag that remains is
+real: SENG on 9 Nov 2023 sits 18 mm East of the line through 4–8 Nov (the
+motion began the day before the dike); for one day the check cannot tell a
+blunder from the onset of motion, so it flags and keeps the number.

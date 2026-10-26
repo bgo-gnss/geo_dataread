@@ -35,6 +35,10 @@ DISPLACEMENT_EPILOG = """\
 methods:
   ends   level at each end of the period (mean of --ends N days inside it),
          end minus start. Any motion. The default.
+  points the last epoch of the period minus the first: no averaging. For fast
+         motion (a dike, the first days after it), where a mean over days
+         moves the effective date. Missing end days: the nearest epochs inside
+         the period are used and named (start_at / end_at).
   step   the jump across one event: a line through --step-window days on each
          side, both evaluated at the event. Dikes, eruptions, earthquakes.
   rate   the velocity product's rate over the period × its length. Steady
@@ -56,6 +60,7 @@ examples:
   gpsprod displacement SENG THOB --since 20231112
   gpsprod displacement --area reykjanes --period after:2023-11-10-dike -o d.csv
   gpsprod displacement all --last 7 --ends 1            # one day per end, checked
+  gpsprod displacement SENG THOB SKSH --method points --period 20231109:20231112
   gpsprod displacement SENG --relative-to SKSH --period 20240901:20241031
   gpsprod displacement --area reykjanes --method step --event 2024-03-02-dike
   gpsprod displacement THOB --method step --at 20231110 --step-window 20
@@ -219,7 +224,7 @@ def build_parser() -> argparse.ArgumentParser:
     g = d.add_argument_group("method")
     g.add_argument(
         "--method", choices=METHODS, default="ends",
-        help="ends (default), step or rate — see 'methods' below",
+        help="ends (default), points, step or rate — see 'methods' below",
     )  # fmt: skip
     g.add_argument(
         "--view", choices=VIEWS, default="declared",
@@ -232,8 +237,9 @@ def build_parser() -> argparse.ArgumentParser:
     )  # fmt: skip
     g.add_argument(
         "--neighbour-days", type=int, default=5, metavar="M",
-        help="ends with N ≤ 2: each end is checked against a line through the "
-        "next M days and flagged end_disputed when it disagrees (default 5)",
+        help="ends with N ≤ 2 and points: each end is checked against a line "
+        "through the M days outside the period next to it (inside if too few) "
+        "and flagged end_disputed when it disagrees (default 5)",
     )  # fmt: skip
     g.add_argument(
         "--event", metavar="EVENT",
