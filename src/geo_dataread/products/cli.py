@@ -54,19 +54,25 @@ periods (--period):
   20231001:EVENT             from a date to the day before an event
   EVENT                      the event's own days, onset to last day
   EVENT is an events.yaml id, or any part of one that names one event
-  (2023-11-10-dike, 2024-03-eruption).  --since D / --last N also work.
+  (2023-11-10-dike, 2024-03-eruption).
+
+  or with options:
+  --start 20231109 --end 20231112     both days included
+  --start 20231109 --days 4           4 days from the start (9-12 Nov)
+  --days 30 [--end 20241031]          the 30 days ending --end (default today)
+  (--since and --last are the old names of --start and --days)
 
 examples:
-  gpsprod displacement SENG THOB --since 20231112
+  gpsprod displacement SENG THOB --start 20231112
   gpsprod displacement --area reykjanes --period after:2023-11-10-dike -o d.csv
-  gpsprod displacement all --last 7 --ends 1            # one day per end, checked
-  gpsprod displacement SENG THOB SKSH --method points --period 20231109:20231112
+  gpsprod displacement all --days 7 --ends 1            # one day per end, checked
+  gpsprod displacement SENG THOB SKSH --method points --start 20231109 --days 4
   gpsprod displacement SENG --relative-to SKSH --period 20240901:20241031
   gpsprod displacement --area reykjanes --method step --event 2024-03-02-dike
   gpsprod displacement THOB --method step --at 20231110 --step-window 20
   gpsprod displacement THOB --method rate --period 20250101:20250601
   gpsprod displacement THOB --period 2023-11-10-dike:2023-12-eruption --as-velocity
-  gpsprod displacement HOFN --since 20200101 --keep-seasonal --units m -o h.jsonl
+  gpsprod displacement HOFN --start 20200101 --keep-seasonal --units m -o h.jsonl
 
 output: a table on screen, or -o FILE (.csv with a # provenance header, or
 .jsonl); every row says frame, ref, view, method, period and its sigma method.
@@ -135,18 +141,24 @@ def _common(p: argparse.ArgumentParser) -> None:
         "--region", type=_box, metavar="W/E/S/N",
         help="every station in the box, or narrows the named ones (-22.8/-21.8/63.7/64.1)",
     )  # fmt: skip
-    g = p.add_argument_group("period (give one of --period, --since, --last)")
-    g.add_argument(
-        "--period", metavar="A:B",
-        help="dates and/or event names, see 'periods' below",
-    )  # fmt: skip
-    g.add_argument("--since", metavar="DATE", help="from DATE to --end (default today)")
-    g.add_argument(
-        "--last", type=int, metavar="N", help="the N whole days ending --end"
+    g = p.add_argument_group(
+        "period (--start/--end/--days, or --period with dates or event names)"
     )
     g.add_argument(
+        "--start", "--since", dest="start", metavar="DATE",
+        help="first day (YYYYMMDD or YYYY-MM-DD); to --end, or for --days days",
+    )  # fmt: skip
+    g.add_argument(
         "-e", "--end", metavar="DATE",
-        help="the last day for --since, --last and open periods (default today)",
+        help="last day (default today); with --days alone, the days end here",
+    )  # fmt: skip
+    g.add_argument(
+        "--days", "--last", dest="days", type=int, metavar="N",
+        help="the period's length in days: from --start, or ending --end/today",
+    )  # fmt: skip
+    g.add_argument(
+        "--period", metavar="A:B",
+        help="dates and/or event names in one, see 'periods' below",
     )  # fmt: skip
     g = p.add_argument_group("series")
     g.add_argument(
@@ -297,10 +309,10 @@ def _displacement(args: argparse.Namespace) -> int:
             event=args.event, at=args.at,
         )  # fmt: skip
         spec = args.period
-        no_period = spec is None and args.since is None and args.last is None
+        no_period = spec is None and args.start is None and args.days is None
         if args.method == "step" and no_period and (args.event or args.at):
             spec = _step_period(args)
-        period = resolve_period(spec, since=args.since, end=args.end, last=args.last)
+        period = resolve_period(spec, start=args.start, end=args.end, days=args.days)
     except ValueError as err:
         raise SystemExit(f"gpsprod: {err}") from None
     stations = select(args.stations, area=args.area, region=args.region, source=src)

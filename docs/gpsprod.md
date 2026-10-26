@@ -8,10 +8,10 @@ One place, one estimator for every number about station motion
 ## Step 1 — `gpsprod displacement` (method `ends`)
 
 ```bash
-gpsprod displacement SENG THOB --since 20231112           # screen table
+gpsprod displacement SENG THOB --start 20231112           # screen table
 gpsprod displacement --area reykjanes --period 20240901:20241031 -o d.csv
-gpsprod displacement SENG --relative-to SKSH --last 30
-gpsprod displacement all --last 7 --ends 1                # one day per end
+gpsprod displacement SENG --relative-to SKSH --days 30
+gpsprod displacement all --days 7 --ends 1                # one day per end
 ```
 
 - **Level at each end** = inverse-variance mean of the `--ends N` whole days
@@ -100,3 +100,10 @@ inside days crossed the very motion being measured. A flag that remains is
 real: SENG on 9 Nov 2023 sits 18 mm East of the line through 4–8 Nov (the
 motion began the day before the dike); for one day the check cannot tell a
 blunder from the onset of motion, so it flags and keeps the number.
+
+### Periods by options (2026-10-26, BGÓ)
+
+`--start A --end B` (both days in), `--start A --days N` (N days from A),
+`--days N [--end B]` (the N days ending B, default today), or `--period`
+alone (dates and event names). `--since`/`--last` remain as the old names
+of `--start`/`--days`.

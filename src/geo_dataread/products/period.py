@@ -5,8 +5,7 @@ the midnight starting 10 Nov 2023 to the midnight ending 10 Jan 2024
 (:func:`geo_dataread.velocity.window_bounds`). Forms:
 
 - ``A:B`` — dates ``YYYYMMDD`` or ``YYYY-MM-DD``;
-- ``A:`` or ``since=A`` — from A to ``today``;
-- ``last=N`` — the N whole days ending ``today``;
+- ``A:`` — from A to ``today``;
 - event names (``events.yaml`` ids, or any part of one that names a single
   event) in place of a date: as a START, the day after the event's last day;
   as an END, the day before its onset — so ``DIKE:ERUPTION`` is the quiet
@@ -102,22 +101,46 @@ def resolve_period(
     last: int | None = None,
     today: dt.date | None = None,
     events: Sequence[Event] | None = None,
+    start: str | None = None,
+    days: int | None = None,
 ) -> Period:
-    """The period of a ``--period`` spec, or ``--since``/``--end``/``--last``.
+    """The period of a ``--period`` spec, or of ``--start``/``--end``/``--days``.
 
-    Exactly one of ``spec``, ``since`` and ``last`` is given; ``end``
-    (default ``today``) closes ``since`` and ``last``. ``events`` is the
-    catalog; read from the deployed ``events.yaml`` only when a name is used.
+    - ``--start A [--end B]``: A to B (default ``today``);
+    - ``--start A --days N``: the N days from A;
+    - ``--days N [--end B]``: the N days ending B (default ``today``);
+    - ``--period``: dates and event names (module doc), alone.
+
+    ``since`` is ``start`` and ``last`` is ``days`` (the older names).
+    ``events`` is the catalog; read from the deployed ``events.yaml`` only
+    when a name is used.
     """
     today = today or dt.date.today()
-    given = [x is not None for x in (spec, since, last)]
-    if sum(given) != 1:
-        raise ValueError("give one of --period, --since, --last")
+    if since is not None and start is not None:
+        raise ValueError("--since is --start; give one")
+    if last is not None and days is not None:
+        raise ValueError("--last is --days; give one")
+    start = start if start is not None else since
+    days = days if days is not None else last
+    if days is not None and days < 1:
+        raise ValueError(f"--days {days}: at least one day")
+    if spec is not None:
+        if start is not None or days is not None:
+            raise ValueError("--period stands alone (not with --start/--days)")
+    elif start is None and days is None:
+        raise ValueError(
+            "give a period: --period, --start (and --end/--days) or --days"
+        )
+    if start is not None and days is not None and end is not None:
+        raise ValueError("--start, --days and --end: give two of them")
     close = parse_date(end) if end else today
-    if last is not None:
-        return from_days(last_days_start(close, last), close)
-    if since is not None:
-        return from_days(parse_date(since), close)
+    if start is not None:
+        first = parse_date(start)
+        if days is not None:
+            return from_days(first, first + dt.timedelta(days=days - 1))
+        return from_days(first, close)
+    if days is not None:
+        return from_days(last_days_start(close, days), close)
     assert spec is not None
     spec = spec.strip()
     if spec.startswith("after:"):

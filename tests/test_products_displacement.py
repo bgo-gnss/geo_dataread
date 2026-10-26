@@ -280,7 +280,18 @@ def test_cli_displacement_and_alias(
         and "gpsprod displacement AAAA --period 20240201:20240701" in captured.err
     )
     with pytest.raises(SystemExit):
-        cli.main(["displacement", "AAAA", "--since", "20240101", "--last", "3"])
+        cli.main(
+            [
+                "displacement",
+                "AAAA",
+                "--start",
+                "20240101",
+                "--days",
+                "3",
+                "--end",
+                "20240110",
+            ]
+        )
     with pytest.raises(SystemExit):
         cli.main(
             [
@@ -666,3 +677,38 @@ def test_end_check_looks_outside_the_period() -> None:
     assert refused is None
     assert not any(f.startswith("end_disputed") for f in flags), flags
     assert vals["displacement"][0] == pytest.approx(300.0, abs=5)
+
+
+def test_start_end_days() -> None:
+    today = dt.date(2026, 10, 26)
+    assert resolve_period(start="20231109", end="20231112").dates == (
+        "2023-11-09",
+        "2023-11-12",
+    )
+    assert resolve_period(start="20231109", days=4).dates == (
+        "2023-11-09",
+        "2023-11-12",
+    )
+    assert resolve_period(days=30, end="20241031").dates == ("2024-10-02", "2024-10-31")
+    assert resolve_period(days=1, today=today).dates == ("2026-10-26", "2026-10-26")
+    assert resolve_period(start="20261001", today=today).dates[1] == "2026-10-26"
+    for bad in (
+        {"start": "20231109", "days": 4, "end": "20231112"},
+        {"spec": "20231109:20231112", "start": "20231109"},
+        {"start": "20231109", "since": "20231109"},
+        {"days": 0},
+        {"end": "20231112"},
+    ):
+        with pytest.raises(ValueError):
+            resolve_period(**bad)  # type: ignore[arg-type]
+
+
+def test_cli_start_days_and_old_names(monkeypatch: pytest.MonkeyPatch, capsys) -> None:
+    _patch_load(monkeypatch, {"AAAA": _view(start=2024.0, days=400)})
+    for argv in (
+        ["--start", "20240201", "--days", "30"],
+        ["--since", "20240201", "--end", "20240301"],
+        ["--last", "30", "--end", "20240302"],
+    ):
+        assert cli.main(["displacement", "AAAA", "-q", *argv]) == 0
+        assert "AAAA" in capsys.readouterr().out
