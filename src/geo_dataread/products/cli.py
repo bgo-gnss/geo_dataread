@@ -1,10 +1,6 @@
 """``gpsprod`` — station motion products from one place (PLAN-gpsprod).
 
-    gpsprod displacement SENG THOB --since 20231110
-    gpsprod displacement --area reykjanes --period 20231110:20240110 --out d.csv
-    gpsprod displacement all --last 30 --ends 1
-
-Subcommands arrive step by step: ``displacement`` (step 1), ``velocity``
+Subcommands arrive step by step: ``displacement`` (steps 1–2), ``velocity``
 (step 3), ``coords`` (step 4), ``series`` (step 5).
 """
 
@@ -13,15 +9,65 @@ from __future__ import annotations
 import argparse
 import sys
 from collections.abc import Sequence
+from pathlib import Path
 
 from geo_dataread.products.common import REFS, SESSIONS, VIEWS
 from geo_dataread.products.displacement import (
+    METHODS,
     DisplacementSettings,
     estimate_displacements,
+    to_velocity,
 )
 from geo_dataread.products.files import table
 from geo_dataread.products.loader import Source
 from geo_dataread.products.period import resolve_period
+
+TOP_EPILOG = """\
+subcommands:
+  displacement   how far stations moved across a period (ends | step | rate)
+
+  gpsprod displacement --help    every option, with examples
+
+The library behind it: from geo_dataread import products  (docs/gpsprod.md)
+"""
+
+DISPLACEMENT_EPILOG = """\
+methods:
+  ends   level at each end of the period (mean of --ends N days inside it),
+         end minus start. Any motion. The default.
+  step   the jump across one event: a line through --step-window days on each
+         side, both evaluated at the event. Dikes, eruptions, earthquakes.
+  rate   the velocity product's rate over the period × its length. Steady
+         motion only (velocity -> displacement).
+  --as-velocity turns any of them into an average velocity (displacement -> velocity).
+
+periods (--period):
+  20231112:20240110          dates (YYYYMMDD or YYYY-MM-DD), both days included
+  20240901:                  from a date to today (or --end)
+  DIKE:ERUPTION              between two events: the day after the first ends
+                             to the day before the second starts
+  after:EVENT  or  EVENT:    from the day after an event to today (or --end)
+  20231001:EVENT             from a date to the day before an event
+  EVENT                      the event's own days, onset to last day
+  EVENT is an events.yaml id, or any part of one that names one event
+  (2023-11-10-dike, 2024-03-eruption).  --since D / --last N also work.
+
+examples:
+  gpsprod displacement SENG THOB --since 20231112
+  gpsprod displacement --area reykjanes --period after:2023-11-10-dike -o d.csv
+  gpsprod displacement all --last 7 --ends 1            # one day per end, checked
+  gpsprod displacement SENG --relative-to SKSH --period 20240901:20241031
+  gpsprod displacement --area reykjanes --method step --event 2024-03-02-dike
+  gpsprod displacement THOB --method step --at 20231110 --step-window 20
+  gpsprod displacement THOB --method rate --period 20250101:20250601
+  gpsprod displacement THOB --period 2023-11-10-dike:2023-12-eruption --as-velocity
+  gpsprod displacement HOFN --since 20200101 --keep-seasonal --units m -o h.jsonl
+
+output: a table on screen, or -o FILE (.csv with a # provenance header, or
+.jsonl); every row says frame, ref, view, method, period and its sigma method.
+With --as-velocity, -o DIR/NAME writes NAME.gmt, NAME.csv and NAME.jsonl
+(the velocity product's files). Refused stations are listed with the reason.
+"""
 
 
 def _box(value: str) -> tuple[float, float, float, float]:
@@ -40,7 +86,8 @@ def select(
     source: Source,
 ) -> list[str]:
     """Stations by name (``all``: every station with a series of the
-    source's product), plus an area's members, inside a W/E/S/N box."""
+    source's product), plus an area's members; a W/E/S/N box picks every
+    station in it, or narrows the named ones."""
     from geo_dataread.pos import pos_stations
 
     picked = {n.upper() for n in names if n.lower() != "all"}
@@ -67,60 +114,146 @@ def select(
 
 
 def _common(p: argparse.ArgumentParser) -> None:
-    p.add_argument("stations", nargs="*", help="markers, or 'all'")
-    p.add_argument("--area", help="a station_areas.yaml area (its members)")
-    p.add_argument("--region", type=_box, help="W/E/S/N box")
-    g = p.add_argument_group("period (one of)")
-    g.add_argument("--period", help="A:B dates (YYYYMMDD), A: to today")
-    g.add_argument("--since", help="from this date to --end (default today)")
-    g.add_argument("--last", type=int, help="the N whole days ending --end")
-    g.add_argument("-e", "--end", help="last day for --since/--last (default today)")
-    p.add_argument("--frame", default="itrf14", help="itrf14 (default), itrf08, itrf20")
-    p.add_argument("--session", default="24h", choices=tuple(SESSIONS))
-    p.add_argument("--ref", choices=REFS, help="default plate-periodic")
-    p.add_argument(
-        "--keep-seasonal", action="store_true", help="ref plate (seasonal kept)"
+    g = p.add_argument_group("stations")
+    g.add_argument(
+        "stations", nargs="*",
+        help="station markers (SENG THOB …), or 'all' for every station with a series",
+    )  # fmt: skip
+    g.add_argument(
+        "--area", help="the members of a station_areas.yaml area (reykjanes …)"
     )
-    p.add_argument("--relative-to", metavar="STA", help="difference against STA")
-    p.add_argument("-u", "--uncert", type=float, default=10.0, help="max formal σ [mm]")
-    p.add_argument("--pos-dir", help="the .pos directory (default postprocess.cfg)")
-    p.add_argument("--params", help="detrend parameter document")
-    p.add_argument("--steps", help="steps catalog")
-    p.add_argument("-o", "--out", help="write here: .csv or .jsonl (default screen)")
-    p.add_argument("--units", choices=("mm", "m"), default="mm")
-    p.add_argument("-q", "--quiet", action="store_true", help="no progress")
+    g.add_argument(
+        "--region", type=_box, metavar="W/E/S/N",
+        help="every station in the box, or narrows the named ones (-22.8/-21.8/63.7/64.1)",
+    )  # fmt: skip
+    g = p.add_argument_group("period (give one of --period, --since, --last)")
+    g.add_argument(
+        "--period", metavar="A:B",
+        help="dates and/or event names, see 'periods' below",
+    )  # fmt: skip
+    g.add_argument("--since", metavar="DATE", help="from DATE to --end (default today)")
+    g.add_argument(
+        "--last", type=int, metavar="N", help="the N whole days ending --end"
+    )
+    g.add_argument(
+        "-e", "--end", metavar="DATE",
+        help="the last day for --since, --last and open periods (default today)",
+    )  # fmt: skip
+    g = p.add_argument_group("series")
+    g.add_argument(
+        "--frame", default="itrf14",
+        help="the .pos product: itrf14 (default, IGb14), itrf08 (okada), itrf20 (gamit-p01)",
+    )  # fmt: skip
+    g.add_argument(
+        "--session", default="24h", choices=tuple(SESSIONS),
+        help="solution session (default 24h; 8h only where 8 h series exist)",
+    )  # fmt: skip
+    g.add_argument(
+        "--ref", choices=REFS,
+        help="plate-periodic (default: plate and the stored seasonal removed), "
+        "background (the whole stored trajectory removed), plate (plate only), "
+        "itrf (the raw frame)",
+    )  # fmt: skip
+    g.add_argument(
+        "--keep-seasonal", action="store_true",
+        help="keep the seasonal signal: the same as --ref plate",
+    )  # fmt: skip
+    g.add_argument(
+        "--relative-to", metavar="STA",
+        help="difference every station against STA (a baseline STATION − STA)",
+    )  # fmt: skip
+    g.add_argument(
+        "-u", "--uncert", type=float, default=10.0, metavar="MM",
+        help="drop solutions with a formal σ above MM (default 10)",
+    )  # fmt: skip
+    g.add_argument(
+        "--pos-dir",
+        metavar="DIR",
+        help="the .pos directory (default postprocess.cfg pos_dir)",
+    )
+    g.add_argument(
+        "--params",
+        metavar="FILE",
+        help="detrend parameter document (default the frame's deployed one)",
+    )
+    g.add_argument(
+        "--steps", metavar="FILE", help="steps catalog (default the deployed steps.csv)"
+    )
+    g = p.add_argument_group("output")
+    g.add_argument(
+        "-o", "--out", metavar="FILE",
+        help="write FILE.csv or FILE.jsonl (default: a table on screen)",
+    )  # fmt: skip
+    g.add_argument(
+        "--units", choices=("mm", "m"), default="mm", help="mm (default) or m"
+    )
+    g.add_argument("-q", "--quiet", action="store_true", help="no progress on stderr")
 
 
 def build_parser() -> argparse.ArgumentParser:
+    raw = argparse.RawDescriptionHelpFormatter
     p = argparse.ArgumentParser(
         prog="gpsprod",
-        description="GNSS station motion products: displacements (more to come).",
+        description="GNSS station motion products from one place: one estimator "
+        "for displacements (velocities, coordinates and series follow).",
+        epilog=TOP_EPILOG,
+        formatter_class=raw,
     )
-    sub = p.add_subparsers(dest="command", required=True)
+    sub = p.add_subparsers(dest="command", required=True, metavar="COMMAND")
     d = sub.add_parser(
         "displacement",
-        help="displacement across a period",
+        help="how far stations moved across a period",
+        formatter_class=raw,
         description=(
-            "Displacement across a period: the level at each end is the weighted "
-            "mean of --ends N whole days inside the period. Defaults: itrf14, "
-            "plate and seasonal removed, declared view."
+            "How far stations moved across a period, N/E/U with σ.\n"
+            "Defaults: itrf14 .pos, plate and seasonal removed, declared view "
+            "(known blunders out), method ends with 5 days per end."
         ),
+        epilog=DISPLACEMENT_EPILOG,
     )
     _common(d)
-    d.add_argument("--view", choices=VIEWS, default="declared")
-    d.add_argument("--method", choices=("ends",), default="ends")
-    d.add_argument("--ends", type=int, default=5, metavar="N", help="days per end (5)")
-    d.add_argument(
+    g = d.add_argument_group("method")
+    g.add_argument(
+        "--method", choices=METHODS, default="ends",
+        help="ends (default), step or rate — see 'methods' below",
+    )  # fmt: skip
+    g.add_argument(
+        "--view", choices=VIEWS, default="declared",
+        help="declared (default: known blunders out), cleaned (outliers detected "
+        "and out — beware: it can take real motion in unrest), raw",
+    )  # fmt: skip
+    g.add_argument(
+        "--ends", type=int, default=5, metavar="N",
+        help="ends: days averaged at each end (default 5; 1 = single days)",
+    )  # fmt: skip
+    g.add_argument(
         "--neighbour-days", type=int, default=5, metavar="M",
-        help="days the N ≤ 2 end check fits its line through (5)",
+        help="ends with N ≤ 2: each end is checked against a line through the "
+        "next M days and flagged end_disputed when it disagrees (default 5)",
+    )  # fmt: skip
+    g.add_argument(
+        "--event", metavar="EVENT",
+        help="step: the event (events.yaml id or part of one); default the "
+        "station's one dike/eruption inside the period",
+    )  # fmt: skip
+    g.add_argument(
+        "--at", metavar="DATE", help="step: a one-day event on DATE instead of --event"
+    )
+    g.add_argument(
+        "--step-window", type=int, default=30, metavar="DAYS",
+        help="step: days of line on each side of the event (default 30)",
+    )  # fmt: skip
+    g.add_argument(
+        "--as-velocity", action="store_true",
+        help="report the average velocity (displacement / its span) in mm/yr",
     )  # fmt: skip
     return p
 
 
 def _source(args: argparse.Namespace) -> Source:
-    ref = args.ref or ("plate" if args.keep_seasonal else "plate-periodic")
     if args.ref and args.keep_seasonal and args.ref != "plate":
         raise SystemExit("gpsprod: --keep-seasonal is --ref plate; not both")
+    ref = args.ref or ("plate" if args.keep_seasonal else "plate-periodic")
     return Source(
         frame=args.frame, session=args.session, view=args.view, ref=ref,
         uncert=args.uncert, pos_dir=args.pos_dir, params=args.params,
@@ -128,16 +261,36 @@ def _source(args: argparse.Namespace) -> Source:
     )  # fmt: skip
 
 
+def _step_period(args: argparse.Namespace) -> str:
+    """The default period of a step given only its event: the event ± the
+    step window."""
+    import datetime as dt
+
+    from geo_dataread.events import read_events
+    from geo_dataread.products.period import find_event, parse_date
+
+    if args.at:
+        first = last = parse_date(args.at)
+    else:
+        e = find_event(args.event, read_events())
+        first, last = e.onset, e.last_day
+    pad = dt.timedelta(days=args.step_window)
+    return f"{(first - pad):%Y%m%d}:{(last + pad):%Y%m%d}"
+
+
 def _displacement(args: argparse.Namespace) -> int:
     try:
         src = _source(args)
         settings = DisplacementSettings(
             source=src, method=args.method, ends_days=args.ends,
-            neighbour_days=args.neighbour_days,
+            neighbour_days=args.neighbour_days, step_window_days=args.step_window,
+            event=args.event, at=args.at,
         )  # fmt: skip
-        period = resolve_period(
-            args.period, since=args.since, end=args.end, last=args.last
-        )
+        spec = args.period
+        no_period = spec is None and args.since is None and args.last is None
+        if args.method == "step" and no_period and (args.event or args.at):
+            spec = _step_period(args)
+        period = resolve_period(spec, since=args.since, end=args.end, last=args.last)
     except ValueError as err:
         raise SystemExit(f"gpsprod: {err}") from None
     stations = select(args.stations, area=args.area, region=args.region, source=src)
@@ -154,14 +307,35 @@ def _displacement(args: argparse.Namespace) -> int:
     )  # fmt: skip
     if not args.quiet:
         print(" " * 12, file=sys.stderr, end="\r")
+    names = f"  ({', '.join(period.names)})" if period.names else ""
+    head = (
+        f"# {period.dates[0]} .. {period.dates[1]}{names}  {src.frame_name} "
+        f"{src.session} ref {src.ref} view {src.view} method {args.method}"
+    )
+    if args.as_velocity:
+        from geo_dataread.velocity import _show, write_velocity_set
+
+        vel = [to_velocity(r) for r in rs]
+        if args.out:
+            out = Path(args.out).expanduser()
+            paths = write_velocity_set(
+                vel, out.parent, out.stem if out.suffix else out.name
+            )
+            print(
+                f"gpsprod: {', '.join(str(p) for p in paths.values())}", file=sys.stderr
+            )
+        else:
+            print(head + "  as velocity [mm/yr]")
+            _show(vel, show_all=True)
+        return 0
     if args.out:
         path = rs.write(args.out, units=args.units)
-        n_ok = len(rs.accepted())
-        print(f"gpsprod: {n_ok}/{len(rs)} stations → {path}", file=sys.stderr)
+        print(
+            f"gpsprod: {len(rs.accepted())}/{len(rs)} stations → {path}",
+            file=sys.stderr,
+        )
     else:
-        print(f"# {period.dates[0]} .. {period.dates[1]}  {src.frame_name} "
-              f"{src.session} ref {src.ref} view {src.view} ends {args.ends} d "
-              f"[{args.units}]")  # fmt: skip
+        print(f"{head} [{args.units}]")
         print(table([r.scaled(args.units) for r in rs]))
     return 0
 
@@ -180,12 +354,15 @@ def displacemnts_alias(argv: Sequence[str] | None = None) -> int:
     translates its arguments to ``gpsprod displacement`` (itrf14, 5-day
     ends) and says so.
     """
-    p = argparse.ArgumentParser(prog="gps-displacemnts")
-    p.add_argument("stations", nargs="+")
-    p.add_argument("-s", "--start", required=True)
-    p.add_argument("-e", "--end")
-    p.add_argument("--file", action="store_true")
-    p.add_argument("-f", default="%Y%m%d")
+    p = argparse.ArgumentParser(
+        prog="gps-displacemnts",
+        description="Retired: translates to 'gpsprod displacement' (see gpsprod displacement --help).",
+    )
+    p.add_argument("stations", nargs="+", help="station markers")
+    p.add_argument("-s", "--start", required=True, help="first day, YYYYMMDD")
+    p.add_argument("-e", "--end", help="last day, YYYYMMDD (default today)")
+    p.add_argument("--file", action="store_true", help="write START-END.csv")
+    p.add_argument("-f", default="%Y%m%d", help="date format (only %%Y%%m%%d)")
     a = p.parse_args(argv)
     if a.f != "%Y%m%d":
         raise SystemExit("gps-displacemnts: only -f %Y%m%d; use gpsprod displacement")

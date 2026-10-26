@@ -41,3 +41,40 @@ gpsprod displacement all --last 7 --ends 1                # one day per end
   method, period, σ method, input fingerprint and software versions.
 - `gps-displacemnts` (TOT, ITRF2008, end day − start day; its CLI was broken)
   now translates to `gpsprod displacement` and says so.
+
+## Step 2 — `step`, `rate`, conversions, event names
+
+```bash
+gpsprod displacement --area reykjanes --method step --event 2024-03-02-dike
+gpsprod displacement THOB --method step --at 20231110 --step-window 20
+gpsprod displacement THOB --method rate --period 20250101:20250601
+gpsprod displacement THOB --period 2023-11-10-dike:2023-12-eruption --as-velocity
+gpsprod displacement --area reykjanes --period after:2023-11-10-dike -o d.csv
+```
+
+- **Event names in periods** (`events.yaml` id, or a part naming one event):
+  as a start = the day after the event's last day; as an end = the day before
+  its onset. `DIKE:ERUPTION` = the quiet between; `after:EVENT` or `EVENT:` =
+  from it to today; `EVENT` alone = its own days. Names go into the records'
+  `period_names`.
+- **`step`**: lines through `--step-window` (30) days before the onset and
+  after the last day (event days in neither), each evaluated at the event's
+  edge: Δ = f_after(last day + 1) − f_before(onset); a multi-day eruption's
+  displacement includes the motion during it. Each side passes the velocity
+  product's gates (≥ 5 epochs, ≥ 80 % cover, no declared step) or the station
+  is refused (`step: after cover=0.43<0.8`). σ: each line's level σ ×
+  max(k_day, √χ²/ν), its rate σ × k(T) — the station's own k(T), else the
+  k(T) table, else 5 (`--relative-to` and 8 h: table or 5, flagged
+  `k:baseline_unmeasured` / `k:session_unmeasured`). A curved side (F of a
+  quadratic > the product's threshold) is flagged `step_nonlinear:<side>:<c>`
+  — post-dike relaxation. The event: `--event`, `--at DATE` (one day), or
+  the station's one dike/eruption in the period (none or several: refused).
+  With `--event`/`--at` and no period, the period is the event ± the window.
+- **`rate`**: the velocity product's record over the period × its length
+  (velocity → displacement; σ the product's σ × T; its flags kept). Valid
+  for steady motion only: an event inside the period inflates σ (χ²). Not
+  yet for `--relative-to` or 8 h (step 3), nor `--ref itrf`.
+- **Conversions**: `products.to_displacement(VelocityRecord, period)` (d = v·T)
+  and `products.to_velocity(DisplacementRecord)` (v = d/T, T between the
+  end-window centres for `ends`, the period otherwise) — exact inverses;
+  `--as-velocity` prints/writes the velocity product's table/files.

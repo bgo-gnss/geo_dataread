@@ -89,6 +89,10 @@ class DisplacementRecord:
     relative_to: str | None = None
     period_names: tuple[str, ...] = ()
     ends: dict[str, Any] | None = None
+    #: method step: the event, the two lines, the windows, the k used
+    step: dict[str, Any] | None = None
+    #: method rate: the velocity record the displacement was projected from
+    rate: dict[str, Any] | None = None
     flags: tuple[str, ...] = ()
     refused: str | None = None
     input_fingerprint: str = ""

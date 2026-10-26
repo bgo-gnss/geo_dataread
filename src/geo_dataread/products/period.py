@@ -6,9 +6,12 @@ the midnight starting 10 Nov 2023 to the midnight ending 10 Jan 2024
 
 - ``A:B`` — dates ``YYYYMMDD`` or ``YYYY-MM-DD``;
 - ``A:`` or ``since=A`` — from A to ``today``;
-- ``last=N`` — the N whole days ending ``today``.
-
-Event names (``events.yaml`` ids) come in step 2 of PLAN-gpsprod.
+- ``last=N`` — the N whole days ending ``today``;
+- event names (``events.yaml`` ids, or any part of one that names a single
+  event) in place of a date: as a START, the day after the event's last day;
+  as an END, the day before its onset — so ``DIKE:ERUPTION`` is the quiet
+  between them, ``DIKE:`` (or ``after:DIKE``) from the dike to today;
+- ``EVENT`` alone — the event's own days, onset to last day.
 """
 
 from __future__ import annotations
@@ -16,7 +19,13 @@ from __future__ import annotations
 import dataclasses
 import datetime as dt
 
+from collections.abc import Sequence
+from typing import TYPE_CHECKING
+
 from geo_dataread.velocity import last_days_start, window_bounds
+
+if TYPE_CHECKING:
+    from geo_dataread.events import Event
 
 
 @dataclasses.dataclass(frozen=True)
@@ -49,6 +58,34 @@ def parse_date(value: str) -> dt.date:
     raise ValueError(f"{value!r}: use YYYYMMDD or YYYY-MM-DD")
 
 
+def find_event(name: str, events: Sequence[Event]) -> Event:
+    """The event ``name`` names: its id, else the one id containing it.
+
+    Raises:
+        ValueError: no event, or several, match (the candidates listed).
+    """
+    key = name.strip()
+    for e in events:
+        if e.id == key:
+            return e
+    hits = [e for e in events if key.lower() in e.id.lower()]
+    if len(hits) == 1:
+        return hits[0]
+    if not hits:
+        raise ValueError(f"no event {key!r} in events.yaml")
+    raise ValueError(
+        f"{key!r} names {len(hits)} events: {', '.join(e.id for e in hits)}"
+    )
+
+
+def _is_date(text: str) -> bool:
+    try:
+        parse_date(text)
+    except ValueError:
+        return False
+    return True
+
+
 def from_days(first: dt.date, last: dt.date, names: tuple[str, ...] = ()) -> Period:
     """The period of whole days ``first`` … ``last``."""
     if last < first:
@@ -64,11 +101,13 @@ def resolve_period(
     end: str | None = None,
     last: int | None = None,
     today: dt.date | None = None,
+    events: Sequence[Event] | None = None,
 ) -> Period:
     """The period of a ``--period`` spec, or ``--since``/``--end``/``--last``.
 
     Exactly one of ``spec``, ``since`` and ``last`` is given; ``end``
-    (default ``today``) closes ``since`` and ``last``.
+    (default ``today``) closes ``since`` and ``last``. ``events`` is the
+    catalog; read from the deployed ``events.yaml`` only when a name is used.
     """
     today = today or dt.date.today()
     given = [x is not None for x in (spec, since, last)]
@@ -80,7 +119,35 @@ def resolve_period(
     if since is not None:
         return from_days(parse_date(since), close)
     assert spec is not None
+    spec = spec.strip()
+    if spec.startswith("after:"):
+        spec = spec.removeprefix("after:") + ":"
+    names: list[str] = []
+    one_day = dt.timedelta(days=1)
+
+    def event(text: str) -> Event:
+        nonlocal events
+        if events is None:
+            from geo_dataread.events import read_events
+
+            events = read_events()
+        e = find_event(text, events)
+        names.append(e.id)
+        return e
+
     if ":" not in spec:
-        raise ValueError(f"{spec!r}: a period is A:B (dates), or A: to today")
+        if _is_date(spec):
+            raise ValueError(f"{spec!r}: a period is A:B (dates), or A: to today")
+        e = event(spec)
+        return from_days(e.onset, e.last_day, (e.id,))
     a, b = spec.split(":", 1)
-    return from_days(parse_date(a), parse_date(b) if b else close)
+    if not a:
+        raise ValueError(f"{spec!r}: the period needs a start")
+    first = parse_date(a) if _is_date(a) else event(a).last_day + one_day
+    if not b:
+        last_day = close
+    elif _is_date(b):
+        last_day = parse_date(b)
+    else:
+        last_day = event(b).onset - one_day
+    return from_days(first, last_day, tuple(names))

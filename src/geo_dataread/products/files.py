@@ -37,9 +37,14 @@ def _fmt(v: float, decimals: int) -> str:
 
 
 def _ends_n(rec: DisplacementRecord, key: str) -> int | str:
-    if not rec.ends:
-        return ""
-    return min(int(c["n"]) for c in rec.ends[key].values())
+    """Epochs behind the start/end: the end windows (ends), the lines
+    before/after the event (step)."""
+    if rec.ends:
+        return min(int(c["n"]) for c in rec.ends[key].values())
+    if rec.step:
+        side = rec.step["lines"]["before" if key == "start" else "after"]
+        return min(int(c["n"]) for c in side.values())
+    return ""
 
 
 def rows(
