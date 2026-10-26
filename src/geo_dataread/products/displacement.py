@@ -202,9 +202,14 @@ def displacement_from_view(
         w_end = (end_edge - n_days * DAY_YEARS, end_edge)
         if w_end[0] < w_start[1]:
             return {}, flags, f"period shorter than two {n_days}-day end windows"
+    # a step inside an end window matters only when the window has epochs on
+    # both sides of it (its mean would straddle the step): a one-day window
+    # holds one solution, before or after
     for e in sorted(float(x) for x in step_epochs):
-        if w_start[0] <= e < w_start[1] or w_end[0] <= e < w_end[1]:
-            return {}, flags, f"step_in_end_window@{_iso(e)}"
+        for lo, hi in (w_start, w_end):
+            inside = finite[(finite >= lo) & (finite < hi)]
+            if (inside < e).any() and (inside > e).any():
+                return {}, flags, f"step_in_end_window@{_iso(e)}"
     if any(p0 < float(e) < p1 for e in step_epochs):
         flags.append("steps_in_period")
     for key, (lo, hi) in (("start", w_start), ("end", w_end)):

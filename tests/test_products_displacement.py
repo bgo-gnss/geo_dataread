@@ -712,3 +712,20 @@ def test_cli_start_days_and_old_names(monkeypatch: pytest.MonkeyPatch, capsys) -
     ):
         assert cli.main(["displacement", "AAAA", "-q", *argv]) == 0
         assert "AAAA" in capsys.readouterr().out
+
+
+def test_a_step_refuses_only_a_window_that_straddles_it() -> None:
+    v = _view()
+    p = (2024.2, 2024.2 + 100 * DAY)
+    first = v.t[np.flatnonzero(v.t >= p[0])[0]]
+    # a step after the first epoch of a one-day window: one solution, fine
+    one = DisplacementSettings(ends_days=1)
+    _, flags, refused = displacement_from_view(
+        v, p, one, step_epochs=[first + 0.1 * DAY]
+    )
+    assert refused is None and "steps_in_period" in flags
+    # the same step inside a five-day window: its mean would straddle it
+    _, _, refused = displacement_from_view(
+        v, p, DisplacementSettings(), step_epochs=[first + 0.1 * DAY]
+    )
+    assert refused is not None and refused.startswith("step_in_end_window@")
