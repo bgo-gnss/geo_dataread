@@ -1,0 +1,1197 @@
+"""The velocity product: one estimator, one versioned record, three formats.
+
+Velocity estimation is its own process and its output a data product
+(BGÓ 2026-10-16): the map's vectors, the rates on time-series plots and the
+velocity tables fed to deformation models all read the SAME numbers, from
+:func:`estimate_station_velocity` or from the files it writes.
+
+Phase 1 is the **windowed** velocity (days to months, the unrest lane): a
+line fitted over a chosen window of a plate-removed series, in one frame.
+
+Reference modes (``ref``), all plate-removed first:
+
+- ``plate-periodic`` — the station's stored seasonal removed, then the
+  rate: background + whatever happens in the window.
+- ``background`` — the stored secular + seasonal (+ steps) removed: the
+  rate is the transient alone, relative to the station's background.
+- ``plate`` — nothing more removed (``background:none``).
+- ``pre-onset`` — the ``plate-periodic`` rate less the station's own
+  ``plate-periodic`` rate over a fixed window before the unrest's onset
+  (``pre_window``, BGÓ 2026-10-17): the rate relative to the preceding
+  state, σ² = σ_window² + σ_pre². See :func:`_pre_onset_velocity`.
+
+A station with no stored detrend record cannot take the first two; by
+default it falls back to ``plate`` and says so (``fallback:plate``,
+``background:none``), or is refused (``no_record="refuse"``).
+
+Uncertainty: the WLS formal σ of the window rate times the station's
+empirical rate scale k(T) (:func:`gps_analysis.empirical_rate_scale`),
+measured on the station's own quiet span (its detrend record window, the
+background removed) for windows of the same length. A station without
+one takes the stored k(T) table's (:func:`load_k_table`), else
+:data:`DEFAULT_K`; ``sigma_method`` says which. Never a median of the run:
+a record depends on its station, the settings and the table alone.
+
+Gates, two tiers. Refused outright: a declared step inside the window
+(``allow_steps`` turns that into a flag), a failed read or background
+removal, fewer than 2 epochs, no record when one is required. Standard
+tier: ≥ 5 epochs covering ≥ 80 % of the window (each daily epoch covering
+its day; against the data end when the data stop inside the window). Short
+tier (``tier="short"``): failing only those, a part (horizontal pair, up)
+stands when its |v|/σ reaches ``short_snr`` (``short_snr_pair`` on two
+epochs); see ``docs/velocity-product.md``. The view is ``declared`` by
+default: the raw series less the declared blunder epochs, no detection. The model is always a line: a seasonal cannot be estimated
+inside a window shorter than ~2.5 yr, it is removed from the record or not
+at all.
+
+Files (:func:`write_velocity_set`), all sorted by station, no timestamps:
+
+- ``<name>.gmt`` — ``lon lat ve vn sve svn corr_en station``: GMT
+  ``velo -Se`` input, accepted rows only;
+- ``<name>.csv`` — every row incl. refused ones, all columns;
+- ``<name>.jsonl`` — the full :class:`VelocityRecord` per line.
+
+A set holds ONE frame; mixing frames is refused at write time.
+"""
+
+from __future__ import annotations
+
+import dataclasses
+import datetime as dt
+import hashlib
+import json
+import math
+import warnings
+from collections.abc import Mapping, Sequence
+from importlib import metadata
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+import numpy.typing as npt
+from gps_analysis.rate_quality import (
+    NONLINEAR_F,
+    NONLINEAR_MAX_DAYS,
+    NONLINEAR_MIN_OBS,
+    SHORT_SNR,
+    SHORT_SNR_PAIR,
+)
+from gtimes.timefunc import TimetoYearf
+
+SCHEMA_VERSION = 3
+#: the record schemas this reader takes (1: no tier/snr/parts, read with
+#: the standard-tier defaults)
+READ_SCHEMAS = (1, 2, 3)
+REFS = ("plate-periodic", "background", "plate", "pre-onset")
+#: the ref a pre-onset rate is built on, in its window and its pre-window
+PRE_ONSET_BASE = "plate-periodic"
+#: declared: the raw series less the operator-declared blunder epochs
+#: (excluded_epochs.csv), no detection, the default; cleaned: outliers
+#: detected on the window (flags real signal in unrest, see the docs); raw
+VIEWS = ("declared", "cleaned", "raw")
+DEFAULT_VIEW = "declared"
+#: k is looked up at this window length at least: below a week the
+#: sliding-window k is not measured (the table holds its 7 d value)
+K_MIN_DAYS = 7
+TIERS = ("standard", "short")
+NO_RECORD_POLICIES = ("plate", "refuse")
+#: the stored-record terms each ref removes (read_gps_view ``terms``)
+_TERMS = {"plate-periodic": "periodic", "background": "all"}
+COMPONENTS = ("north", "east", "up")
+#: k when neither the station nor the run gives one (NYLA measured 4-7)
+DEFAULT_K = 5.0
+DEFAULT_FRAME = "itrf2014"
+DEFAULT_UNCERT = 10.0
+DEFAULT_VELOCITY_DIR = "~/gps-data/velocities"
+#: decimals written to the text formats
+_RATE_DECIMALS = 3
+_COORD_DECIMALS = 6
+
+FloatArray = npt.NDArray[np.float64]
+
+
+# ---------------------------------------------------------------------------
+# the record
+# ---------------------------------------------------------------------------
+
+
+@dataclasses.dataclass(frozen=True)
+class VelocityRecord:
+    """One station's velocity over one window: the product's row.
+
+    Rates and σ are N/E/U [mm/yr]; NaN (``null`` in JSON) when refused.
+    ``sigma`` is what consumers use; ``sigma_formal`` the WLS formal σ it
+    was scaled from by ``k``.
+    """
+
+    station: str
+    lon: float
+    lat: float
+    frame: str
+    plate: str | None
+    ref: str
+    ref_requested: str
+    series: str
+    view: str
+    uncert: float
+    window: tuple[float, float]
+    span_used: tuple[float, float] | None
+    n_epochs: tuple[int, int, int]
+    largest_gap: float | None
+    method: str
+    model: str
+    rate: tuple[float, float, float]
+    sigma: tuple[float, float, float]
+    sigma_formal: tuple[float, float, float]
+    sigma_method: str
+    k: tuple[float, float, float]
+    k_source: dict[str, Any]
+    corr_en: float
+    record: dict[str, Any] | None
+    steps_in_window: tuple[float, ...]
+    outlier_abort: bool
+    n_flagged: int
+    flags: tuple[str, ...]
+    refused: str | None
+    software: dict[str, str]
+    input_fingerprint: str
+    schema_version: int = SCHEMA_VERSION
+    kind: str = "window"
+    #: "standard": the count/cover gates passed; "short": they did not, and
+    #: the parts that stand do so on |v|/σ (``snr``)
+    tier: str = "standard"
+    #: (|v_h|/σ_h, |v_u|/σ_u) of the rate (NaN when refused)
+    snr: tuple[float, float] = (math.nan, math.nan)
+    #: χ²/ν and the quadratic's F per component (NaN when not fitted)
+    chi2nu: tuple[float, float, float] = (math.nan, math.nan, math.nan)
+    f_quadratic: tuple[float, float, float] = (math.nan, math.nan, math.nan)
+    #: the parts of an accepted short-tier record that did not stand
+    #: ("horizontal", "up") and why; their rates are NaN
+    parts_refused: dict[str, str] = dataclasses.field(default_factory=dict)
+    #: the station's last epoch when it is before the window end [yr]
+    data_end: float | None = None
+    #: ref pre-onset: the pre-window's own rate, what was subtracted
+    #: (window, rate, sigma, sigma_formal, k, sigma_method, k_source, n_epochs,
+    #: ref, refused, flags, input_fingerprint); None otherwise
+    pre_onset: dict[str, Any] | None = None
+
+    @property
+    def accepted(self) -> bool:
+        return self.refused is None
+
+    def to_dict(self) -> dict[str, Any]:
+        """JSON-ready: NaN → None, tuples → lists."""
+        return {k: _jsonable(v) for k, v in dataclasses.asdict(self).items()}
+
+    @classmethod
+    def from_dict(cls, d: Mapping[str, Any]) -> VelocityRecord:
+        """Inverse of :meth:`to_dict`.
+
+        Raises:
+            ValueError: an unknown ``schema_version``.
+        """
+        if d.get("schema_version") not in READ_SCHEMAS:
+            raise ValueError(
+                f"velocity record schema {d.get('schema_version')!r}, "
+                f"this reader knows {READ_SCHEMAS}"
+            )
+        kw = dict(d)
+        kw["schema_version"] = SCHEMA_VERSION  # an old record, upgraded
+        for key in ("rate", "sigma", "sigma_formal", "k", "snr", "chi2nu",
+                    "f_quadratic"):  # fmt: skip
+            if key in kw:
+                kw[key] = tuple(np.nan if v is None else float(v) for v in kw[key])
+        for key in ("window", "n_epochs", "steps_in_window", "flags"):
+            kw[key] = tuple(kw[key])
+        if kw.get("span_used") is not None:
+            kw["span_used"] = tuple(kw["span_used"])
+        kw["corr_en"] = np.nan if kw["corr_en"] is None else float(kw["corr_en"])
+        names = {f.name for f in dataclasses.fields(cls)}
+        return cls(**{k: v for k, v in kw.items() if k in names})
+
+
+def _jsonable(v: Any) -> Any:
+    if isinstance(v, float):
+        return None if not math.isfinite(v) else v
+    if isinstance(v, (tuple, list)):
+        return [_jsonable(x) for x in v]
+    if isinstance(v, dict):
+        return {k: _jsonable(x) for k, x in v.items()}
+    if isinstance(v, (np.floating, np.integer)):
+        return _jsonable(v.item())
+    return v
+
+
+# ---------------------------------------------------------------------------
+# settings
+# ---------------------------------------------------------------------------
+
+
+@dataclasses.dataclass(frozen=True)
+class VelocitySettings:
+    """How a set of velocities is estimated: what one product run means."""
+
+    frame: str = DEFAULT_FRAME
+    ref: str = "plate-periodic"
+    view: str = DEFAULT_VIEW
+    uncert: float = DEFAULT_UNCERT
+    no_record: str = "plate"
+    allow_steps: bool = False
+    min_obs: int = 5
+    min_cover: float = 0.8
+    default_k: float = DEFAULT_K
+    pos_dir: str | None = None
+    params: str | None = None
+    steps: str | None = None
+    #: the k(T) table (:func:`build_k_table`): a path, None for the
+    #: deployed one when it exists, "none" for no table
+    k_table: str | None = None
+    #: the short tier: a window failing only the count/cover gates keeps
+    #: the parts whose |v|/σ reaches short_snr (short_snr_pair on 2 epochs)
+    short_tier: bool = True
+    short_snr: float = SHORT_SNR
+    short_snr_pair: float = SHORT_SNR_PAIR
+    #: ref pre-onset: the reference window before the onset, fractional
+    #: years, half open (:func:`window_bounds`)
+    pre_window: tuple[float, float] | None = None
+
+    def __post_init__(self) -> None:
+        if self.ref not in REFS:
+            raise ValueError(f"ref must be one of {REFS}, got {self.ref!r}")
+        if (self.ref == "pre-onset") != (self.pre_window is not None):
+            raise ValueError("ref pre-onset takes a pre_window, the other refs none")
+        if self.pre_window is not None and not self.pre_window[1] > self.pre_window[0]:
+            raise ValueError(f"pre_window {self.pre_window} ends before it starts")
+        if self.view not in VIEWS:
+            raise ValueError(f"view must be one of {VIEWS}, got {self.view!r}")
+        if self.no_record not in NO_RECORD_POLICIES:
+            raise ValueError(
+                f"no_record must be one of {NO_RECORD_POLICIES}, got {self.no_record!r}"
+            )
+
+
+# ---------------------------------------------------------------------------
+# the pure core
+# ---------------------------------------------------------------------------
+
+
+@dataclasses.dataclass(frozen=True)
+class WindowRate:
+    """:func:`velocity_from_arrays`' result, before any provenance."""
+
+    rate: FloatArray
+    sigma_formal: FloatArray
+    n_epochs: tuple[int, int, int]
+    span_used: tuple[float, float] | None
+    largest_gap: float | None
+    reasons: tuple[str, ...]
+    steps_in_window: tuple[float, ...]
+    #: the short-tier σ (a priori × √max(1, χ²/ν)) [mm/yr]
+    sigma_short: FloatArray = dataclasses.field(
+        default_factory=lambda: np.full(3, np.nan)
+    )
+    chi2nu: FloatArray = dataclasses.field(default_factory=lambda: np.full(3, np.nan))
+    f_quadratic: FloatArray = dataclasses.field(
+        default_factory=lambda: np.full(3, np.nan)
+    )
+    #: only the count/cover gates failed, with ≥ 2 epochs: the rates are
+    #: fitted, for the short tier to judge
+    short: bool = False
+    #: the unique epochs the gates counted (finite in all components)
+    n_gate: int = 0
+
+
+def velocity_from_arrays(
+    t: npt.ArrayLike,
+    y: npt.ArrayLike,
+    sigma: npt.ArrayLike,
+    window: tuple[float, float],
+    *,
+    step_epochs: Sequence[float] = (),
+    allow_steps: bool = False,
+    min_obs: int = 5,
+    min_cover: float = 0.8,
+    gate_end: float | None = None,
+    epoch_span: float = 1 / 365.25,
+) -> WindowRate:
+    """The rate of a line through each component inside ``window``.
+
+    ``y`` and ``sigma`` are (3, N) [mm], NaN where an epoch is dropped
+    (outliers); each component is fitted on its own finite epochs
+    (:func:`gps_analysis.line_fit`). The gates
+    (:func:`gps_analysis.window_gates`) apply to the epochs finite in ALL
+    components; any reason refuses all three rates, except that a window
+    failing only the count/cover gates with ≥ 2 epochs is still fitted
+    and marked ``short``, for the caller's short tier to judge.
+
+    Args:
+        gate_end: The end the cover gate measures against, when the data
+            end before ``window`` does (default the window end).
+        epoch_span: The time one epoch stands for, in the cover gate
+            (a daily solution: its day).
+
+    Returns:
+        The :class:`WindowRate`; ``reasons`` empty when the rate stands.
+        With ``allow_steps``, a step inside the window is listed in
+        ``steps_in_window`` but does not refuse.
+    """
+    from gps_analysis import largest_gap, line_fit, window_gates
+
+    tt = np.asarray(t, dtype=np.float64)
+    yy = np.atleast_2d(np.asarray(y, dtype=np.float64))
+    ss = np.atleast_2d(np.asarray(sigma, dtype=np.float64))
+    start, end = float(window[0]), float(window[1])
+    inside = np.isfinite(tt) & (tt >= start) & (tt < end)
+    finite = (
+        inside
+        & np.all(np.isfinite(yy), axis=0)
+        & np.all(np.isfinite(ss) & (ss > 0), axis=0)
+    )
+    steps = tuple(sorted(float(e) for e in step_epochs if start < float(e) < end))
+    g_end = end if gate_end is None else min(end, float(gate_end))
+    reasons = list(
+        window_gates(tt[finite], (start, max(g_end, start + 1e-9)),
+                     step_epochs=step_epochs, min_obs=min_obs,
+                     min_cover=min_cover, epoch_span=epoch_span)
+    )  # fmt: skip
+    if allow_steps:
+        reasons = [r for r in reasons if not r.startswith("step_in_window")]
+    hard = any(r.startswith("step_in_window") for r in reasons)
+    short = bool(reasons) and not hard and np.unique(tt[finite]).size >= 2
+    rate, sig, sig_short, chi, fq = (np.full(3, np.nan) for _ in range(5))
+    counts = [0, 0, 0]
+    for c in range(3):
+        ok = inside & np.isfinite(yy[c]) & np.isfinite(ss[c]) & (ss[c] > 0)
+        counts[c] = int(ok.sum())
+        if (reasons and not short) or counts[c] < 2 or np.ptp(tt[ok]) <= 0:
+            continue
+        if counts[c] < 3 and not short:
+            continue
+        fit = line_fit(tt[ok], yy[c, ok], ss[c, ok])
+        rate[c], sig[c], sig_short[c] = fit.rate, fit.sigma_scaled, fit.sigma_short
+        chi[c], fq[c] = fit.chi2nu, fit.f_quadratic
+    used = tt[finite]
+    span = (float(used.min()), float(used.max())) if used.size else None
+    gap = largest_gap(used) if used.size else None
+    return WindowRate(rate, sig, (counts[0], counts[1], counts[2]), span, gap,
+                      tuple(reasons), steps, sig_short, chi, fq,
+                      short, int(np.unique(used).size))  # fmt: skip
+
+
+# ---------------------------------------------------------------------------
+# reading a station
+# ---------------------------------------------------------------------------
+
+
+def yearf(value: dt.date | dt.datetime | float) -> float:
+    """A date (its midnight), a datetime or a fractional year as a
+    fractional year."""
+    if isinstance(value, dt.datetime):
+        return float(TimetoYearf(*value.timetuple()[:6]))
+    if isinstance(value, dt.date):
+        return float(TimetoYearf(value.year, value.month, value.day, 0))
+    return float(value)
+
+
+def window_bounds(
+    start: dt.date | dt.datetime | float, end: dt.date | dt.datetime | float
+) -> tuple[float, float]:
+    """A window as fractional years, whole days for dates: from the start
+    date's midnight to the midnight AFTER the end date, so both end days
+    are in (a datetime or a fractional year is taken as given)."""
+    if isinstance(end, dt.date) and not isinstance(end, dt.datetime):
+        end = end + dt.timedelta(days=1)
+    return yearf(start), yearf(end)
+
+
+def last_days_start(end: dt.date, days: int) -> dt.date:
+    """The first day of the ``days`` days ending with ``end`` (both in):
+    ``--last 7`` is seven whole days."""
+    if days < 1:
+        raise ValueError(f"--last {days}: at least one day")
+    return end - dt.timedelta(days=days - 1)
+
+
+def _pos_dir(settings: VelocitySettings) -> str:
+    if settings.pos_dir is not None:
+        return str(Path(settings.pos_dir).expanduser())
+    from gps_parser import ConfigParser
+
+    return str(Path(str(ConfigParser().getPostProcessDir("pos_dir"))).expanduser())
+
+
+def _product(settings: VelocitySettings) -> tuple[str, str]:
+    """(pos product id, the frame's full name) of the settings."""
+    from geo_dataread.pos import frame_name, pos_product
+
+    return pos_product(settings.frame), frame_name(settings.frame)
+
+
+def _params_doc(settings: VelocitySettings) -> Mapping[str, Any] | None:
+    from geo_dataread.gps_views import default_params_path, read_detrend_params
+
+    pid, _ = _product(settings)
+    path = settings.params or default_params_path(pid)
+    if path is None or not Path(path).is_file():
+        return None
+    return read_detrend_params(path)
+
+
+def _record(doc: Mapping[str, Any] | None, sta: str) -> dict[str, Any] | None:
+    if doc is None:
+        return None
+    from geo_dataread.gps_views import station_detrend_record
+
+    try:
+        record, _source = station_detrend_record(doc, sta)
+    except (FileNotFoundError, ValueError):
+        return None
+    return dict(record) if record is not None else None
+
+
+def _read(
+    sta: str,
+    start: float,
+    end: float,
+    settings: VelocitySettings,
+    *,
+    terms: str | None,
+    doc: Mapping[str, Any] | None,
+) -> tuple[FloatArray, FloatArray, FloatArray, dict[str, Any]]:
+    """(t, y (3,N), σ (3,N), view attrs) of one station: plate removed, the
+    ``terms`` of its stored record removed (None: none), outliers NaN
+    (cleaned) or the declared blunder epochs NaN (declared)."""
+    from geo_dataread.gps_views import read_gps_view
+
+    pid, _ = _product(settings)
+    clean = settings.view == "cleaned"
+    detrend = terms is not None
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        df = read_gps_view(
+            sta, start, end,
+            view="detrended" if detrend else "raw",
+            terms=terms or "all",
+            clean=clean,
+            params=doc,
+            steps=settings.steps,
+            tType="POS", pos_id=pid, Dir=_pos_dir(settings),
+            uncert=settings.uncert,
+        )  # fmt: skip
+    attrs = dict(df.attrs.get("gps_view", {}))
+    if settings.view == "declared":
+        from gps_parser import outlier_catalogs as _oc
+
+        from geo_dataread.gps_views import station_excluded_epochs
+
+        with warnings.catch_warnings():  # once per station, in the record
+            warnings.simplefilter("ignore")
+            xepochs, xsource = station_excluded_epochs(sta)
+        tt = df["yearf"].to_numpy(dtype=np.float64)
+        idx = list(_oc.match_declared_epochs(tt, np.asarray(xepochs, float)))
+        attrs["excluded_epochs_source"] = xsource
+        attrs["n_flagged"] = len(idx)
+    t = df["yearf"].to_numpy(dtype=np.float64)
+    cols = [f"{c}_detrended" if detrend else c for c in COMPONENTS]
+    missing = [c for c in cols if c not in df.columns]
+    if missing:
+        raise ValueError(
+            f"{sta}: background not removed ({attrs.get('degrade_reason') or missing})"
+        )
+    y = np.vstack([df[c].to_numpy(dtype=np.float64) for c in cols])
+    s = np.vstack([df[f"D{c}"].to_numpy(dtype=np.float64) for c in COMPONENTS])
+    if settings.view == "declared" and idx:
+        y[:, idx] = np.nan
+    if clean and not attrs.get("outlier_abort"):
+        for i, c in enumerate(COMPONENTS):
+            mask = df.get(f"{c}_outlier")
+            if mask is not None:
+                y[i, mask.to_numpy(dtype=bool)] = np.nan
+    return t, y, s, attrs
+
+
+#: the residual k is measured on, by ref: a plate rate still carries the
+#: seasonal slope, so its k must too (only the secular removed)
+K_RESIDUAL = {"plate-periodic": "all", "background": "all", "plate": "secular"}
+#: the k(T) table entry for a station whose seasonal is a regional one
+#: (``seasonal_only`` record): measured by leave-one-out, not on a quiet
+#: span of its own (it has none)
+K_RESIDUAL_REGIONAL = "regional"
+
+
+def station_rate_scales(
+    sta: str,
+    years: Sequence[float],
+    settings: VelocitySettings,
+    *,
+    doc: Mapping[str, Any] | None = None,
+    residual: str = "all",
+) -> tuple[dict[float, FloatArray], dict[str, Any]]:
+    """The station's k(T) for each window length of ``years``, measured on
+    its detrend record's window with ``residual`` of the stored model
+    removed (``"all"``, or ``"secular"`` to keep the seasonal in);
+    ``({}, info)`` when it has no record. A length with too few windows
+    on the quiet span is left out."""
+    from gps_analysis import empirical_rate_scale
+
+    record = _record(doc, sta)
+    if record is None or not record.get("window"):
+        return {}, {"reason": "no record"}
+    if record.get("seasonal_only"):  # no quiet span of its own: not a k station
+        return {}, {"reason": "seasonal-only record"}
+    w0, w1 = (float(v) for v in record["window"])
+    try:
+        t, y, s, _ = _read(sta, w0, w1, settings, terms=residual, doc=doc)
+    except ValueError as exc:
+        return {}, {"reason": str(exc)}
+    out: dict[float, FloatArray] = {}
+    for T in years:
+        rs = empirical_rate_scale(t, y, s, window_years=float(T))
+        if np.all(np.isfinite(rs.k)):
+            out[float(T)] = np.asarray(rs.k, dtype=float)
+    return out, {"quiet_span": [w0, w1], "residual": residual}
+
+
+def station_rate_scale(
+    sta: str,
+    window_years: float,
+    settings: VelocitySettings,
+    *,
+    doc: Mapping[str, Any] | None = None,
+    residual: str = "all",
+) -> tuple[FloatArray | None, dict[str, Any]]:
+    """:func:`station_rate_scales` for one window length; ``(None, info)``
+    when there is no k."""
+    got, info = station_rate_scales(
+        sta, [window_years], settings, doc=doc, residual=residual
+    )
+    if not got:
+        info.setdefault("reason", "too few windows on the quiet span")
+        return None, info
+    return got[float(window_years)], info
+
+
+# ---------------------------------------------------------------------------
+# the k(T) table: the fallback that does not depend on the run
+# ---------------------------------------------------------------------------
+
+#: window lengths of the k(T) table [days]
+K_TABLE_DAYS = (7, 14, 30, 61, 91, 182, 365, 730)
+K_TABLE_SCHEMA = 1
+
+
+def velocity_dir() -> Path:
+    """``velocity_dir`` of postprocess.cfg [PATHS], else
+    :data:`DEFAULT_VELOCITY_DIR`."""
+    try:
+        from gps_parser import ConfigParser
+
+        found = ConfigParser().getPostProcessDir("velocity_dir")
+        if found:
+            return Path(str(found)).expanduser()
+    except Exception:  # noqa: BLE001 - optional key
+        pass
+    return Path(DEFAULT_VELOCITY_DIR).expanduser()
+
+
+def k_table_path(settings: VelocitySettings) -> Path:
+    """``k_table_<frame>.json`` in :func:`velocity_dir`."""
+    from geo_dataread.pos import pos_frame
+
+    return velocity_dir() / f"k_table_{pos_frame(settings.frame)}.json"
+
+
+def build_k_table(
+    stations: Sequence[str],
+    settings: VelocitySettings,
+    *,
+    days: Sequence[int] = K_TABLE_DAYS,
+    progress: Any = None,
+) -> dict[str, Any]:
+    """The per-component median k(T) over every station with a record:
+    for both residuals (``all``: the seasonal removed; ``secular``: kept),
+    at the lengths of ``days``. Deterministic for the same inputs; what a
+    station without a quiet span of its own takes (sigma_method
+    ``empirical_k_table``)."""
+    doc = _params_doc(settings)
+    years = [d / 365.25 for d in days]
+    per: dict[str, dict[float, list[FloatArray]]] = {"all": {}, "secular": {}}
+    used: list[str] = []
+    for sta in sorted({x.upper() for x in stations}):
+        if _record(doc, sta) is None:
+            continue
+        got_any = False
+        for residual in per:
+            got, _info = station_rate_scales(
+                sta, years, settings, doc=doc, residual=residual
+            )
+            for T, k in got.items():
+                per[residual].setdefault(T, []).append(k)
+            got_any |= bool(got)
+        if got_any:
+            used.append(sta)
+        if progress is not None:
+            progress(sta)
+    residuals = {}
+    for residual, by_t in per.items():
+        rows = [(T, np.asarray(by_t[T])) for T in years if T in by_t]
+        residuals[residual] = {
+            "days": [round(T * 365.25) for T, _ in rows],
+            "k": [
+                [round(float(v), 4) for v in np.nanmedian(a, axis=0)] for _, a in rows
+            ],
+            "n_stations": [int(a.shape[0]) for _, a in rows],
+        }
+    pid, frame = _product(settings)
+    return {
+        "schema": K_TABLE_SCHEMA,
+        "frame": frame,
+        "series": pid,
+        "view": settings.view,
+        "uncert": settings.uncert,
+        "stations": used,
+        "residuals": residuals,
+    }
+
+
+def table_k(
+    table: Mapping[str, Any], residual: str, window_years: float
+) -> FloatArray | None:
+    """k at ``window_years`` from a k(T) table, or None when it has no
+    entry for ``residual``."""
+    from gps_analysis import rate_scale_at
+
+    entry = (table.get("residuals") or {}).get(residual)
+    if not entry or not entry.get("days"):
+        return None
+    k = rate_scale_at(
+        window_years, np.asarray(entry["days"], float) / 365.25, entry["k"]
+    )
+    return k if np.all(np.isfinite(k)) else None
+
+
+def load_k_table(
+    settings: VelocitySettings,
+) -> tuple[dict[str, Any] | None, str | None]:
+    """(table, its path + sha256) of the settings, or (None, None)."""
+    if settings.k_table == "none":
+        return None, None
+    path = (
+        Path(settings.k_table).expanduser()
+        if settings.k_table
+        else k_table_path(settings)
+    )
+    if not path.is_file():
+        if settings.k_table:
+            raise FileNotFoundError(f"k table {path} not found")
+        return None, None
+    raw = path.read_bytes()
+    table = json.loads(raw)
+    if table.get("schema") != K_TABLE_SCHEMA:
+        raise ValueError(f"{path}: k table schema {table.get('schema')!r}")
+    _pid, frame = _product(settings)
+    if table.get("frame") != frame:
+        raise ValueError(f"{path}: k table frame {table.get('frame')!r}, not {frame!r}")
+    return table, f"{path}#sha256:{hashlib.sha256(raw).hexdigest()[:16]}"
+
+
+# ---------------------------------------------------------------------------
+# one station
+# ---------------------------------------------------------------------------
+
+
+def _software() -> dict[str, str]:
+    out = {}
+    for pkg in ("geo_dataread", "gps_analysis"):
+        try:
+            out[pkg] = metadata.version(pkg)
+        except metadata.PackageNotFoundError:
+            out[pkg] = "unknown"
+    return out
+
+
+def _fingerprint(
+    t: FloatArray, y: FloatArray, s: FloatArray, extra: Mapping[str, Any]
+) -> str:
+    h = hashlib.sha256()
+    for a in (t, y, s):
+        h.update(np.ascontiguousarray(np.asarray(a, dtype=np.float64)).tobytes())
+    h.update(json.dumps(_jsonable(dict(extra)), sort_keys=True).encode())
+    return h.hexdigest()
+
+
+def _coords(sta: str) -> tuple[float, float]:
+    from gps_parser import ConfigParser
+
+    info = dict(dict(ConfigParser().getStationInfo(sta))["station"])
+    return float(info["longitude"]), float(info["latitude"])
+
+
+def _record_summary(record: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    if record is None:
+        return None
+    borrowed = record.get("borrowed")
+    return {
+        "frame": record.get("frame"),
+        "window": list(record.get("window") or []),
+        "fitted_at": record.get("fitted_at"),
+        "detrend_method": record.get("detrend_method"),
+        "borrowed": (borrowed or {}).get("from") if borrowed else None,
+    }
+
+
+def estimate_station_velocity(
+    sta: str,
+    start: dt.date | dt.datetime | float,
+    end: dt.date | dt.datetime | float,
+    settings: VelocitySettings | None = None,
+    *,
+    doc: Mapping[str, Any] | None = None,
+    k: npt.ArrayLike | None = None,
+    k_method: str | None = None,
+    k_table: tuple[Mapping[str, Any] | None, str | None] | None = None,
+    coords: tuple[float, float] | None = None,
+) -> VelocityRecord:
+    """The velocity of ``sta`` over [start, end]: THE product's estimator.
+
+    Args:
+        sta: Station marker.
+        start, end: The window: dates (whole days, both included,
+            :func:`window_bounds`), datetimes or fractional years.
+        settings: How (:class:`VelocitySettings`); default settings when
+            None.
+        doc: The detrend parameter document of the settings' frame; read
+            when None.
+        k: The rate scale to use, shape (3,); None takes, in order, the
+            station's own (:func:`station_rate_scale`, on the residual of
+            its ref, :data:`K_RESIDUAL`), the k(T) table's
+            (:func:`load_k_table`), ``settings.default_k``.
+        k_method: The ``sigma_method`` a given ``k`` carries.
+        k_table: A loaded ``(table, source)``; None loads the settings'.
+        coords: (lon, lat); stations.cfg when None.
+
+    Never raises for a station-level reason: a station that cannot give a
+    rate comes back ``refused``, with the reason. Raises only on bad
+    arguments.
+    """
+    settings = settings or VelocitySettings()
+    if settings.ref == "pre-onset":
+        return _pre_onset_velocity(
+            sta, start, end, settings, doc=doc, k=k, k_method=k_method,
+            k_table=k_table, coords=coords,
+        )  # fmt: skip
+    sta = sta.upper()
+    t0, t1 = window_bounds(start, end)
+    if not t1 > t0:
+        raise ValueError(f"window end {t1} is not after its start {t0}")
+    pid, frame = _product(settings)
+    if doc is None:
+        doc = _params_doc(settings)
+    record = _record(doc, sta)
+    flags: list[str] = []
+    ref = settings.ref
+    refused: str | None = None
+    if ref in _TERMS and record is None:
+        if settings.no_record == "plate":
+            ref = "plate"
+            flags.append("fallback:plate")
+        else:
+            refused = "no_record"
+    if ref == "plate":
+        flags.append("background:none")
+    regional = record is not None and bool(record.get("seasonal_only"))
+    if regional and ref in _TERMS:
+        if _TERMS[ref] != "periodic":  # its seasonal only: no background to remove
+            refused = f"seasonal_only: {ref} needs a background of the station's own"
+        else:
+            flags.append("seasonal:regional")
+    if record is not None and record.get("borrowed") and ref in _TERMS:
+        flags.append(f"borrowed:{(record['borrowed'] or {}).get('from')}")
+    try:
+        lon, lat = coords if coords is not None else _coords(sta)
+    except Exception:  # gps_parser raises bare Exception for an unknown station
+        lon, lat = np.nan, np.nan
+        flags.append("no_coordinates")
+    from geo_dataread.gps_views import station_step_epochs
+    from geo_dataread.station_catalog import station_plate
+
+    try:
+        step_epochs, _src = station_step_epochs(sta, steps=settings.steps)
+    except (FileNotFoundError, ValueError):
+        step_epochs = np.zeros(0)
+    t = y = s = np.zeros((0,))
+    attrs: dict[str, Any] = {}
+    wr = None
+    data_end: float | None = None
+    if refused is None:
+        try:
+            t, y, s, attrs = _read(
+                sta, t0, t1, settings, terms=_TERMS.get(ref), doc=doc
+            )
+        except (OSError, ValueError) as exc:  # no .pos: FileNotFoundError
+            refused = f"read: {exc}"
+    gate_end = None
+    if refused is None:
+        if attrs.get("outlier_abort"):
+            flags.append("outlier_abort")
+        if settings.view == "declared" and attrs.get("excluded_epochs_source") is None:
+            flags.append("no_excluded_catalog")  # declared fell back to raw
+        data_end = _data_end(sta, t, t1, settings)
+        if data_end is not None:
+            # the data stop inside the window (the processing lag): cover
+            # and T against the data end, not the calendar
+            gate_end = data_end + _HALF_DAY
+            flags.append(f"truncated@{data_end:.4f}")
+        wr = velocity_from_arrays(
+            t, y, s, (t0, t1), step_epochs=step_epochs.tolist(),
+            allow_steps=settings.allow_steps, min_obs=settings.min_obs,
+            min_cover=settings.min_cover, gate_end=gate_end,
+        )  # fmt: skip
+        short = wr.short and settings.short_tier
+        if wr.reasons and not short:
+            refused = "; ".join(wr.reasons)
+        elif wr.steps_in_window:
+            flags.append("steps_in_window")
+    # k at the window's length (its data span when truncated), a week at
+    # least: below that the sliding k is not measured
+    t_len = (min(t1, gate_end) if gate_end is not None else t1) - t0
+    k_years = max(t_len, K_MIN_DAYS / 365.25)
+    k_source: dict[str, Any] = {}
+    residual = K_RESIDUAL[ref]
+    if regional and residual == "all":
+        residual = K_RESIDUAL_REGIONAL
+    if k is not None:
+        kk = np.asarray(k, dtype=float).reshape(3)
+        sigma_method = k_method or "given_k"
+        k_source = {"given": True}
+    else:
+        own: FloatArray | None = None
+        if refused is None and record is not None:
+            own, k_source = station_rate_scale(
+                sta, k_years, settings, doc=doc, residual=residual
+            )
+        table, table_source = k_table if k_table is not None else load_k_table(settings)
+        from_table = table_k(table, residual, k_years) if table is not None else None
+        if from_table is None and residual == K_RESIDUAL_REGIONAL and table is not None:
+            # no regional entry measured yet: the seasonal-kept k, which
+            # bounds it from above (the regional seasonal removes part of it)
+            residual = "secular"
+            from_table = table_k(table, residual, k_years)
+            if from_table is not None and own is None:
+                flags.append("k:regional_fallback")
+        if own is not None:
+            kk, sigma_method = own, "empirical_k"
+        elif from_table is not None:
+            kk, sigma_method = from_table, "empirical_k_table"
+            k_source = {"table": table_source, "residual": residual,
+                        "own": k_source.get("reason")}  # fmt: skip
+            assert table is not None
+            differ = {
+                key: table.get(key)
+                for key, value in (("view", settings.view), ("uncert", settings.uncert))
+                if table.get(key) is not None and table.get(key) != value
+            }
+            if differ:  # a table built on other settings: usable, but say so
+                k_source["table_settings"] = differ
+                flags.append("k_table_settings_differ")
+        else:
+            kk, sigma_method = np.full(3, settings.default_k), "default_k"
+            k_source = {"default_k": settings.default_k, "own": k_source.get("reason")}
+    from gps_analysis import signal_to_noise
+
+    nan3 = np.full(3, np.nan)
+    tier = "standard"
+    parts_refused: dict[str, str] = {}
+    rate_a, formal_a = nan3.copy(), nan3.copy()
+    if wr is not None and refused is None:
+        rate_a = np.asarray(wr.rate, dtype=float).copy()
+        if wr.reasons:  # the short tier: judged on |v|/σ, part by part
+            tier = "short"
+            formal_a = np.asarray(wr.sigma_short, dtype=float).copy()
+        else:
+            formal_a = np.asarray(wr.sigma_formal, dtype=float).copy()
+    sigma_a = formal_a * kk
+    snr = signal_to_noise(rate_a, sigma_a)
+    if tier == "short":
+        assert wr is not None
+        n = wr.n_gate
+        th = settings.short_snr_pair if n < 3 else settings.short_snr
+        for part, idx, value in (("horizontal", [0, 1], snr[0]), ("up", [2], snr[1])):
+            if not (value >= th):  # NaN fails too
+                parts_refused[part] = f"snr={value:.1f}<{th:g}"
+                rate_a[idx] = sigma_a[idx] = formal_a[idx] = np.nan
+        if len(parts_refused) == 2:
+            refused = "; ".join(
+                (*wr.reasons, *(f"{p} {r}" for p, r in parts_refused.items()))
+            )
+            parts_refused = {}
+            tier = "standard"
+            snr = (np.nan, np.nan)
+        else:
+            flags.append(f"short:n={n}")
+    if refused is None and wr is not None:
+        # the F threshold is calibrated up to 61 d and from 7 epochs only
+        long_window = t_len * 365.25 > NONLINEAR_MAX_DAYS + 0.5
+        comps = [] if long_window else [
+            name for c, (name, f) in enumerate(zip("NEU", wr.f_quadratic, strict=True))
+            if np.isfinite(rate_a[c]) and wr.n_epochs[c] >= NONLINEAR_MIN_OBS
+            and f >= NONLINEAR_F
+        ]  # fmt: skip
+        if comps:
+            flags.append(f"nonlinear:{''.join(comps)}")
+    else:
+        rate_a, formal_a, sigma_a = nan3.copy(), nan3.copy(), nan3.copy()
+    rate = tuple(float(v) for v in rate_a)
+    formal = tuple(float(v) for v in formal_a)
+    sigma = tuple(float(v) for v in sigma_a)
+    fitted = wr is not None and refused is None
+    fp_extra = {"settings": dataclasses.asdict(settings), "ref": ref,
+                "window": [t0, t1], "record": _record_summary(record),
+                "k": [float(v) for v in kk], "sigma_method": sigma_method,
+                "k_source": k_source, "data_end": data_end,
+                "excluded_epochs_source": attrs.get("excluded_epochs_source")}  # fmt: skip
+    return VelocityRecord(
+        station=sta,
+        lon=float(lon),
+        lat=float(lat),
+        frame=frame,
+        plate=station_plate(sta),
+        ref=ref,
+        ref_requested=settings.ref,
+        series=pid,
+        view=settings.view,
+        uncert=float(settings.uncert),
+        window=(t0, t1),
+        span_used=wr.span_used if wr else None,
+        n_epochs=wr.n_epochs if wr else (0, 0, 0),
+        largest_gap=wr.largest_gap if wr else None,
+        method="wls",
+        model="linear",
+        rate=rate,  # type: ignore[arg-type]
+        sigma=sigma,  # type: ignore[arg-type]
+        sigma_formal=formal,  # type: ignore[arg-type]
+        sigma_method=sigma_method,
+        k=tuple(float(v) for v in kk),  # type: ignore[arg-type]
+        k_source=k_source,
+        corr_en=0.0 if refused is None else np.nan,
+        record=_record_summary(record) if ref in _TERMS else None,
+        steps_in_window=wr.steps_in_window if wr else (),
+        outlier_abort=bool(attrs.get("outlier_abort", False)),
+        n_flagged=int(attrs.get("n_flagged") or 0),
+        flags=tuple(flags),
+        refused=refused,
+        software=_software(),
+        input_fingerprint=_fingerprint(t, y, s, fp_extra),
+        tier=tier,
+        snr=(float(snr[0]), float(snr[1])) if fitted else (np.nan, np.nan),
+        chi2nu=tuple(float(v) for v in wr.chi2nu) if fitted and wr else (np.nan,) * 3,  # type: ignore[arg-type]
+        f_quadratic=(
+            tuple(float(v) for v in wr.f_quadratic) if fitted and wr else (np.nan,) * 3  # type: ignore[arg-type]
+        ),
+        parts_refused=parts_refused,
+        data_end=data_end,
+    )
+
+
+#: half a day [yr]: a noon epoch's day ends this much after it
+_HALF_DAY = 0.5 / 365.25
+
+
+def _vec3(a: npt.ArrayLike) -> tuple[float, float, float]:
+    x, y, z = (float(v) for v in np.asarray(a, dtype=float).reshape(3))
+    return x, y, z
+
+
+def _pre_onset_velocity(
+    sta: str,
+    start: dt.date | dt.datetime | float,
+    end: dt.date | dt.datetime | float,
+    settings: VelocitySettings,
+    **kw: Any,
+) -> VelocityRecord:
+    """Ref ``pre-onset``: the window's :data:`PRE_ONSET_BASE` rate less the
+    station's own over ``settings.pre_window``.
+
+    The window is estimated exactly as a ``plate-periodic`` record (its
+    gates, short tier and k); the pre-window likewise but on the standard
+    tier alone, no step allowed inside. rate = v_win − v_pre, σ = √(σ_win²
+    + σ_pre²) per component (k: σ over the formal σ in quadrature). The
+    short tier's part decisions stay those of the window's own fit (what
+    its false-accept rates were measured on); ``snr`` is the relative
+    rate's, and a part it puts under the short-tier threshold is flagged
+    ``short:pre_snr<…``. A refused pre-window refuses the record
+    (``pre_onset: …``) and clears the window's short-tier state.
+    No neighbour's pre-rate is borrowed: a station without data before the
+    onset has no pre-onset rate. A station without a stored seasonal
+    (``fallback:plate``) is flagged ``seasonal:none``: its pre-window rate
+    aliases the seasonal, its k (seasonal kept) says how much.
+
+    Raises:
+        ValueError: the pre-window does not start before the window.
+    """
+    from gps_analysis import signal_to_noise
+
+    assert settings.pre_window is not None
+    base = dataclasses.replace(settings, ref=PRE_ONSET_BASE, pre_window=None)
+    win = estimate_station_velocity(sta, start, end, base, **kw)
+    pre_settings = dataclasses.replace(base, short_tier=False, allow_steps=False)
+    p0, p1 = settings.pre_window
+    if p0 >= win.window[0]:
+        raise ValueError(
+            f"pre_window starts at {p0:.4f}, not before the window ({win.window[0]:.4f})"
+        )
+    # a caller's k is the window's (its length); the pre-window takes its own
+    pre_kw = {key: v for key, v in kw.items() if key not in ("k", "k_method")}
+    pre = estimate_station_velocity(sta, p0, p1, pre_settings, **pre_kw)
+    flags = list(win.flags)
+    flags.append("pre_onset")
+    if win.ref == "plate":
+        flags.append("seasonal:none")
+    if p1 > win.window[0] + 1e-9:
+        flags.append("pre_overlap")  # the two rates share epochs: σ is high
+    refused = win.refused
+    if refused is None and pre.refused is not None:
+        refused = f"pre_onset: {pre.refused}"
+    short_state: dict[str, Any] = {}
+    if refused is not None and win.refused is None:  # clear the window's short tier
+        flags = [f for f in flags if not f.startswith(("short:", "nonlinear"))]
+        nan3 = (math.nan, math.nan, math.nan)
+        short_state = {"tier": "standard", "parts_refused": {}, "chi2nu": nan3,
+                       "f_quadratic": nan3}  # fmt: skip
+    Vec3 = tuple[float, float, float]
+    rate: Vec3 = (math.nan, math.nan, math.nan)
+    sigma, formal, k = rate, rate, rate
+    snr: tuple[float, float] = (math.nan, math.nan)
+    if refused is None:
+        v = np.asarray(win.rate) - np.asarray(pre.rate)
+        sg = np.hypot(win.sigma, pre.sigma)
+        fm = np.hypot(win.sigma_formal, pre.sigma_formal)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            kk = np.where(fm > 0, sg / fm, np.nan)
+        rate, sigma, formal, k = (_vec3(x) for x in (v, sg, fm, kk))
+        snr = signal_to_noise(v, sg)
+        if win.tier == "short":
+            n = next(int(f[8:]) for f in flags if f.startswith("short:n="))
+            th = settings.short_snr_pair if n < 3 else settings.short_snr
+            low = [p for p, x in zip(("horizontal", "up"), snr, strict=True)
+                   if p not in win.parts_refused and not x >= th]  # fmt: skip
+            if low:
+                flags.append(f"short:pre_snr<{th:g}:{','.join(low)}")
+    pre_summary = {
+        "window": list(pre.window), "rate": list(pre.rate), "sigma": list(pre.sigma),
+        "sigma_formal": list(pre.sigma_formal), "k": list(pre.k),
+        "sigma_method": pre.sigma_method, "k_source": pre.k_source,
+        "n_epochs": list(pre.n_epochs),
+        "span_used": list(pre.span_used) if pre.span_used else None,
+        "ref": pre.ref, "refused": pre.refused, "flags": list(pre.flags),
+        "input_fingerprint": pre.input_fingerprint,
+    }  # fmt: skip
+    h = hashlib.sha256()
+    for part in ("pre-onset", win.input_fingerprint, pre.input_fingerprint):
+        h.update(part.encode())
+    return dataclasses.replace(
+        win, ref="pre-onset", ref_requested=settings.ref,
+        rate=rate, sigma=sigma, sigma_formal=formal, k=k,
+        sigma_method=f"pre_onset({win.sigma_method}, {pre.sigma_method})",
+        corr_en=0.0 if refused is None else math.nan,
+        flags=tuple(flags), refused=refused,
+        snr=(float(snr[0]), float(snr[1])), pre_onset=pre_summary,
+        input_fingerprint=h.hexdigest(), **short_state,
+    )  # fmt: skip
+
+
+def _data_end(
+    sta: str, t: FloatArray, end: float, settings: VelocitySettings
+) -> float | None:
+    """The station's last epoch when the data stop before ``end`` by more
+    than a day (the processing lag at the head of the series), else None.
+    Reads past the window only when its epochs stop early."""
+    last = float(np.nanmax(t)) if np.size(t) and np.isfinite(t).any() else -np.inf
+    if last + 1.5 / 365.25 >= end:
+        return None
+    import geo_dataread.gps_read as gpsr
+
+    pid, _ = _product(settings)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        try:
+            tt, *_ = gpsr.getData(  # type: ignore[no-untyped-call]
+                sta, fstart=end - 1.5 / 365.25 if last == -np.inf else last,
+                fend=None, ref="plate", Dir=_pos_dir(settings), tType="POS",
+                uncert=settings.uncert, pos_id=pid,
+            )  # fmt: skip
+        except (OSError, ValueError):
+            return None
+    later = np.asarray(tt if tt is not None else [], dtype=float)
+    later = later[np.isfinite(later) & (later > last)]
+    if later.size:  # data go on after the window's last epoch: a gap, not the end
+        return None
+    return last if np.isfinite(last) else None
+
+
+# ---------------------------------------------------------------------------
+# a run
+# ---------------------------------------------------------------------------
+
+
+def estimate_velocities(
+    stations: Sequence[str],
+    start: dt.date | dt.datetime | float,
+    end: dt.date | dt.datetime | float,
+    settings: VelocitySettings | None = None,
+    *,
+    progress: Any = None,
+) -> list[VelocityRecord]:
+    """Every station over one window, sorted by station.
+
+    Each record depends on its station, the settings and the k(T) table
+    named in its ``k_source`` (:func:`build_k_table`), never on which other
+    stations are in the run. The table is a file: a host without it falls
+    back to ``default_k``, which ``sigma_method`` says.
+    """
+    settings = settings or VelocitySettings()
+    doc = _params_doc(settings)
+    table = load_k_table(settings)
+    out = []
+    for sta in sorted({x.upper() for x in stations}):
+        r = estimate_station_velocity(sta, start, end, settings, doc=doc, k_table=table)
+        out.append(r)
+        if progress is not None:
+            progress(r)
+    return out
+
+
+# the files and the command line live beside the core (gpsprod step 3);
+# their names stay reachable from here, and so from geo_dataread.velocity,
+# loaded on first use (they import the core, so not at import time)
+_MOVED = {
+    "velocity_files": (
+        "CSV_COLUMNS", "_fmt", "read_velocity_records", "set_name",
+        "write_velocity_set",
+    ),
+    "velocity_cli": (
+        "_box", "_date", "_k_table_main", "_show", "_window", "build_parser",
+        "main", "select_stations",
+    ),
+}  # fmt: skip
+
+
+def __getattr__(name: str) -> Any:
+    import importlib
+
+    for module, names in _MOVED.items():
+        if name in names:
+            return getattr(
+                importlib.import_module(f"geo_dataread.products.{module}"), name
+            )
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+__all__ = [
+    "COMPONENTS", "DEFAULT_K", "K_RESIDUAL", "K_TABLE_DAYS", "REFS",
+    "SCHEMA_VERSION", "VIEWS", "VelocityRecord", "VelocitySettings",
+    "WindowRate", "build_k_table", "estimate_station_velocity",
+    "estimate_velocities", "k_table_path", "load_k_table",
+    "station_rate_scale", "station_rate_scales", "table_k", "velocity_dir",
+    "velocity_from_arrays", "window_bounds", "yearf",
+]  # fmt: skip

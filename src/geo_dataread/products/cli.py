@@ -133,7 +133,7 @@ def select(
         if want_all or not picked:
             # the network's own stations (stations.cfg), not the global
             # IGS sites the .pos products also carry
-            from geo_dataread.velocity import select_stations
+            from geo_dataread.products.velocity_cli import select_stations
 
             picked |= found & set(select_stations([], None))
         else:  # a box narrows the named stations
@@ -363,7 +363,8 @@ def _displacement(args: argparse.Namespace) -> int:
         f"{src.session} ref {src.ref} view {src.view} method {args.method}"
     )
     if args.as_velocity:
-        from geo_dataread.velocity import _show, write_velocity_set
+        from geo_dataread.products.velocity_cli import _show
+        from geo_dataread.products.velocity_files import write_velocity_set
 
         vel = [to_velocity(r) for r in rs]
         if args.out:

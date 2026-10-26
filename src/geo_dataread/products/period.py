@@ -21,7 +21,7 @@ import datetime as dt
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
-from geo_dataread.velocity import last_days_start, window_bounds
+from geo_dataread.products.velocity_core import last_days_start, window_bounds
 
 if TYPE_CHECKING:
     from geo_dataread.events import Event
