@@ -133,6 +133,28 @@ def displacement_from_view(
             return {}, flags, f"step_in_end_window@{_iso(e)}"
     if any(p0 < float(e) < p1 for e in step_epochs):
         flags.append("steps_in_period")
+    for key, (lo, hi) in (("start", w_start), ("end", w_end)):
+        if not ((finite >= lo) & (finite < hi)).any():
+            if key == "start":
+                near = finite[finite >= lo]
+                hint = (
+                    f"; first data after it {_iso(float(near[0]))}" if near.size else ""
+                )
+            else:
+                near = finite[finite < hi]
+                hint = (
+                    f"; last data before it {_iso(float(near[-1]))}"
+                    if near.size
+                    else ""
+                )
+            return (
+                {},
+                flags,
+                (
+                    f"no epochs in the {key} window "
+                    f"{_iso(lo)}..{_iso(hi - DAY_YEARS)}{hint}"
+                ),
+            )
     disp, sig = [], []
     ends: dict[str, Any] = {
         "days": n_days,

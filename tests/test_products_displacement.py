@@ -146,6 +146,12 @@ def test_refusals() -> None:
     assert displacement_from_view(v, (2024.0, 2024.1), s)[2] == (
         "no east epochs in the start window"
     )
+    v.y[:, :10] = np.nan  # no component: the window dates and the nearest data
+    msg = displacement_from_view(v, (2024.0, 2024.1), s)[2]
+    assert msg and msg.startswith(
+        "no epochs in the start window 2024-01-01..2024-01-05"
+    )
+    assert "first data after it 2024-01-11" in msg
 
 
 def test_settings_validate() -> None:
