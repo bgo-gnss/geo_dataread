@@ -103,6 +103,11 @@ DEFAULT_K = 5.0
 DEFAULT_FRAME = "itrf2014"
 DEFAULT_UNCERT = 10.0
 DEFAULT_VELOCITY_DIR = "~/gps-data/velocities"
+#: solution sessions and their length [days] (gpsprod step 3)
+SESSION_DAYS = {"24h": 1.0, "8h": 1.0 / 3.0}
+#: settings and record fields added after schema 3, left out of the
+#: fingerprint and the JSON at their defaults so earlier sets stay byte-equal
+_LATER_DEFAULTS: dict[str, Any] = {"session": "24h", "relative_to": None}
 #: decimals written to the text formats
 _RATE_DECIMALS = 3
 _COORD_DECIMALS = 6
@@ -174,14 +179,23 @@ class VelocityRecord:
     #: (window, rate, sigma, sigma_formal, k, sigma_method, k_source, n_epochs,
     #: ref, refused, flags, input_fingerprint); None otherwise
     pre_onset: dict[str, Any] | None = None
+    #: solution session (gpsprod step 3; omitted from JSON when "24h")
+    session: str = "24h"
+    #: the station the series was differenced against (omitted when None)
+    relative_to: str | None = None
 
     @property
     def accepted(self) -> bool:
         return self.refused is None
 
     def to_dict(self) -> dict[str, Any]:
-        """JSON-ready: NaN → None, tuples → lists."""
-        return {k: _jsonable(v) for k, v in dataclasses.asdict(self).items()}
+        """JSON-ready: NaN → None, tuples → lists. ``session`` and
+        ``relative_to`` only when not at their defaults."""
+        return {
+            k: _jsonable(v)
+            for k, v in dataclasses.asdict(self).items()
+            if not (k in _LATER_DEFAULTS and v == _LATER_DEFAULTS[k])
+        }
 
     @classmethod
     def from_dict(cls, d: Mapping[str, Any]) -> VelocityRecord:
@@ -254,8 +268,14 @@ class VelocitySettings:
     #: ref pre-onset: the reference window before the onset, fractional
     #: years, half open (:func:`window_bounds`)
     pre_window: tuple[float, float] | None = None
+    #: solution session, "24h" or "8h" (gpsprod step 3; the .pos product id)
+    session: str = "24h"
+    #: a baseline: every station's series minus this station's (gpsprod)
+    relative_to: str | None = None
 
     def __post_init__(self) -> None:
+        if self.session not in SESSION_DAYS:
+            raise ValueError(f"session must be one of {tuple(SESSION_DAYS)}")
         if self.ref not in REFS:
             raise ValueError(f"ref must be one of {REFS}, got {self.ref!r}")
         if (self.ref == "pre-onset") != (self.pre_window is not None):
@@ -424,7 +444,7 @@ def _product(settings: VelocitySettings) -> tuple[str, str]:
     """(pos product id, the frame's full name) of the settings."""
     from geo_dataread.pos import frame_name, pos_product
 
-    return pos_product(settings.frame), frame_name(settings.frame)
+    return pos_product(settings.frame, settings.session), frame_name(settings.frame)
 
 
 def _params_doc(settings: VelocitySettings) -> Mapping[str, Any] | None:
@@ -461,6 +481,8 @@ def _read(
     """(t, y (3,N), σ (3,N), view attrs) of one station: plate removed, the
     ``terms`` of its stored record removed (None: none), outliers NaN
     (cleaned) or the declared blunder epochs NaN (declared)."""
+    if settings.session != "24h" or settings.relative_to:
+        return _read_product(sta, start, end, settings, terms=terms, doc=doc)
     from geo_dataread.gps_views import read_gps_view
 
     pid, _ = _product(settings)
@@ -508,6 +530,36 @@ def _read(
             if mask is not None:
                 y[i, mask.to_numpy(dtype=bool)] = np.nan
     return t, y, s, attrs
+
+
+_TERMS_REF = {None: "plate", "periodic": "plate-periodic", "all": "background"}
+
+
+def _read_product(
+    sta: str,
+    start: float,
+    end: float,
+    settings: VelocitySettings,
+    *,
+    terms: str | None,
+    doc: Mapping[str, Any] | None,
+) -> tuple[FloatArray, FloatArray, FloatArray, dict[str, Any]]:
+    """:func:`_read` of an 8 h series or a baseline: gpsprod's read path
+    (:func:`geo_dataread.products.loader.load`)."""
+    from geo_dataread.products.loader import Source, load
+
+    if terms not in _TERMS_REF:
+        raise ValueError(f"terms {terms!r}: not for an 8 h series or a baseline")
+    src = Source(
+        frame=settings.frame, session=settings.session, view=settings.view,
+        ref=_TERMS_REF[terms], uncert=settings.uncert, pos_dir=settings.pos_dir,
+        params=settings.params, steps=settings.steps,
+        relative_to=settings.relative_to,
+    )  # fmt: skip
+    view = load(sta, start, end, src, doc=doc)
+    attrs = dict(view.attrs)
+    attrs["product_flags"] = list(view.flags)
+    return view.t, view.y, view.sigma, attrs
 
 
 #: the residual k is measured on, by ref: a plate rate still carries the
@@ -720,6 +772,16 @@ def _fingerprint(
     return h.hexdigest()
 
 
+def _fingerprint_settings(settings: VelocitySettings) -> dict[str, Any]:
+    """The settings as hashed: the later fields only when not at their
+    defaults, so a schema-3 record keeps its fingerprint."""
+    return {
+        k: v
+        for k, v in dataclasses.asdict(settings).items()
+        if not (k in _LATER_DEFAULTS and v == _LATER_DEFAULTS[k])
+    }
+
+
 def _coords(sta: str) -> tuple[float, float]:
     from gps_parser import ConfigParser
 
@@ -846,6 +908,8 @@ def estimate_station_velocity(
             t, y, s, (t0, t1), step_epochs=step_epochs.tolist(),
             allow_steps=settings.allow_steps, min_obs=settings.min_obs,
             min_cover=settings.min_cover, gate_end=gate_end,
+            **({} if settings.session == "24h"
+               else {"epoch_span": SESSION_DAYS[settings.session] / 365.25}),
         )  # fmt: skip
         short = wr.short and settings.short_tier
         if wr.reasons and not short:
@@ -866,11 +930,21 @@ def estimate_station_velocity(
         k_source = {"given": True}
     else:
         own: FloatArray | None = None
-        if refused is None and record is not None:
+        # a baseline's or an 8 h series' k is not measured yet: not the
+        # station's own (its noise is not the baseline's); an 8 h series
+        # takes no 24 h table either
+        if settings.relative_to:
+            flags.append("k:baseline_unmeasured")
+        elif settings.session != "24h":
+            flags.append("k:session_unmeasured")
+        elif refused is None and record is not None:
             own, k_source = station_rate_scale(
                 sta, k_years, settings, doc=doc, residual=residual
             )
-        table, table_source = k_table if k_table is not None else load_k_table(settings)
+        table, table_source = (
+            (None, None) if settings.session != "24h"
+            else k_table if k_table is not None else load_k_table(settings)
+        )  # fmt: skip
         from_table = table_k(table, residual, k_years) if table is not None else None
         if from_table is None and residual == K_RESIDUAL_REGIONAL and table is not None:
             # no regional entry measured yet: the seasonal-kept k, which
@@ -945,7 +1019,7 @@ def estimate_station_velocity(
     formal = tuple(float(v) for v in formal_a)
     sigma = tuple(float(v) for v in sigma_a)
     fitted = wr is not None and refused is None
-    fp_extra = {"settings": dataclasses.asdict(settings), "ref": ref,
+    fp_extra = {"settings": _fingerprint_settings(settings), "ref": ref,
                 "window": [t0, t1], "record": _record_summary(record),
                 "k": [float(v) for v in kk], "sigma_method": sigma_method,
                 "k_source": k_source, "data_end": data_end,
@@ -982,6 +1056,8 @@ def estimate_station_velocity(
         refused=refused,
         software=_software(),
         input_fingerprint=_fingerprint(t, y, s, fp_extra),
+        session=settings.session,
+        relative_to=settings.relative_to.upper() if settings.relative_to else None,
         tier=tier,
         snr=(float(snr[0]), float(snr[1])) if fitted else (np.nan, np.nan),
         chi2nu=tuple(float(v) for v in wr.chi2nu) if fitted and wr else (np.nan,) * 3,  # type: ignore[arg-type]

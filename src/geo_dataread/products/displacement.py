@@ -302,9 +302,9 @@ def _velocity_settings(src: Source, ref: str | None = None) -> VelocitySettings:
     from geo_dataread.products.velocity_core import VelocitySettings
 
     return VelocitySettings(
-        frame=src.frame, ref=ref or "plate-periodic", view=src.view,
+        frame=src.frame_name, ref=ref or "plate-periodic", view=src.view,
         uncert=src.uncert, pos_dir=src.pos_dir, params=src.params,
-        steps=src.steps,
+        steps=src.steps, session=src.session, relative_to=src.relative_to,
     )  # fmt: skip
 
 
@@ -652,8 +652,6 @@ def _rate_record(
     why = None
     if src.ref not in VELOCITY_REFS:
         why = f"rate: ref {src.ref} is not a velocity product ref {VELOCITY_REFS}"
-    elif src.session != "24h" or src.relative_to:
-        why = "rate: 8 h series and --relative-to arrive with gpsprod step 3"
     if why is not None:
         return DisplacementRecord(**base, ref=src.ref, refused=why)
     vrec = estimate_station_velocity(
