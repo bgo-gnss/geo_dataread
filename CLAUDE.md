@@ -52,7 +52,8 @@ geo_dataread/
 │   ├── pos.py            # numpy-only PBO .pos reader (tssum output, okada /D/SNX/pos): PosSeries (XYZ/NEU + σ + correlations, GLOBK yearf); openGlobkTimes(tType="POS") reads it in place of mb_ files; POS_PRODUCTS = imo.daily_itr08 (okada) / imo.daily_igb14 (realign) / imo.final_igb20 (gamit-p01 finals, alias igb20 = itrf2020)
 │   ├── station_catalog.py # platefile/coordFile lookups + plate_velocity_neu (N,E,U via geofunc.plates; replaces gf.plateVelo's E,N,U + the swap in _remove_plate_velocity) (typed)
 │   ├── gps_write.py      # cleaned .NEU writer: gamittoNEU→gamittoFile, union-drop + .prov.json sidecar; steps.csv→step_epochs + protect_windows.csv (unrest lever) + outlier_overrides.csv (per-station levers incl. per-component min_outlier floor [N,E,U]); degrade → _cleaned.DEGRADED.NEU (typed, mypy-strict)
-│   ├── gps_displ.py      # displacements / station-relative motion
+│   ├── products/         # gpsprod (PLAN-gpsprod.md, docs/gpsprod.md): loader.load (THE product read path: Source frame/session/view/ref, relative_to via baseline()), displacement (ends: end levels, max-of-three σ, N≤2 neighbour check), period, files (csv/jsonl byte-stable), cli (gpsprod; gps-displacemnts alias) (typed)
+│   ├── gps_displ.py      # legacy simpleDisp (CLI retired → gpsprod displacement; module removed in gpsprod step 6)
 │   ├── gps_savetimes.py  # serialise time series to disk (gps-savetimes; --clean also-writes cleaned .NEU)
 │   ├── globk_join.py     # GLOBK multibase segment read + datum-consistent join (10 m de-wrap, min-σ dedup) + mb_STA_TOT.dat writer (format_tot_file/write_joined_series, 3-line-header contract) (typed, mypy-strict)
 │   ├── globk_tot.py      # gps-globk-tot CLI: batch pre/rap → local TOT dir; per-station segment-exclusion catalog (segment_exclusions.csv) + declared non-quantum junction offsets (junction_offsets.csv, e.g. GUSK U +1.093 m for a stale station.info height), both deployed via gps_parser outlier_catalogs; --exclusions / --junction-offsets dev overrides; reason mandatory (typed, mypy-strict)
@@ -133,7 +134,8 @@ These verdicts are UNSTABLE by nature — they resolve as epochs arrive.
 ```bash
 geo-dataread          # entry: geo_dataread:main
 gps-savetimes ...     # entry: geo_dataread.gps_savetimes:main
-gps-displacemnts ...  # entry: geo_dataread.gps_displ:main   (sic — typo preserved verbatim from pyproject.toml)
+gpsprod displacement STA… --since D [--ends N] [--relative-to STA] [-o d.csv] # station motion products (docs/gpsprod.md)
+gps-displacemnts ...  # alias → gpsprod displacement (sic — typo preserved)
 gps-globk-tot ...     # entry: geo_dataread.globk_tot:main — batch GLOBK pre/rap segments → local mb_STA_TOT.dat{1,2,3} (deployed segment_exclusions.csv + junction_offsets.csv; --exclusions / --junction-offsets dev overrides)
 gps-realign --start D --end D --frame igb14|itrf2008 [--to itrf2020] --out DIR [-j N] # re-align the loose SINEX archive → per-station .pos
 gps-baseline-noise [--dir TOT] [--window-years 2] # refit the empirical baseline-σ record (cron-able, ~4 s)
@@ -149,12 +151,13 @@ gps-estimate-detrend ... # entry: geo_dataread.detrend_estimate:main — batch d
 - `../CLAUDE.md` — ecosystem overview + dependency graph
 - `../geofunc/CLAUDE.md` — coordinate-math primitives this package consumes
 - `../gps_parser/CLAUDE.md` — station-config provider
+- `docs/gpsprod.md` — gpsprod products (displacement; velocity/coords/series to come)
 - `docs/velocity-product.md` — the velocity product: decisions, gates, k(T) table, schema, phase 2 questions
 - Vault hub: `/home/bgo/notes/bgovault/2.Areas/VI_GPS_Library/1776347706-gps-library-ecosystem-hub.md`
 
 ---
 
-*Last reviewed: 2026-10-22 (fit_windows.csv frame column: a row scoped to one ITRF frame). Previous 2026-10-21 (network_days: whole-network bad solution days, in the cleaned view, the writer and the estimator). Previous 2026-10-20 (snow_burial: the snow-burial index beside icing, in the cleaned view, the writer and the estimator). Previous 2026-10-19 (events: the event catalog reader; cleaned view dispatches the running-window detector; autcln_stats: the GAMIT icing index). Previous 2026-10-16 (velocity: the velocity product, phase 1 windowed). Previous 2026-10-14 (rtk_read: RTK baselines for gpsplot rtk; gps_views.window_datum_shift, for gpsplot ts --model). Previous 2026-10-13 (pos: products = itr08/igb14/final_igb20; itrf2020 now names gamit-p01's IGb20). Previous 2026-10-12 (stabilize/org: glorg stabilization on the loose SINEX; station_catalog: plate velocity via geofunc.plates). Previous 2026-10-10 (pos.py: .pos reader + tType="POS"; write_pos 2026-10-12). Previous 2026-10-09 (baseline_noise + sinex modules; baseline() opt-in rho=/sigma_scale=). Previous 2026-08-26 (re-anchoring now covers BOTH hold kinds:
+*Last reviewed: 2026-10-26 (products/: gpsprod step 1, displacement ends). Previous 2026-10-22 (fit_windows.csv frame column: a row scoped to one ITRF frame). Previous 2026-10-21 (network_days: whole-network bad solution days, in the cleaned view, the writer and the estimator). Previous 2026-10-20 (snow_burial: the snow-burial index beside icing, in the cleaned view, the writer and the estimator). Previous 2026-10-19 (events: the event catalog reader; cleaned view dispatches the running-window detector; autcln_stats: the GAMIT icing index). Previous 2026-10-16 (velocity: the velocity product, phase 1 windowed). Previous 2026-10-14 (rtk_read: RTK baselines for gpsplot rtk; gps_views.window_datum_shift, for gpsplot ts --model). Previous 2026-10-13 (pos: products = itr08/igb14/final_igb20; itrf2020 now names gamit-p01's IGb20). Previous 2026-10-12 (stabilize/org: glorg stabilization on the loose SINEX; station_catalog: plate velocity via geofunc.plates). Previous 2026-10-10 (pos.py: .pos reader + tType="POS"; write_pos 2026-10-12). Previous 2026-10-09 (baseline_noise + sinex modules; baseline() opt-in rho=/sigma_scale=). Previous 2026-08-26 (re-anchoring now covers BOTH hold kinds:
 `donor:` (a finished record in detrend_params.json) carried the donor's datum
 exactly as `store:` did — measured, THOB holding SENG via donor: sat
 +75.3/-34.3/-124.6 mm off its own data and ignored --anchor-window entirely.

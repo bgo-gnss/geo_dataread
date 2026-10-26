@@ -33,7 +33,8 @@ dev = [
 [project.scripts]
 geo-dataread = "geo_dataread:main"
 gps-savetimes = "geo_dataread.gps_savetimes:main"
-gps-displacemnts = "geo_dataread.gps_displ:main"
+gps-displacemnts = "geo_dataread.products.cli:displacemnts_alias"
+gpsprod = "geo_dataread.products.cli:main"
 gps-globk-tot = "geo_dataread.globk_tot:main"
 gps-estimate-detrend = "geo_dataread.detrend_estimate:main"
 gps-realign = "geo_dataread.realign:main"
