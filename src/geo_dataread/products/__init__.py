@@ -25,6 +25,7 @@ from geo_dataread.products.displacement import (
 )
 from geo_dataread.products.loader import Source, StationView, load
 from geo_dataread.products.period import Period, resolve_period
+from geo_dataread.products.secular import SecularRate, secular_rate
 
 __all__ = [
     "SCHEMA_VERSION",
@@ -32,6 +33,7 @@ __all__ = [
     "DisplacementSettings",
     "Period",
     "RecordSet",
+    "SecularRate",
     "Source",
     "StationView",
     "displacement_from_view",
@@ -39,4 +41,5 @@ __all__ = [
     "estimate_station_displacement",
     "load",
     "resolve_period",
+    "secular_rate",
 ]
