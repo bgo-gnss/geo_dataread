@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import sys
 from collections.abc import Sequence
+from typing import Any
 from pathlib import Path
 
 from geo_dataread.products.common import REFS, SESSIONS, VIEWS
@@ -24,9 +25,13 @@ from geo_dataread.products.period import resolve_period
 
 TOP_EPILOG = """\
 subcommands:
-  displacement   how far stations moved across a period (ends | step | rate)
+  displacement   how far stations moved across a period (ends | points | step | rate)
+  velocity       the velocity product: a rate per station over a period
+  k-table        build the k(T) table the velocity σ falls back on
+  show           print a saved velocity set (.jsonl)
 
   gpsprod displacement --help    every option, with examples
+  gpsprod velocity --help
 
 The library behind it: from geo_dataread import products  (docs/gpsprod.md)
 """
@@ -133,7 +138,7 @@ def select(
         if want_all or not picked:
             # the network's own stations (stations.cfg), not the global
             # IGS sites the .pos products also carry
-            from geo_dataread.velocity import select_stations
+            from geo_dataread.products.velocity_cli import select_stations
 
             picked |= found & set(select_stations([], None))
         else:  # a box narrows the named stations
@@ -141,7 +146,28 @@ def select(
     return sorted(picked)
 
 
-def _common(p: argparse.ArgumentParser) -> None:
+REF_HELP = (
+    "plate-periodic (default: plate and the stored seasonal removed), "
+    "background (the whole stored trajectory removed), plate (plate only), "
+    "itrf (the raw frame)"
+)
+VELOCITY_REF_HELP = (
+    "plate-periodic (default: plate removed, the stored seasonal removed), "
+    "background (the whole stored trajectory removed: the transient), plate "
+    "(plate only), pre-onset (plate-periodic less the station's own rate over "
+    "--pre-window)"
+)
+
+
+def _common(
+    p: argparse.ArgumentParser,
+    *,
+    refs: Sequence[str] = REFS,
+    ref_help: str = REF_HELP,
+    uncert_help: str = "",
+    out_help: str = "write FILE.csv or FILE.jsonl (default: a table on screen)",
+    units: bool = True,
+) -> None:
     g = p.add_argument_group("stations")
     g.add_argument(
         "stations", nargs="*",
@@ -183,10 +209,7 @@ def _common(p: argparse.ArgumentParser) -> None:
         help="solution session (default 24h; 8h only where 8 h series exist)",
     )  # fmt: skip
     g.add_argument(
-        "--ref", choices=REFS,
-        help="plate-periodic (default: plate and the stored seasonal removed), "
-        "background (the whole stored trajectory removed), plate (plate only), "
-        "itrf (the raw frame)",
+        "--ref", choices=refs, help=ref_help,
     )  # fmt: skip
     g.add_argument(
         "--keep-seasonal", action="store_true",
@@ -198,8 +221,8 @@ def _common(p: argparse.ArgumentParser) -> None:
     )  # fmt: skip
     g.add_argument(
         "-u", "--uncert", type=float, metavar="MM",
-        help="drop solutions with a formal σ above MM. Default 100 for "
-        "displacements (an event day is noisy but wanted; its σ is carried), "
+        help=uncert_help or "drop solutions with a formal σ above MM. Default 100 "
+        "for displacements (an event day is noisy but wanted; its σ is carried), "
         "10 for --method rate (the velocity product's)",
     )  # fmt: skip
     g.add_argument(
@@ -216,13 +239,11 @@ def _common(p: argparse.ArgumentParser) -> None:
         "--steps", metavar="FILE", help="steps catalog (default the deployed steps.csv)"
     )
     g = p.add_argument_group("output")
-    g.add_argument(
-        "-o", "--out", metavar="FILE",
-        help="write FILE.csv or FILE.jsonl (default: a table on screen)",
-    )  # fmt: skip
-    g.add_argument(
-        "--units", choices=("mm", "m"), default="mm", help="mm (default) or m"
-    )
+    g.add_argument("-o", "--out", metavar="FILE", help=out_help)
+    if units:
+        g.add_argument(
+            "--units", choices=("mm", "m"), default="mm", help="mm (default) or m"
+        )
     g.add_argument("-q", "--quiet", action="store_true", help="no progress on stderr")
 
 
@@ -284,7 +305,198 @@ def build_parser() -> argparse.ArgumentParser:
         "--as-velocity", action="store_true",
         help="report the average velocity (displacement / its span) in mm/yr",
     )  # fmt: skip
+    _velocity_parser(sub, raw)
+    k = sub.add_parser(
+        "k-table", help="build the k(T) table (gps-velocities k-table)",
+        add_help=False, description="Runs gps-velocities k-table; see its --help.",
+    )  # fmt: skip
+    k.add_argument("args", nargs=argparse.REMAINDER)
+    sh = sub.add_parser(
+        "show", help="print a saved velocity set (gps-velocities show)",
+        add_help=False, description="Runs gps-velocities show; see its --help.",
+    )  # fmt: skip
+    sh.add_argument("args", nargs=argparse.REMAINDER)
     return p
+
+
+VELOCITY_EPILOG = """\
+what it is:
+  the velocity product (one estimator for every velocity): a weighted line
+  through each component over the period, gated (>= 5 epochs, >= 80 % of the
+  period covered, no declared step inside), sigma = formal x k(T), the
+  station's own empirical scale for that window length, else the k(T) table,
+  else 5. Short windows (a few days in unrest) stand on |v|/sigma instead.
+  Every row says its ref, k and sigma method; refused stations say why.
+
+periods: as gpsprod displacement (--start/--end/--days, or --period with
+  dates and events.yaml names: DIKE:ERUPTION, after:EVENT, EVENT ...)
+
+examples:
+  gpsprod velocity --area reykjanes --start 20200101 --end 20221231
+  gpsprod velocity SENG THOB --period 2023-11-10-dike:2023-12-eruption
+  gpsprod velocity all --days 365 --save                # into velocity_dir
+  gpsprod velocity THOB --start 20231112 --days 3       # short tier, unrest
+  gpsprod velocity --area reykjanes --ref pre-onset --pre-window 20230806:20231024 \\
+                   --period after:2023-11-10-dike
+  gpsprod velocity SENG --relative-to SKSH --start 20240901 --end 20241031
+  gpsprod velocity THOB --start 20240101 --days 90 -o ~/tmp/thob   # thob.gmt/.csv/.jsonl
+
+flags: fallback:plate (no detrend record), background:none (ref plate),
+  short:n=N (short tier), nonlinear:<c> (curved: a pulse, not a rate),
+  steps_in_window, truncated@T (the data stop early), k:baseline_unmeasured /
+  k:session_unmeasured (k from the table or 5), k_table_settings_differ.
+
+output: a table on screen; -o DIR/NAME writes NAME.gmt (psvelo), NAME.csv and
+NAME.jsonl; --save writes the set under velocity_dir (as gps-velocities).
+"""
+
+
+def _velocity_parser(sub: Any, raw: type[argparse.HelpFormatter]) -> None:
+    from geo_dataread.products.velocity_core import (
+        DEFAULT_K,
+        NO_RECORD_POLICIES,
+        VelocitySettings,
+    )
+    from geo_dataread.products.velocity_core import REFS as VREFS
+
+    v = sub.add_parser(
+        "velocity",
+        help="the velocity product: a rate per station over a period",
+        formatter_class=raw,
+        description=(
+            "Velocities N/E/U [mm/yr] with an honest sigma, one per station over "
+            "a period.\nDefaults: itrf14 .pos, plate and seasonal removed, "
+            "declared view, sigma screen 10 mm."
+        ),
+        epilog=VELOCITY_EPILOG,
+    )
+    _common(
+        v, refs=VREFS, ref_help=VELOCITY_REF_HELP,
+        uncert_help="drop solutions with a formal σ above MM (default 10)",
+        out_help="write DIR/NAME.gmt, .csv and .jsonl (default: a table on screen)",
+        units=False,
+    )  # fmt: skip
+    g = v.add_argument_group("velocity")
+    g.add_argument(
+        "--view", choices=VIEWS, default="declared",
+        help="declared (default: known blunders out), cleaned, raw",
+    )  # fmt: skip
+    g.add_argument(
+        "--pre-window", metavar="A:B",
+        help="ref pre-onset: the station's reference days before the onset, "
+        "YYYYMMDD:YYYYMMDD (e.g. 20230806:20231024)",
+    )  # fmt: skip
+    g.add_argument(
+        "--no-record", choices=NO_RECORD_POLICIES, default="plate",
+        help="a station without a detrend record: fall back to ref plate "
+        "(default, flagged) or refuse",
+    )  # fmt: skip
+    g.add_argument(
+        "--allow-steps", action="store_true",
+        help="keep a window with a declared step inside (flagged)",
+    )  # fmt: skip
+    g.add_argument(
+        "--min-obs", type=int, default=VelocitySettings.min_obs, metavar="N",
+        help=f"fewest epochs (default {VelocitySettings.min_obs})",
+    )  # fmt: skip
+    g.add_argument(
+        "--min-cover", type=float, default=VelocitySettings.min_cover, metavar="F",
+        help=f"least share of the period covered (default {VelocitySettings.min_cover})",
+    )  # fmt: skip
+    g.add_argument(
+        "--no-short-tier", dest="short_tier", action="store_false",
+        help="refuse a window failing the epoch/cover gates outright",
+    )  # fmt: skip
+    g.add_argument(
+        "--short-snr", type=float, default=VelocitySettings.short_snr, metavar="X",
+        help=f"short tier: |v|/σ a part needs (default {VelocitySettings.short_snr})",
+    )  # fmt: skip
+    g.add_argument(
+        "--short-snr-pair", type=float, default=VelocitySettings.short_snr_pair,
+        metavar="X",
+        help=f"short tier on 2 epochs (default {VelocitySettings.short_snr_pair})",
+    )  # fmt: skip
+    g.add_argument(
+        "--default-k", type=float, default=DEFAULT_K, metavar="K",
+        help=f"k when neither the station nor the table has one (default {DEFAULT_K})",
+    )  # fmt: skip
+    g.add_argument(
+        "--k-table", metavar="FILE",
+        help="the k(T) table (default velocity_dir/k_table_<frame>.json; 'none': no table)",
+    )  # fmt: skip
+    g.add_argument(
+        "--save", action="store_true",
+        help="write the set under velocity_dir as gps-velocities does (name from the settings)",
+    )  # fmt: skip
+
+
+def _velocity(args: argparse.Namespace) -> int:
+    from geo_dataread.pos import frame_name
+    from geo_dataread.products.period import parse_date
+    from geo_dataread.products.velocity_cli import _show
+    from geo_dataread.products.velocity_core import (
+        VelocitySettings,
+        estimate_velocities,
+        velocity_dir,
+        window_bounds,
+    )
+    from geo_dataread.products.velocity_files import set_name, write_velocity_set
+
+    if args.ref and args.keep_seasonal and args.ref != "plate":
+        raise SystemExit("gpsprod: --keep-seasonal is --ref plate; not both")
+    ref = args.ref or ("plate" if args.keep_seasonal else "plate-periodic")
+    try:
+        pre = None
+        if args.pre_window:
+            a, b = args.pre_window.split(":", 1)
+            pre = window_bounds(parse_date(a), parse_date(b))
+        settings = VelocitySettings(
+            frame=frame_name(args.frame), ref=ref, view=args.view,
+            uncert=args.uncert if args.uncert is not None else UNCERT_RATE,
+            no_record=args.no_record, allow_steps=args.allow_steps,
+            min_obs=args.min_obs, min_cover=args.min_cover,
+            short_tier=args.short_tier, short_snr=args.short_snr,
+            short_snr_pair=args.short_snr_pair, default_k=args.default_k,
+            pos_dir=args.pos_dir, params=args.params, steps=args.steps,
+            k_table=args.k_table, pre_window=pre, session=args.session,
+            relative_to=args.relative_to,
+        )  # fmt: skip
+        period = resolve_period(
+            args.period, start=args.start, end=args.end, days=args.days
+        )
+        src = Source(frame=args.frame, session=args.session, pos_dir=args.pos_dir)
+    except ValueError as err:
+        raise SystemExit(f"gpsprod: {err}") from None
+    stations = select(args.stations, area=args.area, region=args.region, source=src)
+    if not stations:
+        raise SystemExit("gpsprod: no stations (give markers, --area, --region or all)")
+
+    def progress(rec: Any) -> None:
+        if not args.quiet:
+            print(f"  {rec.station}", file=sys.stderr, end="\r")
+
+    records = estimate_velocities(
+        stations, period.first_day, period.last_day, settings, progress=progress
+    )
+    if not args.quiet:
+        print(" " * 12, file=sys.stderr, end="\r")
+    if args.out or args.save:
+        if args.save:
+            out_dir = velocity_dir()
+            name = set_name(settings, period.first_day, period.last_day)
+        else:
+            out = Path(args.out).expanduser()
+            out_dir, name = out.parent, (out.stem if out.suffix else out.name)
+        paths = write_velocity_set(records, out_dir, name)
+        n_ok = sum(r.accepted for r in records)
+        print(f"gpsprod: {n_ok}/{len(records)} stations → "
+              f"{paths['csv'].with_suffix('')}.{{gmt,csv,jsonl}}", file=sys.stderr)  # fmt: skip
+    else:
+        names = f"  ({', '.join(period.names)})" if period.names else ""
+        print(f"# {period.dates[0]} .. {period.dates[1]}{names}  {settings.frame} "
+              f"{settings.session} ref {ref} view {settings.view} [mm/yr]")  # fmt: skip
+        _show(records, show_all=True)
+    return 0
 
 
 #: formal-σ screen [mm]: a displacement keeps the noisy solution of an event
@@ -363,7 +575,8 @@ def _displacement(args: argparse.Namespace) -> int:
         f"{src.session} ref {src.ref} view {src.view} method {args.method}"
     )
     if args.as_velocity:
-        from geo_dataread.velocity import _show, write_velocity_set
+        from geo_dataread.products.velocity_cli import _show
+        from geo_dataread.products.velocity_files import write_velocity_set
 
         vel = [to_velocity(r) for r in rs]
         if args.out:
@@ -391,9 +604,17 @@ def _displacement(args: argparse.Namespace) -> int:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if argv and argv[0] in ("k-table", "show"):
+        # gps-velocities' own subcommands, options and all
+        from geo_dataread.products.velocity_cli import main as velocity_main
+
+        return int(velocity_main(argv))
     args = build_parser().parse_args(argv)
     if args.command == "displacement":
         return _displacement(args)
+    if args.command == "velocity":
+        return _velocity(args)
     return 2  # pragma: no cover
 
 

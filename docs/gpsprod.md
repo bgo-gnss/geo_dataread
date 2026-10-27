@@ -116,3 +116,35 @@ an event is a noisy solution (SENG 10 Nov 2023: σ 9/15/36 mm N/E/U) but it
 is exactly the day asked for; its σ is carried into the displacement. The
 10 mm screen made `--period 20231110:20231111 --ends 1` refuse SENG and THOB.
 Broken solutions (SENG Jan 2024, σ ≈ 3 m) stay out.
+
+## Step 3 — the velocity product moves in (`gpsprod velocity`)
+
+```bash
+gpsprod velocity --area reykjanes --start 20200101 --end 20221231
+gpsprod velocity SENG THOB --period 2023-11-10-dike:2023-12-eruption
+gpsprod velocity all --days 365 --save                   # into velocity_dir
+gpsprod velocity SENG --relative-to SKSH --start 20240901 --end 20241031
+gpsprod k-table …  /  gpsprod show set.jsonl              # = gps-velocities k-table / show
+```
+
+- Code: `geo_dataread/products/velocity_core.py` (estimator, k(T); moved with
+  `git mv`), `velocity_files.py` (.gmt/.csv/.jsonl), `velocity_cli.py`
+  (`gps-velocities`), function bodies unchanged. `geo_dataread.velocity` stays
+  as the same module (a `sys.modules` alias of the core), so every import and
+  test monkeypatch keeps working; the moved names load on first use.
+- **Byte identity, proved twice**: `tests/test_velocity_golden.py` (5 synthetic
+  runs × 3 files, frozen before the move) and a real-data run (6 sets, 10
+  stations: long, short, short tier, background, plate, pre-onset) are
+  byte-identical before and after; `gpsprod velocity` writes the same bytes as
+  `gps-velocities estimate` for the same settings.
+- **New in the product**: `session` (8 h series) and `relative_to` (a
+  baseline). Both read through gpsprod's `loader.load`; at their defaults they
+  are left out of the fingerprint and the JSON, so earlier sets are unchanged.
+  Their k(T) is not measured yet: a baseline takes the table (single-station,
+  so conservative), an 8 h series `--default-k`, flagged
+  `k:baseline_unmeasured` / `k:session_unmeasured`. `displacement --method
+  rate` now works for both.
+- `gpsprod velocity` uses gpsprod's stations (`--area`, `all`), periods
+  (`--start/--end/--days`, `--period` with event names) and output (screen by
+  default, `-o DIR/NAME`, `--save` = velocity_dir as gps-velocities); σ screen
+  10 mm, view declared — the product's own defaults.

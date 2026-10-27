@@ -1,0 +1,5 @@
+# gps-velocities schema 3, set preonset, frame itrf2014, 3 of 4 stations accepted, 3 with a horizontal rate
+# lon lat ve vn sve svn corr_en station  [mm/yr]
+-22.040000 64.000000 4.022 -6.071 9.414 7.733 0.000 AAAA
+-22.040000 64.000000 -6.632 -3.354 8.938 9.817 0.000 BBBB
+-22.040000 64.000000 305.985 302.789 8.889 9.045 0.000 CCCC

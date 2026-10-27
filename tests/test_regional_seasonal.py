@@ -208,10 +208,13 @@ def test_a_k_table_rebuild_keeps_the_regional_entry(tmp_path, monkeypatch) -> No
     out.write_text(json.dumps({"residuals": {vel.K_RESIDUAL_REGIONAL: regional}}))
     fresh = {"stations": ["A"], "residuals": {"all": {"days": [91],
              "k": [[2.0, 2.0, 2.0]], "n_stations": [1]}}}  # fmt: skip
+    # the command line moved beside the core (gpsprod step 3): patch it there
+    import geo_dataread.products.velocity_cli as vcli
+
     monkeypatch.setattr(
-        vel, "build_k_table", lambda *a, **k: json.loads(json.dumps(fresh))
+        vcli, "build_k_table", lambda *a, **k: json.loads(json.dumps(fresh))
     )
-    monkeypatch.setattr(vel, "select_stations", lambda *a: ["A"])
+    monkeypatch.setattr(vcli, "select_stations", lambda *a: ["A"])
     assert vel.main(["k-table", "--out", str(out)]) == 0
     got = json.loads(out.read_text())["residuals"]
     assert got["all"] == fresh["residuals"]["all"]

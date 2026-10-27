@@ -77,7 +77,7 @@ from geo_dataread.products.loader import DAY_YEARS, Source, StationView, load
 
 if TYPE_CHECKING:
     from geo_dataread.events import Event
-    from geo_dataread.velocity import VelocityRecord, VelocitySettings
+    from geo_dataread.products.velocity_core import VelocityRecord, VelocitySettings
 
 METHODS = ("ends", "points", "step", "rate")
 #: days read beyond the period on each side: the daily σ factors and the
@@ -299,12 +299,12 @@ def displacement_from_view(
 
 
 def _velocity_settings(src: Source, ref: str | None = None) -> VelocitySettings:
-    from geo_dataread.velocity import VelocitySettings
+    from geo_dataread.products.velocity_core import VelocitySettings
 
     return VelocitySettings(
-        frame=src.frame, ref=ref or "plate-periodic", view=src.view,
+        frame=src.frame_name, ref=ref or "plate-periodic", view=src.view,
         uncert=src.uncert, pos_dir=src.pos_dir, params=src.params,
-        steps=src.steps,
+        steps=src.steps, session=src.session, relative_to=src.relative_to,
     )  # fmt: skip
 
 
@@ -321,7 +321,7 @@ def rate_scale(
     table, else :data:`DEFAULT_K`. ``(k per length, sigma method, source,
     flags)``. A baseline (``relative_to``) or an 8 h series has no measured
     k of its own: the table (24 h, single station: conservative) or 5."""
-    from geo_dataread.velocity import (
+    from geo_dataread.products.velocity_core import (
         K_RESIDUAL,
         load_k_table,
         station_rate_scales,
@@ -371,7 +371,7 @@ def event_bounds(
     """The step's event as (onset, the midnight after its last day, name),
     or the refusal reason."""
     from geo_dataread.products.period import find_event, parse_date
-    from geo_dataread.velocity import window_bounds
+    from geo_dataread.products.velocity_core import window_bounds
 
     if settings.at is not None:
         day = parse_date(settings.at)
@@ -515,7 +515,7 @@ def displacement_span(rec: DisplacementRecord) -> float:
 def to_velocity(rec: DisplacementRecord) -> VelocityRecord:
     """The average velocity of a displacement: ``v = d/T``, ``σ = σ_d/T``
     (T by :func:`displacement_span`)."""
-    from geo_dataread.velocity import VelocityRecord
+    from geo_dataread.products.velocity_core import VelocityRecord
 
     span = displacement_span(rec)
     v, s = rate_from_displacement(rec.displacement, rec.sigma, span)
@@ -645,15 +645,13 @@ def _rate_record(
     doc: Mapping[str, Any] | None,
 ) -> DisplacementRecord:
     """Method ``rate``: the velocity product over the period, × its length."""
-    from geo_dataread.velocity import REFS as VELOCITY_REFS
-    from geo_dataread.velocity import estimate_station_velocity
+    from geo_dataread.products.velocity_core import REFS as VELOCITY_REFS
+    from geo_dataread.products.velocity_core import estimate_station_velocity
 
     src = settings.source
     why = None
     if src.ref not in VELOCITY_REFS:
         why = f"rate: ref {src.ref} is not a velocity product ref {VELOCITY_REFS}"
-    elif src.session != "24h" or src.relative_to:
-        why = "rate: 8 h series and --relative-to arrive with gpsprod step 3"
     if why is not None:
         return DisplacementRecord(**base, ref=src.ref, refused=why)
     vrec = estimate_station_velocity(
