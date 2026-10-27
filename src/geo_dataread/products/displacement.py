@@ -485,7 +485,7 @@ def to_displacement(
     }  # fmt: skip
     return DisplacementRecord(
         station=rec.station, lon=rec.lon, lat=rec.lat, period=(p0, p1),
-        period_dates=period_dates or (_iso(p0), _iso(p1 - DAY_YEARS)),
+        period_dates=period_dates or (_iso(p0), _iso(p1 - 0.5 * DAY_YEARS)),
         frame=rec.frame, series=rec.series, session="24h", ref=rec.ref,
         ref_requested=rec.ref_requested, view=rec.view, method="rate",
         sigma_method=f"rate({rec.sigma_method})*T",
@@ -569,7 +569,7 @@ def estimate_station_displacement(
         "lon": coords[0],
         "lat": coords[1],
         "period": (p0, p1),
-        "period_dates": period_dates or (_iso(p0), _iso(p1 - DAY_YEARS)),
+        "period_dates": period_dates or (_iso(p0), _iso(p1 - 0.5 * DAY_YEARS)),
         "frame": src.frame_name,
         "series": src.pos_id,
         "session": src.session,
@@ -582,6 +582,8 @@ def estimate_station_displacement(
         "period_names": period_names,
         "software": software(),
     }
+    if doc is None:
+        doc = src.params_doc()
     if settings.method == "rate":
         return _rate_record(sta, (p0, p1), settings, base, doc=doc)
     pad = PAD_DAYS * DAY_YEARS
@@ -735,7 +737,7 @@ def estimate_displacements(
         "method": settings.method,
         **method_meta(settings),
         "period": "{}..{}".format(
-            *(period_dates or (_iso(period[0]), _iso(period[1] - DAY_YEARS)))
+            *(period_dates or (_iso(period[0]), _iso(period[1] - 0.5 * DAY_YEARS)))
         ),
         "relative_to": src.relative_to or "-",
     }

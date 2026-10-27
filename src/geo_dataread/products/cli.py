@@ -28,12 +28,14 @@ subcommands:
   displacement   how far stations moved across a period (ends | points | step | rate)
   velocity       the velocity product: a rate per station over a period
   coords         where stations are at an epoch (ECEF and lat/lon/h)
+  series         a station's time series to file (csv, jsonl, .NEU)
   k-table        build the k(T) table the velocity σ falls back on
   show           print a saved velocity set (.jsonl)
 
   gpsprod displacement --help    every option, with examples
   gpsprod velocity --help
   gpsprod coords --help
+  gpsprod series --help
 
 The library behind it: from geo_dataread import products  (docs/gpsprod.md)
 """
@@ -309,6 +311,7 @@ def build_parser() -> argparse.ArgumentParser:
     )  # fmt: skip
     _velocity_parser(sub, raw)
     _coords_parser(sub, raw)
+    _series_parser(sub, raw)
     k = sub.add_parser(
         "k-table", help="build the k(T) table (gps-velocities k-table)",
         add_help=False, description="Runs gps-velocities k-table; see its --help.",
@@ -685,6 +688,172 @@ def _coords(args: argparse.Namespace) -> int:
     return 0
 
 
+SERIES_EPILOG = """\
+what it writes:
+  the series every gpsprod product reads: the .pos series of the frame, the
+  reference (plate and the stored seasonal removed by default), the view
+  (cleaned by default: outliers out), the sigma screen. Kept epochs only, or
+  --with-dropped every epoch with its raw value, kept 0/1 and why (outlier,
+  declared, icing, snow, network).
+
+formats (--format, or from the -o extension):
+  csv    # provenance header, one row per epoch:
+         date, yearf, dN dE dU, sN sE sU [mm], kept, flags
+  jsonl  a provenance line, then one epoch per line
+  neu    gps-savetimes' .NEU layout (kept epochs) + NAME.prov.json beside it
+
+--source tot: the legacy ITRF2008 TOT series exactly as gps-savetimes writes
+  it (gamittooneuf; --ref plate | background (= detrend) | itrf (= itrf2008);
+  whole series, .NEU only). gps-savetimes itself is unchanged.
+
+examples:
+  gpsprod series OLAC                                    # csv to the screen
+  gpsprod series OLAC --start 20240101 -o olac.csv
+  gpsprod series --area reykjanes --period after:2023-11-10-dike -o out/ --format neu
+  gpsprod series THOB --with-dropped --days 90 -o thob_all.csv
+  gpsprod series THOB --relative-to SKSH --start 20240901 -o thob-sksh.csv
+  gpsprod series HOFN --ref itrf --view raw --units m -o hofn.jsonl
+  gpsprod series SENG --source tot --ref plate -o tot/          # = gps-savetimes --file
+
+output: one station without -o: csv on screen. -o FILE.csv|.jsonl|.neu for one
+station; -o DIR/ for several: DIR/STA-<ref>.<format>.
+"""
+
+
+def _series_parser(sub: Any, raw: type[argparse.HelpFormatter]) -> None:
+    from geo_dataread.products.series import FORMATS as SFORMATS
+    from geo_dataread.products.series import SOURCES
+
+    sp = sub.add_parser(
+        "series",
+        help="a station's time series to file (csv, jsonl, .NEU)",
+        formatter_class=raw,
+        description=(
+            "Station time series N/E/U [mm] as the gpsprod products see them.\n"
+            "Defaults: itrf14 .pos, plate and seasonal removed, cleaned view, "
+            "the whole series."
+        ),
+        epilog=SERIES_EPILOG,
+    )
+    _common(
+        sp,
+        uncert_help="drop solutions with a formal σ above MM (default 10)",
+        out_help="FILE.csv|.jsonl|.neu (one station) or DIR/ (several); default: the screen",
+    )  # fmt: skip
+    g = sp.add_argument_group("series")
+    g.add_argument(
+        "--view", choices=VIEWS, default="cleaned",
+        help="cleaned (default: outliers out), declared (known blunders out), raw",
+    )  # fmt: skip
+    g.add_argument(
+        "--source", choices=SOURCES, default="pos",
+        help="pos (default: the .pos product) or tot (legacy TOT, as gps-savetimes)",
+    )  # fmt: skip
+    g.add_argument(
+        "--format", choices=SFORMATS,
+        help="csv, jsonl or neu (default: from the -o extension, else csv)",
+    )  # fmt: skip
+    g.add_argument(
+        "--with-dropped", action="store_true",
+        help="every epoch with its raw value, kept 0/1 and why it was dropped",
+    )  # fmt: skip
+    g.add_argument(
+        "--time-format", metavar="FMT",
+        help="neu: the time column, 'yearf' or a strftime format (default date and time)",
+    )  # fmt: skip
+
+
+def _series(args: argparse.Namespace) -> int:
+    from geo_dataread.products.series import (
+        TOT_REFS,
+        SeriesSettings,
+        estimate_series,
+        series_rows,
+        write_series,
+        write_tot,
+    )
+
+    if args.ref and args.keep_seasonal and args.ref != "plate":
+        raise SystemExit("gpsprod: --keep-seasonal is --ref plate; not both")
+    ref = args.ref or ("plate" if args.keep_seasonal else "plate-periodic")
+    out = Path(args.out).expanduser() if args.out else None
+    is_dir = out is not None and (
+        out.is_dir() or not out.suffix or args.out.endswith("/")
+    )
+    fmt = args.format or (
+        out.suffix.lstrip(".").lower() if out is not None and not is_dir else "csv"
+    )
+    if fmt not in ("csv", "jsonl", "neu"):
+        raise SystemExit(f"gpsprod: format {fmt!r}: csv, jsonl or neu")
+    src = Source(
+        frame=args.frame, session=args.session, view=args.view, ref=ref,
+        uncert=args.uncert if args.uncert is not None else UNCERT_RATE,
+        pos_dir=args.pos_dir, params=args.params, steps=args.steps,
+        relative_to=args.relative_to,
+    )  # fmt: skip
+    stations = select(args.stations, area=args.area, region=args.region, source=src)
+    if not stations:
+        raise SystemExit("gpsprod: no stations (give markers, --area, --region or all)")
+    if len(stations) > 1 and (out is None or not is_dir):
+        raise SystemExit("gpsprod: several stations: give -o DIR/")
+    mm = args.units == "mm"
+    if args.source == "tot":
+        if ref not in TOT_REFS:
+            raise SystemExit(f"gpsprod: --source tot takes --ref {', '.join(TOT_REFS)}")
+        if args.period or args.start or args.days or fmt != "neu" and args.format:
+            raise SystemExit("gpsprod: --source tot writes the whole series, as .NEU")
+        tref = TOT_REFS[ref]
+        for sta in stations:
+            path = (
+                None if out is None else (out / f"{sta}-{tref}.NEU" if is_dir else out)
+            )
+            write_tot(sta, path, ref=tref, mm=mm, time_format=args.time_format)
+        return 0
+    period = None
+    if args.period or args.start or args.days:
+        try:
+            p = resolve_period(
+                args.period, start=args.start, end=args.end, days=args.days
+            )
+        except ValueError as err:
+            raise SystemExit(f"gpsprod: {err}") from None
+        period, dates = p.bounds, p.dates
+    else:
+        dates = None
+    try:
+        settings = SeriesSettings(source=src, with_dropped=args.with_dropped)
+    except ValueError as err:
+        raise SystemExit(f"gpsprod: {err}") from None
+
+    def progress(sta: str) -> None:
+        if not args.quiet:
+            print(f"  {sta}", file=sys.stderr, end="\r")
+
+    recs = estimate_series(
+        stations, period, settings, period_dates=dates, progress=progress
+    )
+    if not args.quiet:
+        print(" " * 12, file=sys.stderr, end="\r")
+    for rec in recs:
+        rec = rec.scaled(args.units)
+        if not rec.accepted:
+            print(f"gpsprod: {rec.station}: {rec.refused}", file=sys.stderr)
+            continue
+        if out is None:
+            from geo_dataread.products.series import SERIES_COLUMNS, header
+
+            print("\n".join(f"# {x}" for x in header(rec)))
+            print(",".join(SERIES_COLUMNS))
+            for row in series_rows(rec):
+                print(",".join(row))
+            continue
+        path = out / f"{rec.station}-{ref}.{fmt}" if is_dir else out
+        written = write_series(rec, path, fmt, time_format=args.time_format)
+        print(f"gpsprod: {rec.station}: {rec.n_kept}/{rec.t.size} epochs → "
+              f"{', '.join(str(w) for w in written)}", file=sys.stderr)  # fmt: skip
+    return 0 if all(r.accepted for r in recs) else 1
+
+
 def _source(args: argparse.Namespace) -> Source:
     if args.ref and args.keep_seasonal and args.ref != "plate":
         raise SystemExit("gpsprod: --keep-seasonal is --ref plate; not both")
@@ -791,6 +960,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _velocity(args)
     if args.command == "coords":
         return _coords(args)
+    if args.command == "series":
+        return _series(args)
     return 2  # pragma: no cover
 
 
