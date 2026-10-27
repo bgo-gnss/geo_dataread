@@ -185,3 +185,28 @@ gpsprod coords HOFN --epoch 20240101 --method apr            # GLOBK apriori
   its N/E/U at A (`dN dE dU`).
 - Output in metres: X Y Z, sX sY sZ, lat lon h, sN sE sU (+ dN dE dU), n_used,
   t_obs; screen, `-o .csv/.jsonl`.
+
+## Step 5 — `gpsprod series` (time series to file)
+
+```bash
+gpsprod series OLAC                                     # csv to the screen
+gpsprod series OLAC --start 20240101 -o olac.csv
+gpsprod series --area reykjanes --period after:2023-11-10-dike -o out/ --format neu
+gpsprod series THOB --with-dropped --days 90 -o thob_all.csv
+gpsprod series SENG --source tot --ref plate -o tot/     # = gps-savetimes --file
+```
+
+- The series every product reads (`loader.load`): `.pos` of the frame, ref
+  `plate-periodic`, view `cleaned` (BGÓ: cleaned for series/coords), σ screen
+  10 mm, the whole series unless a period is given. Kept epochs only;
+  `--with-dropped` writes every epoch with its raw value, `kept` 0/1 and the
+  reason (outlier, declared, icing, snow, network — the loader now keeps the
+  raw values and per-epoch reason bits, `StationView.y_raw`/`reasons`).
+- Formats: CSV (`#` provenance, date, yearf, dN dE dU, sN sE sU, kept, flags),
+  JSONL (provenance line + one epoch per line), `.NEU` in gps-savetimes'
+  layout (`gtoNEU` + `gamittoFile`, its legacy first line included) with a
+  `.prov.json`. One station → `-o FILE`; several → `-o DIR/` (`STA-<ref>.<fmt>`).
+- `--source tot`: the legacy ITRF2008 TOT series through `gamittooneuf` —
+  byte-identical to `gps-savetimes` (checked: SENG plate and itrf2008, OLAC).
+  **`gps-savetimes` itself is unchanged** (it feeds the production .NEU on the
+  CDN; not aliased, unlike the plan).

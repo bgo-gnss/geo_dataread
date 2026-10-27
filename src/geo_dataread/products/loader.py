@@ -22,6 +22,20 @@ from geo_dataread.products.common import COMPONENTS, REFS, SESSIONS, TERMS, VIEW
 
 FloatArray = npt.NDArray[np.float64]
 DAY_YEARS = 1.0 / 365.25
+#: why the view dropped (or marked) an epoch, per component: bits of
+#: :attr:`StationView.reasons`
+REASON_OUTLIER = 1  # the cleaned view's detector
+REASON_DECLARED = 2  # excluded_epochs.csv (the declared view)
+REASON_ICING = 4  # antenna icing days (marked; dropped only when removed)
+REASON_SNOW = 8  # snow-burial days (Up)
+REASON_NETWORK = 16  # whole-network bad days
+REASON_NAMES = {
+    REASON_OUTLIER: "outlier",
+    REASON_DECLARED: "declared",
+    REASON_ICING: "icing",
+    REASON_SNOW: "snow",
+    REASON_NETWORK: "network",
+}
 
 
 @dataclasses.dataclass(frozen=True)
@@ -110,12 +124,18 @@ class StationView:
     ref: str
     flags: tuple[str, ...] = ()
     attrs: dict[str, Any] = dataclasses.field(default_factory=dict)
+    #: the values before the view dropped any (None for a baseline)
+    y_raw: FloatArray | None = None
+    #: (3, N) uint8, :data:`REASON_OUTLIER` … bits per epoch (None: not known)
+    reasons: npt.NDArray[np.uint8] | None = None
 
     def sliced(self, start: float, end: float) -> StationView:
         keep = (self.t >= start) & (self.t < end)
         return dataclasses.replace(
-            self, t=self.t[keep], y=self.y[:, keep], sigma=self.sigma[:, keep]
-        )
+            self, t=self.t[keep], y=self.y[:, keep], sigma=self.sigma[:, keep],
+            y_raw=None if self.y_raw is None else self.y_raw[:, keep],
+            reasons=None if self.reasons is None else self.reasons[:, keep],
+        )  # fmt: skip
 
 
 def station_record(doc: Mapping[str, Any] | None, sta: str) -> dict[str, Any] | None:
@@ -176,6 +196,17 @@ def _read_one(
         )
     y = np.vstack([df[c].to_numpy(dtype=np.float64) for c in cols])
     s = np.vstack([df[f"D{c}"].to_numpy(dtype=np.float64) for c in COMPONENTS])
+    y_raw = y.copy()
+    reasons = np.zeros(y.shape, dtype=np.uint8)
+    for i, c in enumerate(COMPONENTS):
+        for col, bit in (
+            (f"{c}_icing", REASON_ICING),
+            (f"{c}_snow", REASON_SNOW),
+            (f"{c}_network", REASON_NETWORK),
+        ):
+            mark = df.get(col)
+            if mark is not None:
+                reasons[i, mark.to_numpy(dtype=bool)] |= bit
     if source.view == "declared":
         from gps_parser import outlier_catalogs as _oc
 
@@ -189,6 +220,7 @@ def _read_one(
         attrs["n_flagged"] = len(idx)
         if idx:
             y[:, idx] = np.nan
+            reasons[:, idx] |= REASON_DECLARED
     if clean:
         if attrs.get("outlier_abort"):
             flags.append("clean:aborted")
@@ -197,7 +229,8 @@ def _read_one(
                 mask = df.get(f"{c}_outlier")
                 if mask is not None:
                     y[i, mask.to_numpy(dtype=bool)] = np.nan
-    return StationView(sta, t, y, s, ref, tuple(flags), attrs)
+                    reasons[i, mask.to_numpy(dtype=bool)] |= REASON_OUTLIER
+    return StationView(sta, t, y, s, ref, tuple(flags), attrs, y_raw, reasons)
 
 
 def load(
