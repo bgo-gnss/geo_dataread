@@ -228,3 +228,18 @@ gpsprod series SENG --source tot --ref plate -o tot/     # = gps-savetimes --fil
 - A station with only a regional seasonal record asked for `--ref background`
   now falls back to plate-periodic (`seasonal:regional;fallback:plate-periodic`)
   in every product, instead of being refused.
+
+## Step 7 — more formats (`.gmt`, `.gbis.txt`, `.xlsx`)
+
+- `gpsprod displacement -o d.gmt` — GMT psvelo rows (`lon lat dE dN sE sN corr
+  station`, mm; refused stations left out) for `gmt velo -Se` / pygmt.
+- `-o d.gbis.txt` — `lon lat dE dN dU sE sN sU station` in metres, `%`
+  comments: the text GBIS's GPS .mat (`ll`, `displacements`, `covariance`) is
+  made from (BGÓ to confirm the column order against his GBIS setup).
+- `-o x.xlsx` — displacement, coords, velocity (`gpsprod velocity -o
+  NAME.xlsx`: the velocity CSV columns exactly) and series (`--format xlsx`):
+  a `data` sheet and a `meta` sheet. Written with the standard library
+  (`products/xlsx.py`, no openpyxl), byte-stable; checked to open in
+  LibreOffice.
+- `.gmt`/`.gbis.txt` are for displacements only (a velocity set already
+  writes its own `.gmt`).

@@ -8,6 +8,7 @@ import json
 import math
 from collections.abc import Sequence
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 
@@ -127,3 +128,31 @@ def set_name(settings: VelocitySettings, start: dt.date, end: dt.date) -> str:
         days = [d.date() for d in dts]
         ref = f"{ref}-{days[0]:%Y%m%d}-{days[1]:%Y%m%d}"
     return f"window-{start:%Y%m%d}-{end:%Y%m%d}_{ref}_{pos_frame(settings.frame)}"
+
+
+def write_velocity_xlsx(
+    records: Sequence[VelocityRecord], path: str | Path, settings: VelocitySettings
+) -> Path:
+    """The set as .xlsx (gpsprod step 7): a ``data`` sheet with the CSV
+    columns exactly as :func:`write_velocity_set` formats them, and a
+    ``meta`` sheet (frame, ref, view, the set's header)."""
+    import csv
+    import tempfile
+
+    from geo_dataread.products.xlsx import write_xlsx
+
+    with tempfile.TemporaryDirectory() as tmp:
+        paths = write_velocity_set(records, tmp, "set")
+        lines = paths["csv"].read_text(encoding="utf-8").splitlines()
+    head, body = lines[0], list(csv.reader(lines[1:]))
+    meta: list[list[Any]] = [
+        ["key", "value"],
+        ["header", head.lstrip("# ")],
+        ["frame", settings.frame],
+        ["ref", settings.ref],
+        ["view", settings.view],
+        ["session", settings.session],
+        ["uncert", settings.uncert],
+        ["relative_to", settings.relative_to or "-"],
+    ]
+    return write_xlsx(path, [("data", body), ("meta", meta)])

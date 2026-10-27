@@ -6,7 +6,14 @@
 - ``.jsonl`` — one record per line, every field (``to_dict``).
 - ``-`` — the screen table.
 
-``.gmt``, ``.gbis.txt`` and ``.xlsx`` arrive in step 7 of PLAN-gpsprod.
+- ``.gmt`` — displacements as GMT psvelo rows (``lon lat dE dN sE sN corr
+  station``, mm; refused stations left out) for ``gmt velo -Se``/pygmt.
+- ``.gbis.txt`` — displacements for GBIS (Bagnardi & Hooper 2018) in metres:
+  ``lon lat dE dN dU sE sN sU station``. GBIS itself reads GPS from a .mat
+  (``ll``, ``displacements``, ``covariance``): this is the text those are
+  made from.
+- ``.xlsx`` — a ``data`` sheet (the CSV columns) and a ``meta`` sheet (the
+  provenance), standard library only (:mod:`.xlsx`).
 """
 
 from __future__ import annotations
@@ -29,7 +36,15 @@ DISPLACEMENT_COLUMNS = (
     "n_start", "n_end", "method", "ref", "view", "frame", "session",
     "relative_to", "flags", "refused",
 )  # fmt: skip
-FORMATS = (".csv", ".jsonl")
+FORMATS = (".csv", ".jsonl", ".gmt", ".gbis.txt", ".xlsx")
+
+
+def suffix_of(path: str | Path) -> str:
+    """The format suffix of a file name (``.gbis.txt`` is one)."""
+    name = Path(path).name.lower()
+    if name.endswith(".gbis.txt"):
+        return ".gbis.txt"
+    return Path(name).suffix
 
 
 def _fmt(v: float, decimals: int) -> str:
@@ -177,16 +192,74 @@ def table(records: Sequence[Any]) -> str:
     return "\n".join(lines)
 
 
+def write_gmt(rs: RecordSet[Any], path: Path) -> None:
+    """Accepted displacements as psvelo rows [mm]."""
+    if rs.kind != "displacement":
+        raise ValueError(f".gmt: displacements only (this set is {rs.kind})")
+    lines = [f"# {x}" for x in provenance_header(rs)]
+    lines.append("# lon lat dE dN sE sN corr_en station  [mm]")
+    for r in rs.records:
+        if not r.accepted:
+            continue
+        r = r.scaled("mm")
+        dn, de, _du = r.displacement
+        sn, se, _su = r.sigma
+        lines.append(
+            f"{r.lon:.6f} {r.lat:.6f} {de:.3f} {dn:.3f} {se:.3f} {sn:.3f} 0.000 {r.station}"
+        )
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def write_gbis(rs: RecordSet[Any], path: Path) -> None:
+    """Accepted displacements for GBIS, in metres."""
+    if rs.kind != "displacement":
+        raise ValueError(f".gbis.txt: displacements only (this set is {rs.kind})")
+    lines = [f"% {x}" for x in provenance_header(rs)]
+    lines.append("% lon lat dE dN dU sE sN sU station  [m]")
+    for r in rs.records:
+        if not r.accepted:
+            continue
+        m = r.scaled("m")
+        dn, de, du = m.displacement
+        sn, se, su = m.sigma
+        lines.append(
+            f"{r.lon:.6f} {r.lat:.6f} {de:.6f} {dn:.6f} {du:.6f} "
+            f"{se:.6f} {sn:.6f} {su:.6f} {r.station}"
+        )
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def write_xlsx_set(rs: RecordSet[Any], path: Path, records: Sequence[Any]) -> None:
+    """A ``data`` sheet (the CSV columns, numbers as numbers) and a ``meta``
+    sheet (the provenance header)."""
+    from geo_dataread.products.xlsx import write_xlsx
+
+    cols, data = rows(records)
+    meta = [
+        line.split(" ", 1) if " " in line else [line, ""]
+        for line in provenance_header(rs)
+    ]
+    write_xlsx(
+        path, [("data", [list(cols), *data]), ("meta", [["key", "value"], *meta])]
+    )
+
+
 def write(rs: RecordSet[Any], path: str, *, units: str = "mm") -> str:
     """Write ``rs`` to ``path`` (format by extension); returns the path."""
     records = [r.scaled(units) for r in rs.records]
     target = Path(path).expanduser()
-    suffix = target.suffix.lower()
+    suffix = suffix_of(target)
     if suffix not in FORMATS:
         raise ValueError(f"{path}: unknown format {suffix!r}; one of {FORMATS}")
     target.parent.mkdir(parents=True, exist_ok=True)
     if suffix == ".csv":
         write_csv(rs, target, records)
-    else:
+    elif suffix == ".jsonl":
         write_jsonl(target, records)
+    elif suffix == ".gmt":
+        write_gmt(rs, target)
+    elif suffix == ".gbis.txt":
+        write_gbis(rs, target)
+    else:
+        write_xlsx_set(rs, target, records)
     return str(target)
