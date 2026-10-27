@@ -82,6 +82,7 @@ examples:
   gpsprod displacement THOB --method rate --period 20250101:20250601
   gpsprod displacement THOB --period 2023-11-10-dike:2023-12-eruption --as-velocity
   gpsprod displacement HOFN --start 20200101 --keep-seasonal --units m -o h.jsonl
+  gpsprod displacement --area reykjanes --period after:2024-08-eruption -o d.gbis.txt
 
 flags (a note on a row; the number is still given):
   end_disputed:<start|end>:<N|E|U>
@@ -96,8 +97,13 @@ flags (a note on a row; the number is still given):
   step_nonlinear:<before|after>:<c>   step: that side curves (relaxation)
   fallback:plate      no detrend record: only the plate removed
 
-output: a table on screen, or -o FILE (.csv with a # provenance header, or
-.jsonl); every row says frame, ref, view, method, period and its sigma method.
+output: a table on screen, or -o FILE by its extension:
+  .csv       # provenance header, one row per station (refused ones with why)
+  .jsonl     every field of every record
+  .gmt       psvelo rows (lon lat dE dN sE sN corr station, mm): gmt velo -Se
+  .gbis.txt  lon lat dE dN dU sE sN sU station in metres, for GBIS
+  .xlsx      a data sheet and a meta sheet (Excel, LibreOffice)
+every row says frame, ref, view, method, period and its sigma method.
 With --as-velocity, -o DIR/NAME writes NAME.gmt, NAME.csv and NAME.jsonl
 (the velocity product's files). Refused stations are listed with the reason.
 """
@@ -346,6 +352,7 @@ examples:
                    --period after:2023-11-10-dike
   gpsprod velocity SENG --relative-to SKSH --start 20240901 --end 20241031
   gpsprod velocity THOB --start 20240101 --days 90 -o ~/tmp/thob   # thob.gmt/.csv/.jsonl
+  gpsprod velocity --area reykjanes --days 365 -o reykjanes.xlsx
 
 flags: fallback:plate (no detrend record), background:none (ref plate),
   short:n=N (short tier), nonlinear:<c> (curved: a pulse, not a rate),
@@ -379,7 +386,7 @@ def _velocity_parser(sub: Any, raw: type[argparse.HelpFormatter]) -> None:
     _common(
         v, refs=VREFS, ref_help=VELOCITY_REF_HELP,
         uncert_help="drop solutions with a formal σ above MM (default 10)",
-        out_help="write DIR/NAME.gmt, .csv and .jsonl (default: a table on screen)",
+        out_help="write DIR/NAME.gmt, .csv and .jsonl, or NAME.xlsx (default: a table on screen)",
         units=False,
     )  # fmt: skip
     g = v.add_argument_group("velocity")
@@ -500,6 +507,15 @@ def _velocity(args: argparse.Namespace) -> int:
             name = set_name(settings, period.first_day, period.last_day)
         else:
             out = Path(args.out).expanduser()
+            if out.suffix.lower() == ".xlsx":
+                from geo_dataread.products.velocity_files import write_velocity_xlsx
+
+                write_velocity_xlsx(records, out, settings)
+                n_ok = sum(r.accepted for r in records)
+                print(
+                    f"gpsprod: {n_ok}/{len(records)} stations → {out}", file=sys.stderr
+                )
+                return 0
             out_dir, name = out.parent, (out.stem if out.suffix else out.name)
         paths = write_velocity_set(records, out_dir, name)
         n_ok = sum(r.accepted for r in records)
@@ -643,7 +659,7 @@ def _coords_parser(sub: Any, raw: type[argparse.HelpFormatter]) -> None:
         "-o",
         "--out",
         metavar="FILE",
-        help="write FILE.csv or FILE.jsonl (default: a table on screen)",
+        help="write FILE.csv, .jsonl, .gmt (psvelo), .gbis.txt (GBIS, m) or .xlsx (default: a table on screen)",
     )
     g.add_argument("-q", "--quiet", action="store_true", help="no progress on stderr")
 
@@ -709,6 +725,7 @@ formats (--format, or from the -o extension):
          date, yearf, dN dE dU, sN sE sU [mm], kept, flags
   jsonl  a provenance line, then one epoch per line
   neu    gps-savetimes' .NEU layout (kept epochs) + NAME.prov.json beside it
+  xlsx   a data sheet (the csv columns) and a meta sheet
 
 --source tot: the legacy ITRF2008 TOT series exactly as gps-savetimes writes
   it (gamittooneuf; --ref plate | background (= detrend) | itrf (= itrf2008);
@@ -791,7 +808,7 @@ def _series(args: argparse.Namespace) -> int:
     fmt = args.format or (
         out.suffix.lstrip(".").lower() if out is not None and not is_dir else "csv"
     )
-    if fmt not in ("csv", "jsonl", "neu"):
+    if fmt not in ("csv", "jsonl", "neu", "xlsx"):
         raise SystemExit(f"gpsprod: format {fmt!r}: csv, jsonl or neu")
     src = Source(
         frame=args.frame, session=args.session, view=args.view, ref=ref,

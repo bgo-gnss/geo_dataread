@@ -38,7 +38,7 @@ from geo_dataread.products.loader import (
 
 FloatArray = npt.NDArray[np.float64]
 SOURCES = ("pos", "tot")
-FORMATS = ("csv", "jsonl", "neu")
+FORMATS = ("csv", "jsonl", "neu", "xlsx")
 #: --source tot: the gps-savetimes references
 TOT_REFS = {"plate": "plate", "background": "detrend", "itrf": "itrf2008"}
 #: the default period of a whole series
@@ -278,6 +278,16 @@ def write_series(
             encoding="utf-8",
         )
         return [target, side]
+    if fmt == "xlsx":
+        from geo_dataread.products.xlsx import write_xlsx
+
+        meta = [x.split(" ", 1) if " " in x else [x, ""] for x in header(rec)]
+        write_xlsx(
+            target,
+            [("data", [list(SERIES_COLUMNS), *series_rows(rec)]),
+             ("meta", [["key", "value"], *meta])],
+        )  # fmt: skip
+        return [target]
     raise ValueError(f"format {fmt!r}: one of {FORMATS}")
 
 
