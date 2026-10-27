@@ -47,7 +47,51 @@ def _ends_n(rec: DisplacementRecord, key: str) -> int | str:
     return ""
 
 
-def rows(
+COORD_COLUMNS = (
+    "station", "epoch", "X", "Y", "Z", "sX", "sY", "sZ",
+    "lat", "lon", "h", "sN", "sE", "sU", "dN", "dE", "dU",
+    "n_used", "t_obs", "method", "view", "frame", "session",
+    "relative_to", "flags", "refused",
+)  # fmt: skip
+
+
+def rows(records: Sequence[Any]) -> tuple[tuple[str, ...], list[list[Any]]]:
+    """(columns, rows) of a set, values formatted for text."""
+    if records and getattr(records[0], "kind", "") == "coords":
+        return _coord_rows(records)
+    return _displacement_rows(records)
+
+
+def _coord_rows(records: Sequence[Any]) -> tuple[tuple[str, ...], list[list[Any]]]:
+    out = []
+    for r in records:
+        dneu = r.dneu if r.dneu is not None else (math.nan,) * 3
+        out.append(
+            [
+                r.station,
+                r.epoch_date,
+                *(_fmt(v, 5) for v in r.xyz),
+                *(_fmt(v, 5) for v in r.sigma_xyz),
+                _fmt(r.llh[0], 9),
+                _fmt(r.llh[1], 9),
+                _fmt(r.llh[2], 5),
+                *(_fmt(v, 5) for v in r.sigma_neu),
+                *(_fmt(v, 5) for v in dneu),
+                r.n_used,
+                _fmt(r.t_obs, 5),
+                r.method,
+                r.view,
+                r.frame,
+                r.session,
+                r.relative_to or "",
+                ";".join(r.flags),
+                r.refused or "",
+            ]  # fmt: skip
+        )
+    return COORD_COLUMNS, out
+
+
+def _displacement_rows(
     records: Sequence[DisplacementRecord],
 ) -> tuple[tuple[str, ...], list[list[Any]]]:
     """(columns, rows) of a displacement set, values formatted for text."""
@@ -100,26 +144,29 @@ def write_jsonl(path: Path, records: Sequence[Any]) -> None:
     path.write_text(text, encoding="utf-8")
 
 
-def table(records: Sequence[DisplacementRecord]) -> str:
+def table(records: Sequence[Any]) -> str:
     """The screen table: one aligned line per station."""
     cols, data = rows(records)
-    keep = (
-        "station",
-        "dN",
-        "dE",
-        "dU",
-        "sN",
-        "sE",
-        "sU",
-        "n_start",
-        "n_end",
-        "flags",
-        "refused",
-    )
+    coords = cols is COORD_COLUMNS
+    keep: tuple[str, ...]
+    if coords:
+        relative = any(getattr(r, "dneu", None) is not None for r in records)
+        keep = (
+            ("station", "dN", "dE", "dU", "sN", "sE", "sU", "n_used", "flags", "refused")
+            if relative
+            else ("station", "X", "Y", "Z", "lat", "lon", "h", "sN", "sE", "sU",
+                  "n_used", "flags", "refused")
+        )  # fmt: skip
+    else:
+        keep = (
+            "station", "dN", "dE", "dU", "sN", "sE", "sU",
+            "n_start", "n_end", "flags", "refused",
+        )  # fmt: skip
     idx = [cols.index(c) for c in keep]
     grid = [[str(c) for c in keep]] + [[str(row[i]) for i in idx] for row in data]
     widths = [max(len(r[j]) for r in grid) for j in range(len(keep))]
-    right = {"dN", "dE", "dU", "sN", "sE", "sU", "n_start", "n_end"}
+    right = {"dN", "dE", "dU", "sN", "sE", "sU", "n_start", "n_end", "X", "Y", "Z",
+             "lat", "lon", "h", "n_used"}  # fmt: skip
     lines = []
     for r in grid:
         cells = [

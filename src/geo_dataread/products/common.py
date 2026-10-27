@@ -139,7 +139,7 @@ class DisplacementRecord:
         )
 
 
-R = TypeVar("R", bound=DisplacementRecord)
+R = TypeVar("R")
 
 
 @dataclasses.dataclass
@@ -157,7 +157,7 @@ class RecordSet(Generic[R]):
         return len(self.records)
 
     def accepted(self) -> list[R]:
-        return [r for r in self.records if r.accepted]
+        return [r for r in self.records if getattr(r, "accepted", False)]
 
     def to_frame(self) -> pd.DataFrame:
         """One row per record: the CSV columns (:mod:`.files`)."""
