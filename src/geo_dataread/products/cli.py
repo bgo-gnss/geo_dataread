@@ -27,11 +27,13 @@ TOP_EPILOG = """\
 subcommands:
   displacement   how far stations moved across a period (ends | points | step | rate)
   velocity       the velocity product: a rate per station over a period
+  coords         where stations are at an epoch (ECEF and lat/lon/h)
   k-table        build the k(T) table the velocity σ falls back on
   show           print a saved velocity set (.jsonl)
 
   gpsprod displacement --help    every option, with examples
   gpsprod velocity --help
+  gpsprod coords --help
 
 The library behind it: from geo_dataread import products  (docs/gpsprod.md)
 """
@@ -306,6 +308,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="report the average velocity (displacement / its span) in mm/yr",
     )  # fmt: skip
     _velocity_parser(sub, raw)
+    _coords_parser(sub, raw)
     k = sub.add_parser(
         "k-table", help="build the k(T) table (gps-velocities k-table)",
         add_help=False, description="Runs gps-velocities k-table; see its --help.",
@@ -511,6 +514,177 @@ def default_uncert(args: argparse.Namespace) -> float:
     )
 
 
+COORDS_EPILOG = """\
+methods:
+  observed  the weighted (GLS, full 3x3 covariance) mean of the .pos X/Y/Z
+            solutions within --window-days either side of the epoch, after the
+            junction offsets and the view. sigma = max(k_day, sqrt(chi2/nu)) x
+            the mean's formal sigma. The default. No solution that close: the
+            coordinate is extrapolated from the nearest window by the station's
+            detrend record + plate motion (flag extrapolated:Nd).
+  model     always that extrapolation from the nearest window: a coordinate
+            without the day-to-day noise (sigma: the window's only).
+  apr       the GLOBK apriori (GAMIT tables igb14_comb.apr/.eq), for comparing.
+
+examples:
+  gpsprod coords SENG THOB --epoch 20240101
+  gpsprod coords --area reykjanes --epoch 20231109 -o coords.csv
+  gpsprod coords all --epoch 20250601 --window-days 0          # single days
+  gpsprod coords THOB --relative-to SKSH --epoch 20240601      # baseline vector
+  gpsprod coords SENG --epoch 20240110 --method model          # in SENG's Jan-2024 gap
+  gpsprod coords HOFN REYK --epoch 20240101 --method apr
+
+columns: X Y Z [m] ECEF, sX sY sZ; lat lon [deg] h [m, ellipsoidal]; sN sE sU
+[m] the sigma in the local frame; with --relative-to dN dE dU [m] the vector at
+the station. n_used solutions; t_obs the epoch the value rests on.
+
+flags:
+  fast_motion:chi2nu=N  the station moved within the window (an event, fast
+                        unrest); the mean blurs it: use --window-days 0 or 1
+  window_cut_at_step:D  a declared step in the window: only the solutions on
+                        the epoch's side of it were used
+  extrapolated:Nd       no solution near the epoch: carried N days from the
+                        nearest window by the detrend record + plate motion
+  steps_between         ... across a declared step the model does not know
+  model:plate_only      no detrend record: plate motion only
+  sigma:observed_only   the model's own sigma is not included
+  apriori               the GLOBK apriori, no sigma
+  view:none             the view could not be read: all solutions used
+"""
+
+
+def _coords_parser(sub: Any, raw: type[argparse.HelpFormatter]) -> None:
+    from geo_dataread.products.coords import METHODS as CMETHODS
+
+    c = sub.add_parser(
+        "coords",
+        help="where stations are at an epoch (ECEF and lat/lon/h)",
+        formatter_class=raw,
+        description=(
+            "Station coordinates at an epoch [m]: X/Y/Z, lat/lon/h and their "
+            "sigma.\nDefaults: itrf14 .pos, cleaned view, mean of the solutions "
+            "within 5 days of the epoch."
+        ),
+        epilog=COORDS_EPILOG,
+    )
+    g = c.add_argument_group("stations")
+    g.add_argument(
+        "stations", nargs="*",
+        help="station markers, or 'all' for every stations.cfg station with a series",
+    )  # fmt: skip
+    g.add_argument("--area", help="the members of a station_areas.yaml area")
+    g.add_argument(
+        "--region", type=_box, metavar="W/E/S/N",
+        help="every station in the box, or narrows the named ones",
+    )  # fmt: skip
+    g = c.add_argument_group("epoch and method")
+    g.add_argument(
+        "--epoch", metavar="DATE",
+        help="the day (YYYYMMDD or YYYY-MM-DD; default today: the newest solutions)",
+    )  # fmt: skip
+    g.add_argument(
+        "--method", choices=CMETHODS, default="observed",
+        help="observed (default), model or apr — see 'methods' below",
+    )  # fmt: skip
+    g.add_argument(
+        "--window-days", type=int, default=5, metavar="N",
+        help="solutions within N days either side of the epoch (default 5; 0 = that day)",
+    )  # fmt: skip
+    g.add_argument(
+        "--view", choices=VIEWS, default="cleaned",
+        help="cleaned (default: outliers out), declared (known blunders out), raw",
+    )  # fmt: skip
+    g.add_argument(
+        "--apr",
+        nargs="+",
+        metavar="FILE",
+        help="apr: GLOBK .apr file(s) (default the GAMIT tables')",
+    )
+    g.add_argument(
+        "--eq", nargs="+", metavar="FILE", help="apr: GLOBK .eq rename file(s)"
+    )
+    g = c.add_argument_group("series")
+    g.add_argument("--frame", default="itrf14", help="itrf14 (default), itrf08, itrf20")
+    g.add_argument(
+        "--session", default="24h", choices=tuple(SESSIONS), help="24h (default) or 8h"
+    )
+    g.add_argument(
+        "--relative-to", metavar="STA",
+        help="the baseline vector STATION − STA at the epoch (dN dE dU at the station)",
+    )  # fmt: skip
+    g.add_argument(
+        "-u", "--uncert", type=float, default=100.0, metavar="MM",
+        help="drop solutions with a formal σ above MM (default 100; the mean weights them anyway)",
+    )  # fmt: skip
+    g.add_argument(
+        "--pos-dir",
+        metavar="DIR",
+        help="the .pos directory (default postprocess.cfg pos_dir)",
+    )
+    g.add_argument(
+        "--params",
+        metavar="FILE",
+        help="detrend parameter document (model, extrapolation)",
+    )
+    g.add_argument("--steps", metavar="FILE", help="steps catalog (the cleaned view)")
+    g = c.add_argument_group("output")
+    g.add_argument(
+        "-o",
+        "--out",
+        metavar="FILE",
+        help="write FILE.csv or FILE.jsonl (default: a table on screen)",
+    )
+    g.add_argument("-q", "--quiet", action="store_true", help="no progress on stderr")
+
+
+def _coords(args: argparse.Namespace) -> int:
+    import datetime as dt
+
+    from geo_dataread.products.coords import CoordSettings, estimate_coords
+    from geo_dataread.products.period import parse_date
+    from geo_dataread.products.velocity_core import yearf
+
+    try:
+        day = parse_date(args.epoch) if args.epoch else dt.date.today()
+        src = Source(
+            frame=args.frame, session=args.session, view=args.view, ref="plate",
+            uncert=args.uncert, pos_dir=args.pos_dir, params=args.params,
+            steps=args.steps, relative_to=args.relative_to,
+        )  # fmt: skip
+        settings = CoordSettings(
+            source=src, method=args.method, window_days=args.window_days,
+            apr_files=tuple(args.apr or ()), eq_files=tuple(args.eq or ()),
+        )  # fmt: skip
+    except ValueError as err:
+        raise SystemExit(f"gpsprod: {err}") from None
+    stations = select(args.stations, area=args.area, region=args.region, source=src)
+    if not stations:
+        raise SystemExit("gpsprod: no stations (give markers, --area, --region or all)")
+    # the epoch of a day's solution is its noon
+    epoch = yearf(dt.datetime(day.year, day.month, day.day, 12))
+
+    def progress(sta: str) -> None:
+        if not args.quiet:
+            print(f"  {sta}", file=sys.stderr, end="\r")
+
+    rs = estimate_coords(
+        stations, epoch, settings, epoch_date=day.isoformat(), progress=progress
+    )
+    if not args.quiet:
+        print(" " * 12, file=sys.stderr, end="\r")
+    if args.out:
+        path = rs.write(args.out)
+        print(
+            f"gpsprod: {len(rs.accepted())}/{len(rs)} stations → {path}",
+            file=sys.stderr,
+        )
+    else:
+        print(f"# {day.isoformat()}  {src.frame_name} {src.session} view {src.view} "
+              f"method {args.method} ±{args.window_days} d [m]")  # fmt: skip
+        print(table(rs.records))
+    return 0
+
+
 def _source(args: argparse.Namespace) -> Source:
     if args.ref and args.keep_seasonal and args.ref != "plate":
         raise SystemExit("gpsprod: --keep-seasonal is --ref plate; not both")
@@ -615,6 +789,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _displacement(args)
     if args.command == "velocity":
         return _velocity(args)
+    if args.command == "coords":
+        return _coords(args)
     return 2  # pragma: no cover
 
 

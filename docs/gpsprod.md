@@ -148,3 +148,40 @@ gpsprod k-table …  /  gpsprod show set.jsonl              # = gps-velocities k
   (`--start/--end/--days`, `--period` with event names) and output (screen by
   default, `-o DIR/NAME`, `--save` = velocity_dir as gps-velocities); σ screen
   10 mm, view declared — the product's own defaults.
+
+## Step 4 — `gpsprod coords` (coordinates at an epoch)
+
+```bash
+gpsprod coords SENG THOB --epoch 20240101
+gpsprod coords --area reykjanes --epoch 20231109 -o coords.csv
+gpsprod coords all --epoch 20250601 --window-days 0          # single days
+gpsprod coords THOB --relative-to SKSH --epoch 20240601      # baseline vector
+gpsprod coords SENG --epoch 20240115 --method model          # in SENG's gap
+gpsprod coords HOFN --epoch 20240101 --method apr            # GLOBK apriori
+```
+
+- **observed** (default): the GLS mean (full 3×3 covariance,
+  `gps_analysis.gls_mean`) of the `.pos` X/Y/Z within `--window-days` (5)
+  either side of the epoch (a day's solution = its noon), after the reviewed
+  junction offsets and the view (`cleaned` by default, BGÓ 2026-10-26), σ
+  screen 100 mm. σ = max(k_day, √χ²/ν) × the mean's formal σ.
+  `--window-days 0` = that day's solution (HOFN 2024-01-01 reproduces the
+  `.pos` row exactly).
+- **Events cut the window.** A declared step (steps.csv) or the start/end of
+  a dike/eruption of the station's area (events.yaml) inside the window keeps
+  only the solutions on the epoch's side (`window_cut_at_step:D`): THOB on
+  2024-06-01 without the cut had χ²/ν 981 and σU 76 mm (the 29 May eruption
+  inside the window); with it, 9 solutions and σU 10 mm. A window with large
+  scatter left (χ²/ν > 25) is flagged `fast_motion` — use `--window-days 0/1`.
+- **No solution near the epoch** (a gap, before the station, the future):
+  extrapolated from the nearest window by the detrend record + the plate
+  motion (horizontals, as the series' plate removal) — `extrapolated:Nd`,
+  `steps_between` when an event lies in between (the model does not know it),
+  `model:plate_only` without a record, `sigma:observed_only`. `--method model`
+  always does this (a coordinate without the daily noise).
+- **apr**: the GAMIT tables' `igb14_comb.apr/.eq` (itrf14) or igb20 (itrf20);
+  stations not in them are refused with the reason. No σ.
+- **--relative-to**: the baseline vector X/Y/Z(A) − X/Y/Z(B), σ in quadrature,
+  its N/E/U at A (`dN dE dU`).
+- Output in metres: X Y Z, sX sY sZ, lat lon h, sN sE sU (+ dN dE dU), n_used,
+  t_obs; screen, `-o .csv/.jsonl`.
