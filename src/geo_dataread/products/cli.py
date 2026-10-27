@@ -436,37 +436,45 @@ def _velocity_parser(sub: Any, raw: type[argparse.HelpFormatter]) -> None:
     )  # fmt: skip
 
 
-def _velocity(args: argparse.Namespace) -> int:
+def velocity_settings(args: argparse.Namespace) -> Any:
+    """The velocity product's settings of ``gpsprod velocity``'s options
+    (the map and ``gpsplot ts --rate`` build the same for the same window).
+
+    Raises:
+        ValueError: settings the product refuses.
+    """
     from geo_dataread.pos import frame_name
     from geo_dataread.products.period import parse_date
-    from geo_dataread.products.velocity_cli import _show
-    from geo_dataread.products.velocity_core import (
-        VelocitySettings,
-        estimate_velocities,
-        velocity_dir,
-        window_bounds,
-    )
-    from geo_dataread.products.velocity_files import set_name, write_velocity_set
+    from geo_dataread.products.velocity_core import VelocitySettings, window_bounds
 
     if args.ref and args.keep_seasonal and args.ref != "plate":
-        raise SystemExit("gpsprod: --keep-seasonal is --ref plate; not both")
+        raise ValueError("--keep-seasonal is --ref plate; not both")
     ref = args.ref or ("plate" if args.keep_seasonal else "plate-periodic")
+    pre = None
+    if args.pre_window:
+        a, b = args.pre_window.split(":", 1)
+        pre = window_bounds(parse_date(a), parse_date(b))
+    return VelocitySettings(
+        frame=frame_name(args.frame), ref=ref, view=args.view,
+        uncert=args.uncert if args.uncert is not None else UNCERT_RATE,
+        no_record=args.no_record, allow_steps=args.allow_steps,
+        min_obs=args.min_obs, min_cover=args.min_cover,
+        short_tier=args.short_tier, short_snr=args.short_snr,
+        short_snr_pair=args.short_snr_pair, default_k=args.default_k,
+        pos_dir=args.pos_dir, params=args.params, steps=args.steps,
+        k_table=args.k_table, pre_window=pre, session=args.session,
+        relative_to=args.relative_to,
+    )  # fmt: skip
+
+
+def _velocity(args: argparse.Namespace) -> int:
+    from geo_dataread.products.velocity_cli import _show
+    from geo_dataread.products.velocity_core import estimate_velocities, velocity_dir
+    from geo_dataread.products.velocity_files import set_name, write_velocity_set
+
     try:
-        pre = None
-        if args.pre_window:
-            a, b = args.pre_window.split(":", 1)
-            pre = window_bounds(parse_date(a), parse_date(b))
-        settings = VelocitySettings(
-            frame=frame_name(args.frame), ref=ref, view=args.view,
-            uncert=args.uncert if args.uncert is not None else UNCERT_RATE,
-            no_record=args.no_record, allow_steps=args.allow_steps,
-            min_obs=args.min_obs, min_cover=args.min_cover,
-            short_tier=args.short_tier, short_snr=args.short_snr,
-            short_snr_pair=args.short_snr_pair, default_k=args.default_k,
-            pos_dir=args.pos_dir, params=args.params, steps=args.steps,
-            k_table=args.k_table, pre_window=pre, session=args.session,
-            relative_to=args.relative_to,
-        )  # fmt: skip
+        settings = velocity_settings(args)
+        ref = settings.ref
         period = resolve_period(
             args.period, start=args.start, end=args.end, days=args.days
         )
