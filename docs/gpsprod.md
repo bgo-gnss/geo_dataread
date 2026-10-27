@@ -210,3 +210,21 @@ gpsprod series SENG --source tot --ref plate -o tot/     # = gps-savetimes --fil
   byte-identical to `gps-savetimes` (checked: SENG plate and itrf2008, OLAC).
   **`gps-savetimes` itself is unchanged** (it feeds the production .NEU on the
   CDN; not aliased, unlike the plan).
+
+## Step 6 — gpsplot uses the products (gps_api: pending BGÓ)
+
+- `gpsplot map deformation` = `gpsprod displacement` (method ends, ref
+  background by default, declared view): the level of 5 days at each end with
+  the max-of-three σ, instead of gps_plot's own 1/σ-weighted 5-sample mean.
+- `gpsplot map velocity` without a window = the stored records' secular rate,
+  now `geo_dataread.products.secular_rate` (moved from gps_plot).
+- gps_plot's `sources/velocity.py` (window_velocity, window_displacement,
+  record_velocity) is deleted.
+- One estimator, test-pinned (`gps_plot/tests/test_one_estimator.py`):
+  `gpsprod velocity`, `gpsplot map velocity --window` and `gpsplot ts --rate`
+  build identical velocity settings — frame by its full name, session from the
+  product — so the same fingerprint and numbers, 24 h and 8 h. (Map/ts velocity
+  sets written before this carry the short frame name in their fingerprint.)
+- A station with only a regional seasonal record asked for `--ref background`
+  now falls back to plate-periodic (`seasonal:regional;fallback:plate-periodic`)
+  in every product, instead of being refused.

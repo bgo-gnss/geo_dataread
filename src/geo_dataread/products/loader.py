@@ -167,6 +167,11 @@ def _read_one(
     if ref in TERMS and record is None:
         ref = "plate"
         flags.append("fallback:plate")
+    if ref == "background" and record is not None and record.get("seasonal_only"):
+        # a regional seasonal and no background of the station's own: the
+        # seasonal is all there is to remove
+        ref = "plate-periodic"
+        flags.append("seasonal:regional;fallback:plate-periodic")
     if record is not None and record.get("borrowed"):
         flags.append(f"borrowed:{(record['borrowed'] or {}).get('from')}")
     terms = TERMS.get(ref)

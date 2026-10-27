@@ -743,3 +743,30 @@ def test_sigma_screen_defaults() -> None:
     assert cli._source(ends).uncert == 100.0
     assert cli._source(rate).uncert == 10.0
     assert cli._source(given).uncert == 15.0
+
+
+def test_background_of_a_regional_seasonal_station_falls_back(monkeypatch) -> None:
+    import pandas as pd
+
+    import geo_dataread.gps_views as gv
+
+    seen = {}
+
+    def read_gps_view(sta, start, end, **kw):
+        seen["terms"] = kw["terms"]
+        t = np.array([2024.0, 2024.01])
+        df = pd.DataFrame({"yearf": t, **{f"{c}_detrended": [0.0, 1.0] for c in ("north", "east", "up")},
+                           **{f"D{c}": [1.0, 1.0] for c in ("north", "east", "up")}})  # fmt: skip
+        df.attrs["gps_view"] = {}
+        return df
+
+    monkeypatch.setattr(gv, "read_gps_view", read_gps_view)
+    monkeypatch.setattr(
+        loader, "station_record", lambda doc, sta: {"seasonal_only": True}
+    )
+    monkeypatch.setattr(Source, "directory", lambda self: "/pos")
+    v = loader._read_one(
+        "THOB", 2024.0, 2024.1, Source(ref="background", view="raw"), doc={}
+    )
+    assert v.ref == "plate-periodic" and seen["terms"] == "periodic"
+    assert "seasonal:regional;fallback:plate-periodic" in v.flags
