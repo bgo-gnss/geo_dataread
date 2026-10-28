@@ -25,7 +25,9 @@ what it is:
   v is the steady rate the curve approaches. tau is ONE decay time for all
   the stations of the run (one source): estimated jointly (the default),
   given (--half-life), or read from an earlier run (--decay). The half-life
-  is ln2*tau. Its sigma is carried into every rate's sigma.
+  is ln2*tau. Its sigma is carried into every rate's sigma. Pick stations
+  that see the one source (a box or area around it); stations with another
+  source are flagged tau_differs when their own curve is well measured.
 
   t0 is the first day of the period: start it the day after the eruption
   ended (--period after:EVENT does that: an events.yaml eruption's last day
@@ -69,8 +71,8 @@ refused: too few epochs (< 30) or too short (< 90 days) after t0, a declared
   step inside (without --allow-steps), no detrend record (--no-record refuse).
 
 output: a table on screen; -o DIR/NAME writes NAME.gmt, NAME.csv, NAME.jsonl
-  (the velocity product's files; with several --at, NAME-atYYYYMMDD.*) and
-  NAME.decay.json. The .jsonl rows carry 'at' (the date of the rate) and
+  as NAME-atYYYYMMDD.{gmt,csv,jsonl} (the velocity product's files, one set
+  per date) and NAME.decay.json. The .jsonl rows carry 'at' (the date of the rate) and
   'transient' (t0, tau, half-life, per component v, phi and A = -phi).
 """
 
@@ -235,15 +237,32 @@ def run(args: argparse.Namespace) -> int:
             + (f", {len(decay.stations)} stations" if decay.stations else "")
             + ")")  # fmt: skip
     if args.out:
+        import dataclasses
+
         out = Path(args.out).expanduser()
         out_dir, name = out.parent, (out.stem if out.suffix else out.name)
+        dpath = out_dir / f"{name}.decay.json"
+        if decay.source == "shared":  # the rows name the file they can be rerun with
+            decay = dataclasses.replace(decay, source=str(dpath))
+            records = [
+                dataclasses.replace(
+                    r,
+                    k_source={**r.k_source, "decay": str(dpath)},
+                    transient=(
+                        {**r.transient, "decay": str(dpath)} if r.transient else None
+                    ),
+                )
+                for r in records
+            ]
         written = []
         for a in epochs:
             rows = [r for r in records if r.at == a]
-            set_name = name if len(epochs) == 1 else f"{name}-at{_day(a):%Y%m%d}"
+            # always dated: the .csv/.gmt have no 'at' column, and their
+            # window is the fit span, not an averaging window
+            set_name = f"{name}-at{_day(a):%Y%m%d}"
             paths = write_velocity_set(rows, out_dir, set_name)
             written.append(paths["csv"].with_suffix(""))
-        dpath = write_decay(decay, out_dir / f"{name}.decay.json")
+        dpath = write_decay(decay, dpath)
         n_ok = len({r.station for r in records if r.accepted})
         print(head, file=sys.stderr)
         print(f"gpsprod: {n_ok}/{len(stations)} stations → "
