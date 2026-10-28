@@ -3,7 +3,7 @@
 ``events.yaml`` (gps-config-data ``analysis-lane/``, deployed to the
 gpsconfig dir; BGÓ 2026-10-17) declares the Reykjanes episodes since 2020:
 per event an ``id``, a ``kind`` (inflation, deflation, deep_inflation,
-swarm, earthquake, dike, eruption), an ``onset`` date, an ``end`` date
+swarm, earthquake, dike, eruption, landslide), an ``onset`` date, an ``end`` date
 (null = open or unknown) and a ``region`` — a key of ``station_areas.yaml``
 (any ``*_areas`` section), which says which stations the event concerns.
 
@@ -33,6 +33,7 @@ KINDS = (
     "earthquake",
     "dike",
     "eruption",
+    "landslide",
 )
 #: the kinds that put a step (or a deformation episode of days) in a series
 STEP_KINDS = ("dike", "eruption")

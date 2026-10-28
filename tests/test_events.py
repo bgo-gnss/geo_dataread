@@ -103,3 +103,10 @@ def test_station_events_by_region_and_kind(tmp_path):
 def test_an_event_without_a_known_region_concerns_no_station():
     e = ev.Event("x", "dike", dt.date(2024, 1, 1), region="atlantis")
     assert ev.station_events("NYLA", [e], ev.area_stations(AREAS)) == []
+
+
+def test_a_landslide_is_a_kind_but_not_a_step_kind():
+    doc = {"events": [{"id": "s", "kind": "landslide", "onset": "2026-09-23"}]}
+    (e,) = ev.parse_events(doc)
+    assert e.kind == "landslide" and e.end is None
+    assert "landslide" not in ev.STEP_KINDS
