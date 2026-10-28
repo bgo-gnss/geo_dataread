@@ -27,6 +27,7 @@ TOP_EPILOG = """\
 subcommands:
   displacement   how far stations moved across a period (ends | points | step | rate)
   velocity       the velocity product: a rate per station over a period
+  transient      the velocity on a date from a fitted recharge curve (after an event)
   coords         where stations are at an epoch (ECEF and lat/lon/h)
   series         a station's time series to file (csv, jsonl, .NEU)
   k-table        build the k(T) table the velocity σ falls back on
@@ -34,6 +35,7 @@ subcommands:
 
   gpsprod displacement --help    every option, with examples
   gpsprod velocity --help
+  gpsprod transient --help
   gpsprod coords --help
   gpsprod series --help
 
@@ -316,6 +318,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="report the average velocity (displacement / its span) in mm/yr",
     )  # fmt: skip
     _velocity_parser(sub, raw)
+    from geo_dataread.products import transient_cli
+
+    transient_cli.add_parser(sub, raw)
     _coords_parser(sub, raw)
     _series_parser(sub, raw)
     k = sub.add_parser(
@@ -983,6 +988,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _displacement(args)
     if args.command == "velocity":
         return _velocity(args)
+    if args.command == "transient":
+        from geo_dataread.products import transient_cli
+
+        return transient_cli.run(args)
     if args.command == "coords":
         return _coords(args)
     if args.command == "series":

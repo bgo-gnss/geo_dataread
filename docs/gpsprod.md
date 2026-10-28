@@ -243,3 +243,49 @@ gpsprod series SENG --source tot --ref plate -o tot/     # = gps-savetimes --fil
   LibreOffice.
 - `.gmt`/`.gbis.txt` are for displacements only (a velocity set already
   writes its own `.gmt`).
+
+## `gpsprod transient` — the velocity on a date from a fitted curve (2026-10-28, BGÓ)
+
+After an eruption the Svartsengi stations move on a curve: fast at first, then
+slowing to a steady rate. A straight line over a year misfits it badly; the
+3 + 3 month windows track it once the curve is nearly flat. This product fits
+the curve instead, after the method of `gps_data_analyses/detrend-bb` (line +
+exponential, then its derivative):
+
+    x(t) = offset + v·t + Φ·(1 − e^(−(t − t₀)/τ))      dx/dt = v + (Φ/τ)·e^(−(t − t₀)/τ)
+
+- **One τ for the run** (one source): estimated jointly from all usable
+  stations (`gps_analysis.profile_shared_tau`, a summed VARPRO profile), or
+  `--half-life DAYS`, or `--decay FILE` from an earlier run. Written to
+  `NAME.decay.json` (τ, σ_τ, its interval, t₀, the stations, the settings).
+- **Each station with τ fixed** (`gps_analysis.transient_rate`); σ_τ is carried
+  into the rate. Outliers (> 4 robust σ off the curve) are dropped from the
+  series as read, at the final τ — so a station's numbers depend on its data
+  and the decay only (test-pinned), the k(T)-table rule of the velocity
+  product.
+- **The record** is a `VelocityRecord` (`kind` "transient", `model`
+  "exp_linear") with two new optional fields, omitted from JSON when unset (the
+  goldens are unchanged): `at` — the date the rate is FOR — and `transient`
+  (t₀, τ, half-life, per component `v`, `phi`, `A = −phi`, steps, rejections).
+  `gpsplot map velocity --velocities` draws it, labelled "rate on DATE".
+- **σ is formal × √(χ²/ν)** (`sigma_method` formal_chi2, flag `sigma:formal`):
+  no coloured-noise scale for curves yet, so smaller than `gpsprod velocity`'s.
+- t₀ is the period's first day: `--period after:EVENT` starts the day after an
+  eruption's last day. `--at` defaults to the newest day with data (not the
+  calendar: the processing lag would make every rate an extrapolation).
+
+Svartsengi, 26 stations, t₀ 2025-08-06 → 2026-10-28: half-life 60.3 d
+(τ 0.238 ± 0.002 yr), χ²/ν 1.76; the rate on 2026-10-25 matches the
+experiment in `gps_data_analyses/svartsengi-explin` (NBIO Up 116.7 vs 117.4,
+SENG 169.2 vs 169.4 mm/yr). `tau_differs` flags AUSV, FEFC, HRAG, KEIC, THOB
+(own half-lives 30–80 d).
+
+Open: the network common mode is not removed (loader.load does not apply it);
+an empirical σ for curves; a ts overlay of the fitted curve.
+
+```bash
+gpsprod transient --area reykjanes --period after:sundhnukur-2025-07-eruption
+gpsprod transient --region=-22.72/-22.17/63.76/63.945 --start 20250806 \
+                  --at 20260101 --at 20261025 -o ~/tmp/svartsengi
+gpsprod transient SENG --start 20250806 --decay ~/tmp/svartsengi.decay.json
+```
