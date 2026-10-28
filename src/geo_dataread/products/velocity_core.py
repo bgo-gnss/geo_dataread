@@ -107,7 +107,12 @@ DEFAULT_VELOCITY_DIR = "~/gps-data/velocities"
 SESSION_DAYS = {"24h": 1.0, "8h": 1.0 / 3.0}
 #: settings and record fields added after schema 3, left out of the
 #: fingerprint and the JSON at their defaults so earlier sets stay byte-equal
-_LATER_DEFAULTS: dict[str, Any] = {"session": "24h", "relative_to": None}
+_LATER_DEFAULTS: dict[str, Any] = {
+    "session": "24h",
+    "relative_to": None,
+    "at": None,
+    "transient": None,
+}
 #: decimals written to the text formats
 _RATE_DECIMALS = 3
 _COORD_DECIMALS = 6
@@ -183,6 +188,13 @@ class VelocityRecord:
     session: str = "24h"
     #: the station the series was differenced against (omitted when None)
     relative_to: str | None = None
+    #: the epoch the rate is FOR [yr]: a transient record's rate is dx/dt
+    #: on this date, not an average over ``window`` (omitted when None)
+    at: float | None = None
+    #: a transient record's curve: t0, tau (± sigma), half-life, decay
+    #: source, per component v (the steady rate), phi/A (amplitude),
+    #: steps modelled, epochs rejected (products.transient; omitted when None)
+    transient: dict[str, Any] | None = None
 
     @property
     def accepted(self) -> bool:
