@@ -5,6 +5,25 @@ One place, one estimator for every number about station motion
 `../PLAN-gpsprod-review.md`). Library: `geo_dataread.products`; maths:
 `gps_analysis.displacement`. Built in steps; this page grows with them.
 
+## `--common-mode` — the network's shared daily motion (2026-10-29, BGÓ)
+
+On some days the whole solution moves a few mm at every station together
+(that day's orbits and frame realisation), which is not ground motion.
+`gps-network-days` measures it from quiet stations outside the volcanic
+areas (`network_cm.itrf14.csv` in `pos_dir`); gpsplot subtracts it, and
+`loader.load` now can (`Source.common_mode`, `VelocitySettings.common_mode`).
+
+| command | default |
+|---|---|
+| `displacement` (ends, points, step) | subtract |
+| `displacement --method rate`, `velocity` | off (= the velocity product, whose k(T) table was measured without it) |
+| `transient` | subtract |
+| `series` | off |
+
+Flag `common_mode` when subtracted, `common_mode:none` where the series has
+none (itrf20, 8 h, no file). Svartsengi 90-day ends: every station shifted
+by about N +1.4, E −1.5, U −2.3 mm, East σ 8 → 1.4 mm.
+
 ## Step 1 — `gpsprod displacement` (method `ends`)
 
 ```bash
@@ -268,8 +287,16 @@ exponential, then its derivative):
   goldens are unchanged): `at` — the date the rate is FOR — and `transient`
   (t₀, τ, half-life, per component `v`, `phi`, `A = −phi`, steps, rejections).
   `gpsplot map velocity --velocities` draws it, labelled "rate on DATE".
-- **σ is formal × √(χ²/ν)** (`sigma_method` formal_chi2, flag `sigma:formal`):
-  no coloured-noise scale for curves yet, so smaller than `gpsprod velocity`'s.
+- **σ is formal × √(χ²/ν) × k** (`sigma_method` lag1_residual, flag
+  `sigma:lag1`, k per component in `k`): k = √((1+ρ)/(1−ρ)), ρ the
+  day-to-day correlation of the station's residuals from the curve
+  (`gps_analysis.lag1_scale`); σ_τ added after. `sigma_formal` is the σ
+  without k. A lower bound: Svartsengi 2025-08..2026-10 gives k 1.7–2.3, the
+  velocity product's k(T) at that length 5–7 (flicker noise, which one lag
+  does not see).
+- **The network common mode is subtracted** by default (`--common-mode off`
+  keeps it; flag `common_mode`, or `common_mode:none` where a series has
+  none: only okada's itrf14/itrf08 24 h solutions do).
 - t₀ is the period's first day: `--period after:EVENT` starts the day after an
   eruption's last day. `--at` defaults to the newest day with data (not the
   calendar: the processing lag would make every rate an extrapolation).
@@ -280,8 +307,8 @@ experiment in `gps_data_analyses/svartsengi-explin` (NBIO Up 116.7 vs 117.4,
 SENG 169.2 vs 169.4 mm/yr). `tau_differs` flags AUSV, FEFC, HRAG, KEIC, THOB
 (own half-lives 30–80 d).
 
-Open: the network common mode is not removed (loader.load does not apply it);
-an empirical σ for curves; a ts overlay of the fitted curve.
+Open: a σ scale that sees the slower noise (the lag-1 k is a lower bound);
+a ts overlay of the fitted curve.
 
 ```bash
 gpsprod transient --area reykjanes --period after:sundhnukur-2025-07-eruption

@@ -305,6 +305,7 @@ def _velocity_settings(src: Source, ref: str | None = None) -> VelocitySettings:
         frame=src.frame_name, ref=ref or "plate-periodic", view=src.view,
         uncert=src.uncert, pos_dir=src.pos_dir, params=src.params,
         steps=src.steps, session=src.session, relative_to=src.relative_to,
+        common_mode=src.common_mode,
     )  # fmt: skip
 
 
