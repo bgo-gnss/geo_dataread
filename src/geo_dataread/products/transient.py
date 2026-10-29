@@ -22,9 +22,14 @@ Two stages, the k(T)-table pattern of the velocity product:
    A station's record depends on its own data and the decay (named in
    ``k_source``), never on which other stations ran with it.
 
-σ is formal × √(χ²/ν) (``sigma_method`` ``formal_chi2``, flag
-``sigma:formal``): no coloured-noise scale is measured for curves yet, so it
-is smaller than the velocity product's empirical σ.
+σ (``sigma_method`` ``block_mean_residual``, flag ``sigma:blocks``): the
+fit's formal × √(χ²/ν) widened by k = √(n·var(r̄ₙ)/var(r)), how much more
+n-day means of the station's own residuals from the curve scatter than
+independent noise allows (:func:`gps_analysis.block_mean_scale`, n = the
+span / 8, per component, in ``k``), then σ_τ added in quadrature. GNSS
+noise wanders over weeks, which the formal σ assumes it does not. Slower
+wander, and what the curve absorbs, is not seen: a lower bound still.
+``sigma_formal`` keeps the unwidened σ (τ fixed).
 
 The library of gpsprod ``transient`` (docs/gpsprod.md).
 """
@@ -54,6 +59,7 @@ from geo_dataread.products.velocity_core import (
     _params_doc,
     _product,
     _read,
+    common_mode_flag,
     _record,
     _record_summary,
     _software,
@@ -227,6 +233,9 @@ def _read_station(
             )
         except (OSError, ValueError) as exc:
             refused = f"read: {exc}"
+        cm_flag = common_mode_flag(settings, attrs) if refused is None else None
+        if cm_flag:
+            flags.append(cm_flag)
     data_end = None
     if refused is None:
         ok = np.all(np.isfinite(y), axis=0) & np.all(np.isfinite(s), axis=0)
@@ -381,7 +390,7 @@ def station_transient(
     settings: VelocitySettings,
 ) -> list[VelocityRecord]:
     """One record per ``at`` epoch for one read station."""
-    from gps_analysis import signal_to_noise, transient_rate
+    from gps_analysis import block_mean_scale, signal_to_noise, transient_rate
 
     pid, frame = _product(settings)
     flags = list(d.flags)
@@ -391,6 +400,7 @@ def station_transient(
     sig = np.full((len(at), 3), np.nan)
     sig_fixed = np.full((len(at), 3), np.nan)
     chi2nu = [math.nan] * 3
+    k = [math.nan] * 3
     n_epochs = (0, 0, 0)
     span = None
     transient: dict[str, Any] | None = None
@@ -405,7 +415,12 @@ def station_transient(
         for c in range(3):
             f = transient_rate(m, d.t, d.y[c], d.s[c], at, tau=decay.tau,
                                tau_sigma=decay.tau_sigma)  # fmt: skip
-            rates[:, c], sig[:, c], sig_fixed[:, c] = f.rate, f.sigma, f.sigma_fixed_tau
+            # the τ part of σ as it is; the fixed-τ part widened by k
+            blk = block_mean_scale(f.t_used, f.residuals, step=settings_step(settings))
+            k[c] = blk.k
+            tau_part = np.sqrt(np.maximum(f.sigma**2 - f.sigma_fixed_tau**2, 0.0))
+            rates[:, c], sig_fixed[:, c] = f.rate, f.sigma_fixed_tau
+            sig[:, c] = np.hypot(blk.k * f.sigma_fixed_tau, tau_part)
             chi2nu[c] = f.chi2nu
             counts.append(f.n_obs)
             iv, ia = names.index("rate"), _amp_index(m)
@@ -422,7 +437,7 @@ def station_transient(
             "components": ("north", "east", "up"), **comp,
             "steps": list(d.steps), "n_rejected": d.n_rejected,
         }  # fmt: skip
-        flags.append("sigma:formal")
+        flags.append("sigma:blocks")
         if d.n_rejected:
             flags.append(f"rejected:{d.n_rejected}")
     out = []
@@ -452,7 +467,8 @@ def station_transient(
             rate=rate,  # type: ignore[arg-type]
             sigma=sigma,  # type: ignore[arg-type]
             sigma_formal=tuple(float(v) for v in sig_fixed[i]) if fitted else nan3,  # type: ignore[arg-type]
-            sigma_method="formal_chi2", k=(1.0, 1.0, 1.0),
+            sigma_method="block_mean_residual",
+            k=tuple(k) if fitted else nan3,  # type: ignore[arg-type]
             k_source=decay.k_source(), corr_en=0.0 if fitted else math.nan,
             record=_record_summary(d.record) if d.ref in _TERMS else None,
             steps_in_window=d.steps, outlier_abort=bool(d.attrs.get("outlier_abort")),
@@ -465,6 +481,13 @@ def station_transient(
             data_end=d.data_end, at=a, transient=transient,
         ))  # fmt: skip
     return out
+
+
+def settings_step(settings: VelocitySettings) -> float:
+    """One session (the sampling step) in years."""
+    from geo_dataread.products.velocity_core import SESSION_DAYS
+
+    return SESSION_DAYS[settings.session] / 365.25
 
 
 def _plate(sta: str) -> str | None:

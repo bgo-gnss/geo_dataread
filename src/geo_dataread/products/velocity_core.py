@@ -110,6 +110,7 @@ SESSION_DAYS = {"24h": 1.0, "8h": 1.0 / 3.0}
 _LATER_DEFAULTS: dict[str, Any] = {
     "session": "24h",
     "relative_to": None,
+    "common_mode": False,
     "at": None,
     "transient": None,
 }
@@ -284,6 +285,9 @@ class VelocitySettings:
     session: str = "24h"
     #: a baseline: every station's series minus this station's (gpsprod)
     relative_to: str | None = None
+    #: subtract the daily network common mode (gpsprod; off for the
+    #: velocity product until compared: its k(T) table was measured without)
+    common_mode: bool = False
 
     def __post_init__(self) -> None:
         if self.session not in SESSION_DAYS:
@@ -534,6 +538,10 @@ def _read(
         )
     y = np.vstack([df[c].to_numpy(dtype=np.float64) for c in cols])
     s = np.vstack([df[f"D{c}"].to_numpy(dtype=np.float64) for c in COMPONENTS])
+    if settings.common_mode:
+        from geo_dataread.products.loader import apply_common_mode
+
+        y, attrs["common_mode"] = apply_common_mode(t, y, pid, _pos_dir(settings))
     if settings.view == "declared" and idx:
         y[:, idx] = np.nan
     if clean and not attrs.get("outlier_abort"):
@@ -545,6 +553,18 @@ def _read(
 
 
 _TERMS_REF = {None: "plate", "periodic": "plate-periodic", "all": "background"}
+
+
+def common_mode_flag(
+    settings: VelocitySettings, attrs: Mapping[str, Any]
+) -> str | None:
+    """The record flag of the common mode: ``common_mode`` when it was
+    subtracted, ``common_mode:none`` when asked for but the series has none
+    (another solution, no file), None when not asked for."""
+    if not settings.common_mode:
+        return None
+    done = attrs.get("common_mode") or "common_mode" in attrs.get("product_flags", ())
+    return "common_mode" if done else "common_mode:none"
 
 
 def _read_product(
@@ -566,7 +586,7 @@ def _read_product(
         frame=settings.frame, session=settings.session, view=settings.view,
         ref=_TERMS_REF[terms], uncert=settings.uncert, pos_dir=settings.pos_dir,
         params=settings.params, steps=settings.steps,
-        relative_to=settings.relative_to,
+        relative_to=settings.relative_to, common_mode=settings.common_mode,
     )  # fmt: skip
     view = load(sta, start, end, src, doc=doc)
     attrs = dict(view.attrs)
@@ -908,6 +928,9 @@ def estimate_station_velocity(
     if refused is None:
         if attrs.get("outlier_abort"):
             flags.append("outlier_abort")
+        cm_flag = common_mode_flag(settings, attrs)
+        if cm_flag:
+            flags.append(cm_flag)
         if settings.view == "declared" and attrs.get("excluded_epochs_source") is None:
             flags.append("no_excluded_catalog")  # declared fell back to raw
         data_end = _data_end(sta, t, t1, settings)

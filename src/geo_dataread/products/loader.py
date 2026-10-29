@@ -3,8 +3,9 @@
 :func:`load` is the one read path of the products: the ``.pos`` series of
 a frame and session, the reference (plate removed, the stored seasonal or
 background removed, or the raw frame), the view (declared blunders out,
-running-window outliers out, or raw), optionally differenced against a
-reference station with the baseline function gps_plot uses.
+running-window outliers out, or raw), optionally the daily network common
+mode removed (as gpsplot does), optionally differenced against a reference
+station with the baseline function gps_plot uses.
 """
 
 from __future__ import annotations
@@ -52,6 +53,11 @@ class Source:
         params: Detrend parameter document (None: the frame's deployed one).
         steps: Steps catalog (None: the deployed one).
         relative_to: Difference every station against this one.
+        common_mode: Subtract the daily network common mode
+            (``network_cm.<frame>.csv`` in ``pos_dir``, gps-network-days):
+            the motion every station shares on a day. Only okada's 24 h
+            itrf08/itrf14 solutions have one; elsewhere the series is left
+            as read and flagged ``common_mode:none``.
     """
 
     frame: str = "itrf14"
@@ -63,6 +69,7 @@ class Source:
     params: str | None = None
     steps: str | None = None
     relative_to: str | None = None
+    common_mode: bool = False
 
     def __post_init__(self) -> None:
         if self.session not in SESSIONS:
@@ -138,6 +145,36 @@ class StationView:
         )  # fmt: skip
 
 
+def common_mode_applies(pos_id: str) -> bool:
+    """The common mode is estimated from okada's 24 h solutions (itrf08 and
+    itrf14 share them): gamit-p01's IGb20 is another solution, an 8 h
+    session another product."""
+    from geo_dataread.pos import pos_frame, pos_product
+
+    return pos_frame(pos_id) in ("itrf08", "itrf14") and "24hr" in pos_product(pos_id)
+
+
+def apply_common_mode(
+    t: FloatArray, y: FloatArray, pos_id: str, directory: str
+) -> tuple[FloatArray, dict[str, Any] | None]:
+    """``y`` (3, N) [mm] less the daily network common mode on the days it
+    was estimated (:func:`geo_dataread.gps_views.subtract_common_mode`).
+
+    Returns ``(y', info)``: ``info`` = ``{"source", "n_days"}``, or None
+    when the series has no common mode (another solution, or no file) and
+    ``y`` is returned unchanged.
+    """
+    if not common_mode_applies(pos_id):
+        return y, None
+    from geo_dataread.gps_views import resolve_common_mode, subtract_common_mode
+
+    epochs, values, path = resolve_common_mode(directory)
+    if path is None:
+        return y, None
+    out, n = subtract_common_mode(t, y, epochs, values)
+    return out, {"source": path, "n_days": n}
+
+
 def station_record(doc: Mapping[str, Any] | None, sta: str) -> dict[str, Any] | None:
     """The station's stored detrend record, None without one."""
     if doc is None:
@@ -201,6 +238,13 @@ def _read_one(
         )
     y = np.vstack([df[c].to_numpy(dtype=np.float64) for c in cols])
     s = np.vstack([df[f"D{c}"].to_numpy(dtype=np.float64) for c in COMPONENTS])
+    if source.common_mode:
+        y, cm = apply_common_mode(t, y, source.pos_id, source.directory())
+        if cm is None:
+            flags.append("common_mode:none")
+        else:
+            attrs["common_mode"] = cm
+            flags.append("common_mode")
     y_raw = y.copy()
     reasons = np.zeros(y.shape, dtype=np.uint8)
     for i, c in enumerate(COMPONENTS):

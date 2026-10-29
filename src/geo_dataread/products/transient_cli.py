@@ -56,9 +56,13 @@ examples:
   draw it: gpsplot map velocity --velocities ~/tmp/svartsengi-at20261025.jsonl ...
 
 flags:
-  sigma:formal          sigma = formal x sqrt(chi2/nu), with tau's sigma
-                        added: no coloured-noise scale for curves yet, so
-                        smaller than gpsprod velocity's sigma
+  sigma:blocks          sigma = formal x sqrt(chi2/nu) x k, k from how much
+                        more n-day means of the residuals scatter than
+                        independent noise (n = span/8, per component), with
+                        tau's sigma added. Near gpsprod velocity's sigma for
+                        N/E; smaller for Up (slow wander it cannot see)
+  common_mode           the daily network common mode was subtracted
+                        (default; --common-mode off keeps it)
   tau_differs:<N>d      the station's own decay is well measured and differs
                         from the shared one (> 5 sigma): its own half-life N
   rejected:N            N epochs off the curve by > 4 robust sigma, dropped
@@ -101,7 +105,7 @@ def add_parser(sub: Any, raw: type[argparse.HelpFormatter]) -> None:
         uncert_help="drop solutions with a formal σ above MM (default 10)",
         out_help="write DIR/NAME.gmt, .csv, .jsonl and NAME.decay.json "
         "(default: a table on screen)",
-        units=False,
+        units=False, common_mode="subtract",
     )  # fmt: skip
     g = p.add_argument_group("transient")
     g.add_argument(
@@ -194,6 +198,7 @@ def run(args: argparse.Namespace) -> int:
             no_record=args.no_record, allow_steps=args.allow_steps,
             pos_dir=args.pos_dir, params=args.params, steps=args.steps,
             session=args.session, relative_to=args.relative_to,
+            common_mode=args.common_mode == "subtract",
         )  # fmt: skip
         period = resolve_period(
             args.period, start=args.start, end=args.end, days=args.days
