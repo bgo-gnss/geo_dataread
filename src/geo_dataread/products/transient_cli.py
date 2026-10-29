@@ -56,11 +56,11 @@ examples:
   draw it: gpsplot map velocity --velocities ~/tmp/svartsengi-at20261025.jsonl ...
 
 flags:
-  sigma:blocks          sigma = formal x sqrt(chi2/nu) x k, k from how much
-                        more n-day means of the residuals scatter than
-                        independent noise (n = span/8, per component), with
-                        tau's sigma added. Near gpsprod velocity's sigma for
-                        N/E; smaller for Up (slow wander it cannot see)
+  sigma:blocks          sigma = formal x sqrt(chi2/nu) x k, k the larger of
+  sigma:velocity_k:NEU  (a) how much more n-day means of the residuals scatter
+                        than independent noise (n = span/8) and (b) gpsprod
+                        velocity's k(T) at the fit's length; the flag says
+                        which won, per component. tau's sigma added after
   common_mode           the daily network common mode was subtracted
                         (default; --common-mode off keeps it)
   tau_differs:<N>d      the station's own decay is well measured and differs

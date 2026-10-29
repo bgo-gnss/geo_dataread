@@ -4,6 +4,7 @@ geo_dataread.velocity in gpsprod step 3; bodies unchanged)."""
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import datetime as dt
 import fnmatch
 import json
@@ -158,8 +159,14 @@ def build_parser() -> argparse.ArgumentParser:
     t.add_argument("-u", "--uncert", type=float, default=DEFAULT_UNCERT)
     t.add_argument("--pos-dir", default=None)
     t.add_argument("--params", default=None)
-    t.add_argument("--out", default=None, help="file (default k_table_<frame>.json "
-                   "in the velocity dir)")  # fmt: skip
+    t.add_argument("--out", default=None, help="file (default k_table_<frame>"
+                   "[.cm].json in the velocity dir)")  # fmt: skip
+    for parser in (e, t):
+        parser.add_argument(
+            "--common-mode", choices=("subtract", "off"), default="subtract",
+            help="the daily network common mode (default subtract; its k table "
+            "is k_table_<frame>.cm.json, the one without k_table_<frame>.json)",
+        )  # fmt: skip
     s = sub.add_parser("show", help="print a set")
     s.add_argument("path")
     s.add_argument("--all", action="store_true", help="refused rows too")
@@ -185,7 +192,8 @@ def _show(records: Sequence[VelocityRecord], show_all: bool) -> None:
 def _k_table_main(args: argparse.Namespace) -> int:
     settings = VelocitySettings(frame=args.frame, view=args.view,
                                 uncert=args.uncert, pos_dir=args.pos_dir,
-                                params=args.params)  # fmt: skip
+                                params=args.params,
+                                common_mode=args.common_mode == "subtract")  # fmt: skip
     stations = select_stations(args.stations, None)
     table = build_k_table(
         stations, settings, progress=lambda sta: print(sta, file=sys.stderr, end=" ")
@@ -193,13 +201,20 @@ def _k_table_main(args: argparse.Namespace) -> int:
     out = Path(args.out).expanduser() if args.out else k_table_path(settings)
     # the `regional` entry is measured by gps-regional-seasonal --k-table, not
     # here: carry it over (marked) rather than silently drop it
-    if out.exists():
-        old = json.loads(out.read_text(encoding="utf-8")).get("residuals") or {}
+    # a first .cm table: the regional entry of the one without, until
+    # re-measured
+    source = (
+        out
+        if out.exists()
+        else k_table_path(dataclasses.replace(settings, common_mode=False))
+    )
+    if source.exists():
+        old = json.loads(source.read_text(encoding="utf-8")).get("residuals") or {}
         if K_RESIDUAL_REGIONAL in old:
             kept = dict(old[K_RESIDUAL_REGIONAL])
             kept["carried_over"] = True
             table["residuals"][K_RESIDUAL_REGIONAL] = kept
-            print(f"kept the '{K_RESIDUAL_REGIONAL}' entry of {out}; re-measure it "
+            print(f"kept the '{K_RESIDUAL_REGIONAL}' entry of {source}; re-measure it "
                   "with gps-regional-seasonal --k-table", file=sys.stderr)  # fmt: skip
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(table, indent=1, sort_keys=True) + "\n", encoding="utf-8")
@@ -235,6 +250,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             short_snr_pair=args.short_snr_pair,
             default_k=args.default_k, pos_dir=args.pos_dir, params=args.params,
             steps=args.steps, k_table=args.k_table,
+            common_mode=args.common_mode == "subtract",
             pre_window=window_bounds(*args.pre_window) if args.pre_window else None,
         )  # fmt: skip
         stations = select_stations(args.stations, args.region)

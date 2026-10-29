@@ -94,7 +94,11 @@ def test_shared_decay_and_rates(fake: None) -> None:
         assert r.at in AT
         err = np.abs(np.array(r.rate) - _rate_truth(r.station, r.at))
         assert np.all(err < 4 * np.array(r.sigma) + 1.0), (r.station, err, r.sigma)
-        assert "sigma:blocks" in r.flags and r.sigma_method == "block_mean_residual"
+        assert r.sigma_method == "max_block_velocity_k"
+        assert any(
+            f == "sigma:blocks" or f.startswith("sigma:velocity_k:") for f in r.flags
+        )
+        assert r.transient is not None and len(r.transient["k_block"]) == 3
         assert all(k >= 1.0 for k in r.k)
         assert all(a >= b for a, b in zip(r.sigma, r.sigma_formal, strict=True))
         assert r.transient is not None
@@ -192,3 +196,24 @@ def test_cli_help_and_dates() -> None:
         "extrapolated",
     ):
         assert word in text
+
+
+def test_sigma_is_the_larger_of_the_block_and_velocity_scales(
+    fake: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def big(d, t0, settings, doc, table):
+        return np.full(3, 100.0), "given"
+
+    monkeypatch.setattr(tr, "velocity_k", big)
+    recs, _ = tr.estimate_transients(list(TRUTH), T0, T1, AT)
+    for r in recs:
+        assert "sigma:velocity_k:NEU" in r.flags
+        np.testing.assert_allclose(r.k, 100.0)
+        assert r.transient is not None
+        assert r.transient["k_velocity"] == {"k": [100.0] * 3, "method": "given"}
+    monkeypatch.setattr(tr, "velocity_k", lambda *a: (np.full(3, 1e-6), "given"))
+    recs, _ = tr.estimate_transients(list(TRUTH), T0, T1, AT)
+    for r in recs:
+        assert "sigma:blocks" in r.flags
+        assert r.transient is not None
+        np.testing.assert_allclose(r.k, r.transient["k_block"], rtol=1e-3)

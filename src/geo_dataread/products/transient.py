@@ -22,14 +22,20 @@ Two stages, the k(T)-table pattern of the velocity product:
    A station's record depends on its own data and the decay (named in
    ``k_source``), never on which other stations ran with it.
 
-σ (``sigma_method`` ``block_mean_residual``, flag ``sigma:blocks``): the
-fit's formal × √(χ²/ν) widened by k = √(n·var(r̄ₙ)/var(r)), how much more
-n-day means of the station's own residuals from the curve scatter than
-independent noise allows (:func:`gps_analysis.block_mean_scale`, n = the
-span / 8, per component, in ``k``), then σ_τ added in quadrature. GNSS
-noise wanders over weeks, which the formal σ assumes it does not. Slower
-wander, and what the curve absorbs, is not seen: a lower bound still.
-``sigma_formal`` keeps the unwidened σ (τ fixed).
+σ (``sigma_method`` ``max_block_velocity_k``, BGÓ 2026-10-29): the fit's
+formal σ (τ fixed, × √(χ²/ν), ``sigma_formal``) widened by the larger of
+two noise scales, per component, then σ_τ added in quadrature:
+
+- the block scale of the station's own residuals from the curve,
+  √(n·var(r̄ₙ)/var(r)) (:func:`gps_analysis.block_mean_scale`, n =
+  span/8): sees noise that wanders over weeks;
+- the velocity product's k(T) at the fit's length (the station's
+  own on its quiet span, else the k(T) table, else 5): sees the slower,
+  seasonal-scale wander a 1-year fit cannot measure from itself (Up).
+
+``k`` is the factor applied to ``sigma_formal`` (the unwidened σ), flag
+``sigma:blocks`` or ``sigma:velocity_k:<components>`` (where that won);
+both scales are in ``transient``.
 
 The library of gpsprod ``transient`` (docs/gpsprod.md).
 """
@@ -49,6 +55,10 @@ import numpy as np
 
 from geo_dataread.products.velocity_core import (
     _TERMS,
+    DEFAULT_K,
+    K_MIN_DAYS,
+    K_RESIDUAL,
+    K_RESIDUAL_REGIONAL,
     FloatArray,
     VelocityRecord,
     VelocitySettings,
@@ -60,6 +70,9 @@ from geo_dataread.products.velocity_core import (
     _product,
     _read,
     common_mode_flag,
+    load_k_table,
+    station_rate_scale,
+    table_k,
     _record,
     _record_summary,
     _software,
@@ -388,8 +401,11 @@ def station_transient(
     at: Sequence[float],
     decay: Decay,
     settings: VelocitySettings,
+    velocity_k: tuple[FloatArray, str] | None = None,
 ) -> list[VelocityRecord]:
-    """One record per ``at`` epoch for one read station."""
+    """One record per ``at`` epoch for one read station; ``velocity_k`` =
+    the velocity product's k(T) and its method (:func:`velocity_k`; None:
+    the block scale alone)."""
     from gps_analysis import block_mean_scale, signal_to_noise, transient_rate
 
     pid, frame = _product(settings)
@@ -401,6 +417,8 @@ def station_transient(
     sig_fixed = np.full((len(at), 3), np.nan)
     chi2nu = [math.nan] * 3
     k = [math.nan] * 3
+    k_blk = [math.nan] * 3
+    k_vel = [math.nan] * 3
     n_epochs = (0, 0, 0)
     span = None
     transient: dict[str, Any] | None = None
@@ -417,10 +435,15 @@ def station_transient(
                                tau_sigma=decay.tau_sigma)  # fmt: skip
             # the τ part of σ as it is; the fixed-τ part widened by k
             blk = block_mean_scale(f.t_used, f.residuals, step=settings_step(settings))
-            k[c] = blk.k
+            k_blk[c] = blk.k
+            # both scale sigma_fixed_tau = formal × √(χ²/ν): the velocity
+            # product's k(T) is measured against that same σ
+            if velocity_k is not None:
+                k_vel[c] = float(velocity_k[0][c])
+            k[c] = max(k_blk[c], k_vel[c]) if math.isfinite(k_vel[c]) else k_blk[c]
             tau_part = np.sqrt(np.maximum(f.sigma**2 - f.sigma_fixed_tau**2, 0.0))
             rates[:, c], sig_fixed[:, c] = f.rate, f.sigma_fixed_tau
-            sig[:, c] = np.hypot(blk.k * f.sigma_fixed_tau, tau_part)
+            sig[:, c] = np.hypot(k[c] * f.sigma_fixed_tau, tau_part)
             chi2nu[c] = f.chi2nu
             counts.append(f.n_obs)
             iv, ia = names.index("rate"), _amp_index(m)
@@ -437,7 +460,18 @@ def station_transient(
             "components": ("north", "east", "up"), **comp,
             "steps": list(d.steps), "n_rejected": d.n_rejected,
         }  # fmt: skip
-        flags.append("sigma:blocks")
+        won = "".join(
+            "NEU"[c]
+            for c in range(3)
+            if math.isfinite(k_vel[c]) and k_vel[c] > k_blk[c]
+        )
+        flags.append(f"sigma:velocity_k:{won}" if won else "sigma:blocks")
+        transient["k_block"] = [round(v, 4) for v in k_blk]
+        transient["k_velocity"] = (
+            None if velocity_k is None
+            else {"k": [round(float(v), 4) for v in velocity_k[0]],
+                  "method": velocity_k[1]}
+        )  # fmt: skip
         if d.n_rejected:
             flags.append(f"rejected:{d.n_rejected}")
     out = []
@@ -467,7 +501,7 @@ def station_transient(
             rate=rate,  # type: ignore[arg-type]
             sigma=sigma,  # type: ignore[arg-type]
             sigma_formal=tuple(float(v) for v in sig_fixed[i]) if fitted else nan3,  # type: ignore[arg-type]
-            sigma_method="block_mean_residual",
+            sigma_method="max_block_velocity_k",
             k=tuple(k) if fitted else nan3,  # type: ignore[arg-type]
             k_source=decay.k_source(), corr_en=0.0 if fitted else math.nan,
             record=_record_summary(d.record) if d.ref in _TERMS else None,
@@ -481,6 +515,35 @@ def station_transient(
             data_end=d.data_end, at=a, transient=transient,
         ))  # fmt: skip
     return out
+
+
+def velocity_k(
+    d: _StationData,
+    t0: float,
+    settings: VelocitySettings,
+    doc: Mapping[str, Any] | None,
+    table: Mapping[str, Any] | None,
+) -> tuple[FloatArray, str]:
+    """The velocity product's k(T) at the fit's length (to its last data):
+    the station's own on its quiet span, else the k(T) table, else
+    :data:`DEFAULT_K` — the order of the velocity product."""
+    ok = np.all(np.isfinite(d.y), axis=0)
+    span = max(float(d.t[ok].max()) - t0, K_MIN_DAYS / 365.25)
+    residual = K_RESIDUAL.get(d.ref, "secular")
+    if residual == "all" and d.record is not None and d.record.get("seasonal_only"):
+        residual = K_RESIDUAL_REGIONAL
+    single = settings.session == "24h" and not settings.relative_to
+    if single and d.record is not None:
+        own, _info = station_rate_scale(
+            d.sta, span, settings, doc=doc, residual=residual
+        )
+        if own is not None:
+            return np.asarray(own, dtype=float), "empirical_k"
+    if single and table is not None:
+        got = table_k(table, residual, span)
+        if got is not None:
+            return got, "empirical_k_table"
+    return np.full(3, DEFAULT_K), "default_k"
 
 
 def settings_step(settings: VelocitySettings) -> float:
@@ -566,7 +629,13 @@ def estimate_transients(
         # record depends on its data and the decay only
         if d.refused is None:
             _reject_at(d, t0, decay.tau)
+    table, _src = load_k_table(settings)
     records = [
-        r for d in data for r in station_transient(d, t0, t1, at, decay, settings)
-    ]
+        r
+        for d in data
+        for r in station_transient(
+            d, t0, t1, at, decay, settings,
+            velocity_k(d, t0, settings, doc, table) if d.refused is None else None,
+        )
+    ]  # fmt: skip
     return sorted(records, key=lambda r: (r.station, r.at or 0.0)), decay

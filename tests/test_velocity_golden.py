@@ -98,7 +98,11 @@ def test_velocity_files_are_unchanged(
     _patch(monkeypatch)
     (start, end), settings = RUNS[name]
     recs = vel.estimate_velocities(
-        ["CCCC", "AAAA", "BBBB", "DDDD"], start, end, vel.VelocitySettings(**settings)
+        # the estimator as captured: the common mode is the read path's
+        ["CCCC", "AAAA", "BBBB", "DDDD"],
+        start,
+        end,
+        vel.VelocitySettings(**settings, common_mode=False),
     )
     paths = vel.write_velocity_set(recs, tmp_path, name)
     if os.environ.get("GPSPROD_CAPTURE") == "1":

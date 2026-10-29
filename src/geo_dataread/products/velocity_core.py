@@ -110,6 +110,7 @@ SESSION_DAYS = {"24h": 1.0, "8h": 1.0 / 3.0}
 _LATER_DEFAULTS: dict[str, Any] = {
     "session": "24h",
     "relative_to": None,
+    # off is what every set before it was: those keep their fingerprints
     "common_mode": False,
     "at": None,
     "transient": None,
@@ -285,9 +286,9 @@ class VelocitySettings:
     session: str = "24h"
     #: a baseline: every station's series minus this station's (gpsprod)
     relative_to: str | None = None
-    #: subtract the daily network common mode (gpsprod; off for the
-    #: velocity product until compared: its k(T) table was measured without)
-    common_mode: bool = False
+    #: subtract the daily network common mode (BGÓ 2026-10-29: on, as the
+    #: plots do; its k(T) table is a separate one, k_table_<frame>.cm.json)
+    common_mode: bool = True
 
     def __post_init__(self) -> None:
         if self.session not in SESSION_DAYS:
@@ -679,10 +680,12 @@ def velocity_dir() -> Path:
 
 
 def k_table_path(settings: VelocitySettings) -> Path:
-    """``k_table_<frame>.json`` in :func:`velocity_dir`."""
+    """``k_table_<frame>.cm.json`` in :func:`velocity_dir` (measured with
+    the network common mode subtracted), ``k_table_<frame>.json`` without."""
     from geo_dataread.pos import pos_frame
 
-    return velocity_dir() / f"k_table_{pos_frame(settings.frame)}.json"
+    cm = ".cm" if settings.common_mode else ""
+    return velocity_dir() / f"k_table_{pos_frame(settings.frame)}{cm}.json"
 
 
 def build_k_table(
@@ -735,6 +738,7 @@ def build_k_table(
         "uncert": settings.uncert,
         "stations": used,
         "residuals": residuals,
+        **({"common_mode": True} if settings.common_mode else {}),
     }
 
 
@@ -1000,6 +1004,8 @@ def estimate_station_velocity(
                 for key, value in (("view", settings.view), ("uncert", settings.uncert))
                 if table.get(key) is not None and table.get(key) != value
             }
+            if bool(table.get("common_mode", False)) != settings.common_mode:
+                differ["common_mode"] = bool(table.get("common_mode", False))
             if differ:  # a table built on other settings: usable, but say so
                 k_source["table_settings"] = differ
                 flags.append("k_table_settings_differ")
