@@ -179,8 +179,7 @@ def _common(
     uncert_help: str = "",
     out_help: str = "write FILE.csv or FILE.jsonl (default: a table on screen)",
     units: bool = True,
-    common_mode: str | None = "off",
-    common_mode_default: str = "",
+    common_mode: str = "off",
 ) -> None:
     g = p.add_argument_group("stations")
     g.add_argument(
@@ -237,7 +236,7 @@ def _common(
         "--common-mode", choices=("subtract", "off"), default=common_mode,
         help="the daily network common mode, the motion every station shares "
         "on a day (orbits, frame): subtract it, as gpsplot does, or leave it "
-        f"(default {common_mode_default or common_mode}). Only itrf14/itrf08 "
+        f"(default {common_mode}). Only itrf14/itrf08 "
         "24 h series have one",
     )  # fmt: skip
     g.add_argument(
@@ -289,9 +288,7 @@ def build_parser() -> argparse.ArgumentParser:
         ),
         epilog=DISPLACEMENT_EPILOG,
     )
-    # rate is the velocity product, which keeps it (its k(T) was measured
-    # without): --method rate equals gpsprod velocity at the defaults
-    _common(d, common_mode=None, common_mode_default="subtract; off for --method rate")
+    _common(d, common_mode="subtract")
     g = d.add_argument_group("method")
     g.add_argument(
         "--method", choices=METHODS, default="ends",
@@ -403,7 +400,7 @@ def _velocity_parser(sub: Any, raw: type[argparse.HelpFormatter]) -> None:
         v, refs=VREFS, ref_help=VELOCITY_REF_HELP,
         uncert_help="drop solutions with a formal σ above MM (default 10)",
         out_help="write DIR/NAME.gmt, .csv and .jsonl, or NAME.xlsx (default: a table on screen)",
-        units=False,
+        units=False, common_mode="subtract",
     )  # fmt: skip
     g = v.add_argument_group("velocity")
     g.add_argument(
@@ -487,7 +484,7 @@ def velocity_settings(args: argparse.Namespace) -> Any:
         pos_dir=args.pos_dir, params=args.params, steps=args.steps,
         k_table=args.k_table, pre_window=pre, session=args.session,
         relative_to=args.relative_to,
-        common_mode=getattr(args, "common_mode", "off") == "subtract",
+        common_mode=getattr(args, "common_mode", "subtract") == "subtract",
     )  # fmt: skip
 
 
@@ -896,14 +893,6 @@ def _series(args: argparse.Namespace) -> int:
     return 0 if all(r.accepted for r in recs) else 1
 
 
-def _common_mode(args: argparse.Namespace) -> bool:
-    """``--common-mode``; unset: subtract, except --method rate (the
-    velocity product's default, off)."""
-    if args.common_mode is None:
-        return getattr(args, "method", None) != "rate"
-    return bool(args.common_mode == "subtract")
-
-
 def _source(args: argparse.Namespace) -> Source:
     if args.ref and args.keep_seasonal and args.ref != "plate":
         raise SystemExit("gpsprod: --keep-seasonal is --ref plate; not both")
@@ -913,7 +902,7 @@ def _source(args: argparse.Namespace) -> Source:
         uncert=args.uncert if args.uncert is not None else default_uncert(args),
         pos_dir=args.pos_dir, params=args.params,
         steps=args.steps, relative_to=args.relative_to,
-        common_mode=_common_mode(args),
+        common_mode=args.common_mode == "subtract",
     )  # fmt: skip
 
 

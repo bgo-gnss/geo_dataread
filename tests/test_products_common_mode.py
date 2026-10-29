@@ -73,9 +73,11 @@ def test_cli_defaults_per_product() -> None:
     off = p.parse_args(["displacement", "X", "--days", "3", "--common-mode", "off"])
     assert cli._source(off).common_mode is False
     rate = p.parse_args(["displacement", "X", "--days", "3", "--method", "rate"])
-    assert cli._source(rate).common_mode is False  # = gpsprod velocity
+    assert cli._source(rate).common_mode is True  # = gpsprod velocity
     vel = p.parse_args(["velocity", "X", "--days", "30"])
-    assert cli.velocity_settings(vel).common_mode is False
+    assert cli.velocity_settings(vel).common_mode is True
+    vel_off = p.parse_args(["velocity", "X", "--days", "30", "--common-mode", "off"])
+    assert cli.velocity_settings(vel_off).common_mode is False
     vel_cm = p.parse_args(
         ["velocity", "X", "--days", "30", "--common-mode", "subtract"]
     )
@@ -84,14 +86,26 @@ def test_cli_defaults_per_product() -> None:
     assert p.parse_args(["series", "X"]).common_mode == "off"
 
 
-def test_velocity_fingerprint_unchanged_at_the_default() -> None:
-    assert "common_mode" not in _fingerprint_settings(VelocitySettings())
-    assert _fingerprint_settings(VelocitySettings(common_mode=True))["common_mode"]
+def test_velocity_fingerprint_unchanged_without_common_mode() -> None:
+    # off (every set before it) stays out of the fingerprint; on goes in
+    off = VelocitySettings(common_mode=False)
+    assert "common_mode" not in _fingerprint_settings(off)
+    assert _fingerprint_settings(VelocitySettings())["common_mode"] is True
 
 
 def test_record_flag() -> None:
     on = VelocitySettings(common_mode=True)
-    assert common_mode_flag(VelocitySettings(), {"common_mode": {"n_days": 1}}) is None
+    off = VelocitySettings(common_mode=False)
+    assert common_mode_flag(off, {"common_mode": {"n_days": 1}}) is None
     assert common_mode_flag(on, {"common_mode": {"n_days": 1}}) == "common_mode"
     assert common_mode_flag(on, {"common_mode": None}) == "common_mode:none"
     assert common_mode_flag(on, {"product_flags": ["common_mode"]}) == "common_mode"
+
+
+def test_k_table_paths_and_marking(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    from geo_dataread.products import velocity_core as core
+
+    monkeypatch.setattr(core, "velocity_dir", lambda: tmp_path)
+    assert core.k_table_path(VelocitySettings()).name == "k_table_itrf14.cm.json"
+    off = VelocitySettings(common_mode=False)
+    assert core.k_table_path(off).name == "k_table_itrf14.json"

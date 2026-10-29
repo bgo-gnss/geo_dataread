@@ -15,10 +15,17 @@ areas (`network_cm.itrf14.csv` in `pos_dir`); gpsplot subtracts it, and
 
 | command | default |
 |---|---|
-| `displacement` (ends, points, step) | subtract |
-| `displacement --method rate`, `velocity` | off (= the velocity product, whose k(T) table was measured without it) |
-| `transient` | subtract |
+| `displacement`, `velocity`, `transient` | subtract |
 | `series` | off |
+
+The velocity product's k(T) table measured with it is a separate file,
+`k_table_<frame>.cm.json` (the old one, `k_table_<frame>.json`, stays for
+`--common-mode off`); a table of the other kind is used but flagged
+`k_table_settings_differ`. Its k is 5–15 % HIGHER than without (same data,
+143 stations): k is measured against formal × √(χ²/ν), and removing the
+common mode lowers χ² (daily scatter of quiet stations −20–40 %), so the
+σ it gives is about the same. `common_mode` stays out of the fingerprint
+when off, so earlier sets keep theirs; the goldens pin off.
 
 Flag `common_mode` when subtracted, `common_mode:none` where the series has
 none (itrf20, 8 h, no file). Svartsengi 90-day ends: every station shifted
@@ -287,16 +294,19 @@ exponential, then its derivative):
   goldens are unchanged): `at` — the date the rate is FOR — and `transient`
   (t₀, τ, half-life, per component `v`, `phi`, `A = −phi`, steps, rejections).
   `gpsplot map velocity --velocities` draws it, labelled "rate on DATE".
-- **σ is formal × √(χ²/ν) × k** (`sigma_method` block_mean_residual, flag
-  `sigma:blocks`, k per component in `k`; BGÓ 2026-10-29, option c):
-  k = √(n·var(r̄ₙ)/var(r)), how much more n-day means of the station's own
-  residuals from the curve scatter than independent noise
-  (`gps_analysis.block_mean_scale`, n = span/8); σ_τ added after.
-  `sigma_formal` is the σ without k. Svartsengi 2025-08..2026-10 (6
-  stations): k 1.5–3.5; σ within ~20 % of the velocity product's (k(T) ×
-  the unscaled formal σ) for N/E, but 3–5× smaller for Up (2–5 vs 12–23
-  mm/yr): the Up noise wanders on seasonal scales the 56-day blocks do not
-  see. The one-lag ρ (`gps_analysis.lag1_scale`) gave k 1.5–2.3.
+- **σ is formal × √(χ²/ν) × k** (`sigma_method` max_block_velocity_k; BGÓ
+  2026-10-29), k per component in `k` = the larger of
+  - the block scale of the station's residuals from the curve,
+    √(n·var(r̄ₙ)/var(r)), n = span/8 (`gps_analysis.block_mean_scale`; option
+    c): sees noise that wanders over weeks;
+  - the velocity product's k(T) at the fit's length (own, else the k(T)
+    table, else 5; the same σ convention, formal × √(χ²/ν)): sees the
+    seasonal-scale wander a 1-year fit cannot see in itself.
+
+  Flag `sigma:blocks` or `sigma:velocity_k:NEU` (where k(T) won); both in
+  `transient` (`k_block`, `k_velocity`). Svartsengi 2025-08..2026-10, 6
+  stations: block k 1.5–3.5, k(T) 3–7; k(T) won everywhere: σ N/E 1.6–6.6,
+  U 6.8–13 mm/yr. (The one-lag ρ, `gps_analysis.lag1_scale`, gave 1.5–2.3.)
 - **The network common mode is subtracted** by default (`--common-mode off`
   keeps it; flag `common_mode`, or `common_mode:none` where a series has
   none: only okada's itrf14/itrf08 24 h solutions do).
@@ -310,7 +320,7 @@ experiment in `gps_data_analyses/svartsengi-explin` (NBIO Up 116.7 vs 117.4,
 SENG 169.2 vs 169.4 mm/yr). `tau_differs` flags AUSV, FEFC, HRAG, KEIC, THOB
 (own half-lives 30–80 d).
 
-Open: Up σ (slower wander than the blocks see: max with the velocity k(T)?);
+Open:
 a ts overlay of the fitted curve.
 
 ```bash

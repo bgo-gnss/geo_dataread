@@ -90,6 +90,7 @@ def _table(frame="itrf2014"):
                     "n_stations": [10, 8]},
             "secular": {"days": [7], "k": [[2.0, 2.0, 2.0]], "n_stations": [10]},
         },
+        "common_mode": True,  # measured as the default settings read
     }  # fmt: skip
 
 
@@ -260,9 +261,17 @@ def test_a_station_without_record_falls_back_to_plate_or_is_refused(tmp_path):
     )
     assert "k_table_settings_differ" in r3.flags
     assert r3.k_source["table_settings"] == {"view": "raw"}
+    # a table measured without the common mode: also said
+    path.write_text(json.dumps({**_table(), "common_mode": False}))
+    r4 = vel.estimate_station_velocity(
+        "THOB", *win, vel.VelocitySettings(k_table=str(path), params=str(params))
+    )
+    assert r4.k_source["table_settings"] == {"common_mode": False}
     np.testing.assert_allclose(r2.rate, r.rate)
     r = vel.estimate_station_velocity(
-        "THOB", *win, vel.VelocitySettings(no_record="refuse", k_table="none", params=str(params))
+        "THOB",
+        *win,
+        vel.VelocitySettings(no_record="refuse", k_table="none", params=str(params)),
     )
     assert r.refused == "no_record"
 
