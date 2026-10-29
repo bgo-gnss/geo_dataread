@@ -150,3 +150,33 @@ def test_empty_span_gives_empty_arrays(root: Path) -> None:
         root=root, use_cache=False,
     )  # fmt: skip
     assert s.neu.shape == (3, 0) and s.time.shape == (0,)
+
+
+def test_an_open_day_is_read_once_until_its_file_grows(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rtk_read._OPEN_DAYS.clear()
+    reads: list[dt.date] = []
+    real = rtk_read._day_raw
+
+    def counting(r: Path, baseline: str, day: dt.date) -> object:
+        reads.append(day)
+        return real(r, baseline, day)
+
+    monkeypatch.setattr(rtk_read, "_day_raw", counting)
+    span = (dt.datetime(2026, 10, 13), dt.datetime(2026, 10, 13, 23))
+    kw = dict(root=root, use_cache=False)
+    a = rtk_read.read_rtk_baseline(BASELINE, *span, **kw)
+    b = rtk_read.read_rtk_baseline(BASELINE, *span, **kw)
+    assert reads == [dt.date(2026, 10, 13)]  # 10/13 is open: memo, one read
+    np.testing.assert_array_equal(a.neu, b.neu)
+    rtk_read.read_rtk_baseline(BASELINE, *span, interval="120s", **kw)
+    assert len(reads) == 2  # keyed on the interval
+    # the file grows: read again, the new epochs are in
+    f = root / BASELINE / f"{BASELINE}202610130000b.pos"
+    t = dt.datetime(2026, 10, 13, 0, 10)
+    with open(f, "a") as fh:
+        fh.write(_line(t, 351.0, -2582.0, 35.1))
+    c = rtk_read.read_rtk_baseline(BASELINE, *span, **kw)
+    assert len(reads) == 3 and c.time.size == a.time.size + 1
+    rtk_read._OPEN_DAYS.clear()
