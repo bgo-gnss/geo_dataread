@@ -287,13 +287,16 @@ exponential, then its derivative):
   goldens are unchanged): `at` — the date the rate is FOR — and `transient`
   (t₀, τ, half-life, per component `v`, `phi`, `A = −phi`, steps, rejections).
   `gpsplot map velocity --velocities` draws it, labelled "rate on DATE".
-- **σ is formal × √(χ²/ν) × k** (`sigma_method` lag1_residual, flag
-  `sigma:lag1`, k per component in `k`): k = √((1+ρ)/(1−ρ)), ρ the
-  day-to-day correlation of the station's residuals from the curve
-  (`gps_analysis.lag1_scale`); σ_τ added after. `sigma_formal` is the σ
-  without k. A lower bound: Svartsengi 2025-08..2026-10 gives k 1.7–2.3, the
-  velocity product's k(T) at that length 5–7 (flicker noise, which one lag
-  does not see).
+- **σ is formal × √(χ²/ν) × k** (`sigma_method` block_mean_residual, flag
+  `sigma:blocks`, k per component in `k`; BGÓ 2026-10-29, option c):
+  k = √(n·var(r̄ₙ)/var(r)), how much more n-day means of the station's own
+  residuals from the curve scatter than independent noise
+  (`gps_analysis.block_mean_scale`, n = span/8); σ_τ added after.
+  `sigma_formal` is the σ without k. Svartsengi 2025-08..2026-10 (6
+  stations): k 1.5–3.5; σ within ~20 % of the velocity product's (k(T) ×
+  the unscaled formal σ) for N/E, but 3–5× smaller for Up (2–5 vs 12–23
+  mm/yr): the Up noise wanders on seasonal scales the 56-day blocks do not
+  see. The one-lag ρ (`gps_analysis.lag1_scale`) gave k 1.5–2.3.
 - **The network common mode is subtracted** by default (`--common-mode off`
   keeps it; flag `common_mode`, or `common_mode:none` where a series has
   none: only okada's itrf14/itrf08 24 h solutions do).
@@ -307,7 +310,7 @@ experiment in `gps_data_analyses/svartsengi-explin` (NBIO Up 116.7 vs 117.4,
 SENG 169.2 vs 169.4 mm/yr). `tau_differs` flags AUSV, FEFC, HRAG, KEIC, THOB
 (own half-lives 30–80 d).
 
-Open: a σ scale that sees the slower noise (the lag-1 k is a lower bound);
+Open: Up σ (slower wander than the blocks see: max with the velocity k(T)?);
 a ts overlay of the fitted curve.
 
 ```bash

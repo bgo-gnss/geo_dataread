@@ -22,13 +22,14 @@ Two stages, the k(T)-table pattern of the velocity product:
    A station's record depends on its own data and the decay (named in
    ``k_source``), never on which other stations ran with it.
 
-σ (``sigma_method`` ``lag1_residual``, flag ``sigma:lag1``): the fit's
-formal × √(χ²/ν) widened by k = √((1 + ρ)/(1 − ρ)), ρ the day-to-day
-correlation of the station's own residuals from the curve
-(:func:`gps_analysis.lag1_scale`, per component, in ``k``), then σ_τ added
-in quadrature. Day-to-day noise is not independent, which the formal σ
-assumes. One lag misses the slower (flicker) wander, so this is a lower
-bound; ``sigma_formal`` keeps the unwidened σ (τ fixed).
+σ (``sigma_method`` ``block_mean_residual``, flag ``sigma:blocks``): the
+fit's formal × √(χ²/ν) widened by k = √(n·var(r̄ₙ)/var(r)), how much more
+n-day means of the station's own residuals from the curve scatter than
+independent noise allows (:func:`gps_analysis.block_mean_scale`, n = the
+span / 8, per component, in ``k``), then σ_τ added in quadrature. GNSS
+noise wanders over weeks, which the formal σ assumes it does not. Slower
+wander, and what the curve absorbs, is not seen: a lower bound still.
+``sigma_formal`` keeps the unwidened σ (τ fixed).
 
 The library of gpsprod ``transient`` (docs/gpsprod.md).
 """
@@ -389,7 +390,7 @@ def station_transient(
     settings: VelocitySettings,
 ) -> list[VelocityRecord]:
     """One record per ``at`` epoch for one read station."""
-    from gps_analysis import lag1_scale, signal_to_noise, transient_rate
+    from gps_analysis import block_mean_scale, signal_to_noise, transient_rate
 
     pid, frame = _product(settings)
     flags = list(d.flags)
@@ -415,11 +416,11 @@ def station_transient(
             f = transient_rate(m, d.t, d.y[c], d.s[c], at, tau=decay.tau,
                                tau_sigma=decay.tau_sigma)  # fmt: skip
             # the τ part of σ as it is; the fixed-τ part widened by k
-            lag = lag1_scale(f.t_used, f.residuals, step=settings_step(settings))
-            k[c] = lag.k
+            blk = block_mean_scale(f.t_used, f.residuals, step=settings_step(settings))
+            k[c] = blk.k
             tau_part = np.sqrt(np.maximum(f.sigma**2 - f.sigma_fixed_tau**2, 0.0))
             rates[:, c], sig_fixed[:, c] = f.rate, f.sigma_fixed_tau
-            sig[:, c] = np.hypot(lag.k * f.sigma_fixed_tau, tau_part)
+            sig[:, c] = np.hypot(blk.k * f.sigma_fixed_tau, tau_part)
             chi2nu[c] = f.chi2nu
             counts.append(f.n_obs)
             iv, ia = names.index("rate"), _amp_index(m)
@@ -436,7 +437,7 @@ def station_transient(
             "components": ("north", "east", "up"), **comp,
             "steps": list(d.steps), "n_rejected": d.n_rejected,
         }  # fmt: skip
-        flags.append("sigma:lag1")
+        flags.append("sigma:blocks")
         if d.n_rejected:
             flags.append(f"rejected:{d.n_rejected}")
     out = []
@@ -466,7 +467,7 @@ def station_transient(
             rate=rate,  # type: ignore[arg-type]
             sigma=sigma,  # type: ignore[arg-type]
             sigma_formal=tuple(float(v) for v in sig_fixed[i]) if fitted else nan3,  # type: ignore[arg-type]
-            sigma_method="lag1_residual",
+            sigma_method="block_mean_residual",
             k=tuple(k) if fitted else nan3,  # type: ignore[arg-type]
             k_source=decay.k_source(), corr_en=0.0 if fitted else math.nan,
             record=_record_summary(d.record) if d.ref in _TERMS else None,

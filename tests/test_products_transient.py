@@ -94,7 +94,7 @@ def test_shared_decay_and_rates(fake: None) -> None:
         assert r.at in AT
         err = np.abs(np.array(r.rate) - _rate_truth(r.station, r.at))
         assert np.all(err < 4 * np.array(r.sigma) + 1.0), (r.station, err, r.sigma)
-        assert "sigma:lag1" in r.flags and r.sigma_method == "lag1_residual"
+        assert "sigma:blocks" in r.flags and r.sigma_method == "block_mean_residual"
         assert all(k >= 1.0 for k in r.k)
         assert all(a >= b for a, b in zip(r.sigma, r.sigma_formal, strict=True))
         assert r.transient is not None
