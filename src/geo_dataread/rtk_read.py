@@ -171,6 +171,22 @@ def _cache_key(interval: str, drop_q: Sequence[int], max_sigma: float) -> str:
     return hashlib.sha1(raw.encode()).hexdigest()[:10]
 
 
+#: medians of days still being written, kept for this process: one run of
+#: several spans (``gpsplot rtk-run``) reads today's 1 Hz file once per
+#: interval, not once per plot. Keyed on the two files' size and mtime, so
+#: a file that grew is read again.
+_OPEN_DAYS: dict[tuple[object, ...], pd.DataFrame] = {}
+_OPEN_DAYS_MAX = 1024
+
+
+def _stat(path: Path) -> tuple[int, int] | None:
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    return st.st_size, st.st_mtime_ns
+
+
 def _day_medians(
     root: Path,
     baseline: str,
@@ -187,17 +203,28 @@ def _day_medians(
     then its own file may still be growing.
     """
     path = None
-    if (
-        cache is not None
-        and day_file(root, baseline, day + dt.timedelta(days=1)).is_file()
-    ):
+    complete = day_file(root, baseline, day + dt.timedelta(days=1)).is_file()
+    if cache is not None and complete:
         key = _cache_key(interval, drop_q, max_sigma)
         path = cache / baseline / f"{day:%Y%m%d}-{key}.pkl"
         if path.is_file():
             return pd.read_pickle(path)
+    open_key: tuple[object, ...] | None = None
+    if not complete:
+        open_key = (
+            str(root), baseline, day, interval, tuple(sorted(drop_q)), max_sigma,
+            _stat(day_file(root, baseline, day - dt.timedelta(days=1))),
+            _stat(day_file(root, baseline, day)),
+        )  # fmt: skip
+        if open_key in _OPEN_DAYS:
+            return _OPEN_DAYS[open_key].copy()
     out = _medians(
         _filtered(_day_raw(root, baseline, day), drop_q, max_sigma), interval
     )
+    if open_key is not None:
+        if len(_OPEN_DAYS) >= _OPEN_DAYS_MAX:
+            _OPEN_DAYS.clear()
+        _OPEN_DAYS[open_key] = out
     if path is not None:
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_suffix(".tmp")
