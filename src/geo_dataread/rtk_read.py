@@ -21,6 +21,12 @@ kept). Per interval the median of the kept epochs is taken (``rtk_gps``'s
 1-minute product); quality filtering as ``rtk_gps``: Q = 5 (single) out,
 each sigma below ``max_sigma``.
 
+The off-diagonal columns are RTKLIB's signed square roots of the
+covariances (sden = sign(c_en)·√|c_en|, sdnu for n-u, sdue for u-e). Per
+epoch they become correlations ρ = sign·sd²/(σᵢσⱼ), and the interval keeps
+the median of each (beside the median σ): :attr:`RtkBaseline.cov` puts the
+two back together.
+
 Reading is from a read-only point of view: nothing is ever written under
 the data directory. Medians of complete past days can be cached locally
 (:func:`default_cache_dir`), keyed on the interval and the filter.
@@ -57,6 +63,17 @@ FILE_COLUMNS = (
 #: N/E/U rows of the returned arrays, from the ENU file columns
 NEU = ("n", "e", "u")
 SIGMA_NEU = ("sdn", "sde", "sdu")
+
+#: the correlations of the N/E/U pairs (NE, NU, EU) and the off-diagonal
+#: column each comes from (sden = e-n, sdnu = n-u, sdue = u-e)
+RHO_NEU = ("rne", "rnu", "reu")
+RHO_FROM = {"rne": ("sden", "sdn", "sde"), "rnu": ("sdnu", "sdn", "sdu"),
+            "reu": ("sdue", "sde", "sdu")}  # fmt: skip
+#: (row, column) of each RHO_NEU entry in a N/E/U covariance
+RHO_INDEX = ((0, 1), (0, 2), (1, 2))
+
+#: bumped when the cached medians change shape (v2: + the correlations)
+CACHE_VERSION = "v2"
 
 
 def rtk_dir(path: str | os.PathLike[str] | None = None) -> Path:
@@ -117,6 +134,8 @@ class RtkBaseline:
         sigma: Median formal sigma per interval, (3, N) [m].
         count: Epochs behind each median, (N,).
         interval: The median interval (pandas offset, e.g. ``"60s"``).
+        rho: Median correlation per interval of the N/E/U pairs
+            (:data:`RHO_NEU`: NE, NU, EU), (3, N); None = uncorrelated.
     """
 
     name: str
@@ -125,15 +144,57 @@ class RtkBaseline:
     sigma: FloatArray
     count: npt.NDArray[np.int64]
     interval: str
+    rho: FloatArray | None = None
+
+    @property
+    def cov(self) -> FloatArray:
+        """N/E/U covariance per interval, (N, 3, 3) [m²], from σ and ρ."""
+        rho = np.zeros_like(self.sigma) if self.rho is None else self.rho
+        return covariance(self.sigma, rho)
+
+
+def covariance(sigma: npt.ArrayLike, rho: npt.ArrayLike) -> FloatArray:
+    """(N, 3, 3) covariance from σ (3, N) and the pair correlations ρ (3, N).
+
+    The median correlations of an interval need not form a valid
+    correlation matrix together: it is projected onto the nearest positive
+    semi-definite one (eigenvalues clipped at 0, unit diagonal restored),
+    so a rotation of it never gives a negative variance. A NaN ρ is taken
+    as 0 (no correlation known); a NaN σ leaves its row and column NaN.
+    """
+    sd = np.asarray(sigma, dtype=float).T  # (N, 3)
+    r = np.nan_to_num(np.asarray(rho, dtype=float).T)  # (N, 3)
+    corr = np.broadcast_to(np.eye(3), (sd.shape[0], 3, 3)).copy()
+    for k, (i, j) in enumerate(RHO_INDEX):
+        corr[:, i, j] = corr[:, j, i] = r[:, k]
+    w, v = np.linalg.eigh(corr)
+    bad = (w < 0).any(axis=1)
+    if bad.any():
+        c = np.einsum("nij,nj,nkj->nik", v[bad], np.clip(w[bad], 0.0, None), v[bad])
+        d = np.sqrt(np.clip(np.einsum("nii->ni", c), 1e-300, None))
+        corr[bad] = c / d[:, :, None] / d[:, None, :]
+    # a NaN σ makes its row and column NaN, nothing else
+    return np.asarray(corr * sd[:, :, None] * sd[:, None, :], dtype=np.float64)
+
+
+def _with_rho(df: pd.DataFrame) -> pd.DataFrame:
+    """``df`` plus the per-epoch correlations :data:`RHO_NEU`."""
+    df = df.copy()
+    for name, (off, a, b) in RHO_FROM.items():
+        o = df[off].astype(float)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            rho = np.sign(o) * o * o / (df[a].astype(float) * df[b].astype(float))
+        df[name] = rho.where(np.isfinite(rho)).clip(-1.0, 1.0)
+    return df
 
 
 def _medians(df: pd.DataFrame, interval: str) -> pd.DataFrame:
-    cols = list(NEU) + list(SIGMA_NEU)
+    cols = list(NEU) + list(SIGMA_NEU) + list(RHO_NEU)
     if df.empty:
         return pd.DataFrame(
             columns=cols + ["count"], index=pd.DatetimeIndex([], name="time")
         )
-    g = df[cols].astype(float).resample(interval)
+    g = _with_rho(df)[cols].astype(float).resample(interval)
     out = g.median()
     out["count"] = g.size()
     return out[out["count"] > 0]
@@ -167,7 +228,7 @@ def _day_raw(root: Path, baseline: str, day: dt.date) -> pd.DataFrame:
 
 
 def _cache_key(interval: str, drop_q: Sequence[int], max_sigma: float) -> str:
-    raw = f"{interval}|{sorted(drop_q)}|{max_sigma!r}"
+    raw = f"{CACHE_VERSION}|{interval}|{sorted(drop_q)}|{max_sigma!r}"
     return hashlib.sha1(raw.encode()).hexdigest()[:10]
 
 
@@ -290,4 +351,5 @@ def read_rtk_baseline(
         sigma=df[list(SIGMA_NEU)].to_numpy(dtype=np.float64).T.copy(),
         count=df["count"].to_numpy(dtype=np.int64),
         interval=interval,
+        rho=df[list(RHO_NEU)].to_numpy(dtype=np.float64).T.copy(),
     )

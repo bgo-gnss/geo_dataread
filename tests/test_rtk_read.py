@@ -180,3 +180,45 @@ def test_an_open_day_is_read_once_until_its_file_grows(
     c = rtk_read.read_rtk_baseline(BASELINE, *span, **kw)
     assert len(reads) == 3 and c.time.size == a.time.size + 1
     rtk_read._OPEN_DAYS.clear()
+
+
+def test_correlations_from_the_signed_off_diagonals(root: Path) -> None:
+    """sden/sdnu/sdue = sign·√|c|: ρ = sign·sd²/(σᵢσⱼ), in N/E/U pair order."""
+    s = rtk_read.read_rtk_baseline(
+        BASELINE, dt.datetime(2026, 10, 13, 0, 2), dt.datetime(2026, 10, 13, 0, 2, 59),
+        root=root, use_cache=False,
+    )  # fmt: skip
+    sde, sdn, sdu = 0.004, 0.007, 0.015
+    want = [
+        -(0.003**2) / (sdn * sde),
+        0.008**2 / (sdn * sdu),
+        -(0.005**2) / (sde * sdu),
+    ]
+    np.testing.assert_allclose(s.rho[:, 0], want)
+    c = s.cov[0]
+    np.testing.assert_allclose(np.diag(c), [sdn**2, sde**2, sdu**2])
+    assert c[0, 1] == pytest.approx(-(0.003**2))  # back to the RTKLIB c_en
+    assert c[1, 2] == pytest.approx(-(0.005**2)) and c[0, 2] == pytest.approx(0.008**2)
+
+
+def test_covariance_is_projected_to_positive_semidefinite() -> None:
+    sigma = np.array([[1.0, 2.0], [1.0, 2.0], [1.0, 2.0]])
+    # ρ = 0.9, 0.9, −0.9 is not a correlation matrix; 0.1, 0.2, 0.3 is
+    rho = np.array([[0.9, 0.1], [0.9, 0.2], [-0.9, 0.3]])
+    c = rtk_read.covariance(sigma, rho)
+    assert (np.linalg.eigvalsh(c[0]) > -1e-12).all()
+    np.testing.assert_allclose(np.diag(c[0]), [1.0, 1.0, 1.0])
+    np.testing.assert_allclose(c[1], 4.0 * np.array(
+        [[1.0, 0.1, 0.2], [0.1, 1.0, 0.3], [0.2, 0.3, 1.0]]))  # fmt: skip
+    # a NaN σ stays in its own row/column
+    c = rtk_read.covariance(np.array([[1.0], [np.nan], [1.0]]), np.zeros((3, 1)))
+    assert np.isnan(c[0, 1]).all() and c[0, 0, 0] == 1.0 and c[0, 0, 2] == 0.0
+    # unknown ρ is no correlation
+    assert rtk_read.covariance(sigma, np.full((3, 2), np.nan))[0, 0, 1] == 0.0
+
+
+def test_old_cache_entries_are_not_read() -> None:
+    assert (
+        rtk_read._cache_key("60s", (5,), 0.1)
+        != rtk_read.hashlib.sha1(b"60s|[5]|0.1").hexdigest()[:10]
+    )
