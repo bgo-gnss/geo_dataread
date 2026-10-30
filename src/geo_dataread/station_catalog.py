@@ -17,9 +17,10 @@ from pathlib import Path
 import numpy as np
 import numpy.typing as npt
 
-from geofunc import plates
+from geofunc import local, plates
 
 __all__ = [
+    "apriori_baseline",
     "plate_table",
     "plate_velocity_neu",
     "station_plate",
@@ -66,6 +67,23 @@ def station_xyz(sta: str, path: str | Path | None = None) -> FloatArray | None:
             if len(tok) >= 4 and tok[3] == sta:
                 found = np.array([float(v) for v in tok[:3]])
     return found
+
+
+def apriori_baseline(
+    rover: str, reference: str, path: str | Path | None = None
+) -> FloatArray | None:
+    """A-priori baseline ``rover − reference`` ``(3,)`` N, E, U [m], or None.
+
+    From the two ``coordFile`` positions, in the REFERENCE station's local
+    frame (as RTKLIB writes its baselines). Used for the baseline's
+    direction and per-component sign, so a few cm of coordinate error do not
+    matter. None when either station has no coordinate.
+    """
+    a, b = station_xyz(rover, path), station_xyz(reference, path)
+    if a is None or b is None:
+        return None
+    d: FloatArray = local.baseline(a, b, at="b").d
+    return d
 
 
 def plate_velocity_neu(

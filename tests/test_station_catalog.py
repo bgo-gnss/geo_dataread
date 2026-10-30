@@ -58,3 +58,22 @@ def test_explicit_plate_and_missing_station() -> None:
     with pytest.warns(UserWarning, match="Cannot determine plate velocity"):
         z = sc.plate_velocity_neu("NONE", coord_file=COORD, plate_file=PLATE)
     np.testing.assert_array_equal(z, np.zeros(3))
+
+
+def test_apriori_baseline_in_the_reference_frame() -> None:
+    d = sc.apriori_baseline("SENG", "REYK", COORD)
+    assert d is not None
+    xs, xr = sc.station_xyz("SENG", COORD), sc.station_xyz("REYK", COORD)
+    assert xs is not None and xr is not None
+    # length preserved, horizontal: SENG is ~40 km SW of Reykjavík
+    assert np.isclose(np.linalg.norm(d), np.linalg.norm(xs - xr))
+    assert d[0] < 0 and d[1] < 0 and abs(d[2]) < 0.01 * np.linalg.norm(d)
+    # swapped: the opposite vector, turned by the angle between the two
+    # stations' local frames (tilt L/R plus meridian convergence: ~0.5° over
+    # these 37 km; negligible for the mm changes plotted on a baseline)
+    back = sc.apriori_baseline("REYK", "SENG", COORD)
+    assert back is not None
+    length = np.linalg.norm(d)
+    angle = np.arccos(-back @ d / length**2)
+    assert length / 6.37e6 < angle < 2.0 * length / 6.37e6
+    assert sc.apriori_baseline("SENG", "NONE", COORD) is None
