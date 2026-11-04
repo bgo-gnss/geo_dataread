@@ -154,6 +154,33 @@ def test_refusals() -> None:
     assert "first data after it 2024-01-11" in msg
 
 
+def test_late_start_measures_from_the_first_days_and_flags_it() -> None:
+    v = _view(days=200)
+    v.y[:, :30] = np.nan  # installed a month after the period starts
+    p = (2024.0, 2024.0 + 190 * DAY)
+    assert displacement_from_view(v, p, DisplacementSettings())[2].startswith(
+        "no epochs in the start window"
+    )
+    vals, flags, refused = displacement_from_view(
+        v, p, DisplacementSettings(late_start=True)
+    )
+    assert refused is None and "start_at:2024-01-31" in flags
+    span = (
+        vals["ends"]["end"]["north"]["t_mean"]
+        - vals["ends"]["start"]["north"]["t_mean"]
+    )
+    assert span < 160 * DAY  # from its first days, not from the period start
+    for i, r in enumerate((20.0, -10.0, 5.0)):
+        assert abs(vals["displacement"][i] - r * span) < 3 * vals["sigma"][i]
+
+
+def test_late_start_off_keeps_the_fingerprint_key() -> None:
+    from geo_dataread.products.displacement import _settings_key
+
+    assert "late_start" not in _settings_key(DisplacementSettings())
+    assert _settings_key(DisplacementSettings(late_start=True))["late_start"] is True
+
+
 def test_settings_validate() -> None:
     with pytest.raises(ValueError):
         DisplacementSettings(ends_days=0)

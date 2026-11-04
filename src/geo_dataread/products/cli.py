@@ -304,6 +304,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="ends: days averaged at each end (default 5; 1 = single days)",
     )  # fmt: skip
     g.add_argument(
+        "--late-start", action="store_true",
+        help="ends: a station with no data at the start but data later in "
+        "the period is measured from its first days (flag start_at:DATE) "
+        "instead of refused; it misses what came before",
+    )  # fmt: skip
+    g.add_argument(
         "--neighbour-days", type=int, default=5, metavar="M",
         help="ends with N ≤ 2 and points: each end is checked against a line "
         "through the M days outside the period next to it (inside if too few) "
@@ -929,7 +935,7 @@ def _displacement(args: argparse.Namespace) -> int:
         settings = DisplacementSettings(
             source=src, method=args.method, ends_days=args.ends,
             neighbour_days=args.neighbour_days, step_window_days=args.step_window,
-            event=args.event, at=args.at,
+            event=args.event, at=args.at, late_start=args.late_start,
         )  # fmt: skip
         spec = args.period
         no_period = spec is None and args.start is None and args.days is None
