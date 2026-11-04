@@ -7,7 +7,7 @@ writes the files. `gpsprod` stays the tool for station *motion* products.
 | subcommand | what |
 |---|---|
 | `convert FILE` | a point table in another frame (`geofunc points`): tab/;/comma/space, decimal commas, frame from a header like `X (ISN93) [m]` or `--from` |
-| `nearest FILE` | the nearest stations to each point: every stations.cfg station, or `--candidates FILE`; `-k`, `--max-km`; `--data-before D` / `--data-after D` (the station's .pos span, from the header), `--join A+B` (a moved station as one: union span, last member's place; `series --stations-from` expands it to both) |
+| `nearest FILE` | the nearest stations to each point: every stations.cfg station, or `--candidates FILE`; `-k`, `--max-km`; `--data-before D` / `--data-after D` (the station's .pos span, from the header), `--join A+B` (a moved station as one: union span, last member's place); `d_east_isn93_m`/`d_north_isn93_m` = the station less the point on the `--grid` (default isn93); `first_day`/`last_day` the station's .pos span; `--shifts` = how far the STATION moved first→last observation (5 kept days each end, cleaned, σ ≤ 10 mm; not the point — that needs its own measurement), `--since D` = from the 5 kept days nearest D (either side) to the end |
 | `series STA…` | daily station coordinates with the columns you choose (below) |
 | `at STA… --epoch D` | where stations are at an epoch (= `gpsprod coords`) |
 
@@ -25,7 +25,7 @@ Columns: `--columns` (default the `isn93` preset) then `--add`, each item
 `lat lon h` (GRS80 at the observation epoch), `east@F north@F` (isn93,
 isn2004, isn2016), local `dn de du` from `--ref-pos`, σ `sx sy sz sn se su`,
 `kept`. `:REL` subtracts one value from the kept days: `firstN`, `first`,
-`last`, `mean`, `median`, `A..B` (dates), a number. Presets expand anywhere:
+`last`, `mean`, `median`, `nearDATE[/N]` (the 5 kept days nearest DATE, either side), `A..B` (dates), a number. Presets expand anywhere:
 `isn93`, `isn2004`, `isn2016`, `llh`, `xyz`, `neu`. Full list:
 `gpscoord series --help`.
 
@@ -54,7 +54,7 @@ gpscoord series --stations-from naesta.csv --start 20230525 \
     --add dE=east@isn93:first5,dN=north@isn93:first5,dup=h:first5 -o out/
 ```
 
-Moved stations: LISK (2021-02-28 → 2024-10-08) → LISF (2024-10-09 →), ~300 m apart (LISF ~280 m E, ~100 m N, 41 m up): `nearest --join LISK+LISF`, and `series LISK+LISF` writes ONE series — a `mark` column, absolute columns each mark's own position, difference columns (`:REL`, dn/de/du) tied: LISF moved by LISK's last `--tie-days` (5) kept days less LISF's first 5 (no motion assumed across the 1-day gap); the tie is in the header.
+Moved stations: LISK (2021-02-28 → 2024-10-08) → LISF (2024-10-09 →), ~300 m apart (LISF ~280 m E, ~100 m N, 41 m up): `nearest --join LISK+LISF`, and `series LISK+LISF` writes ONE series — a `mark` column, absolute columns each mark's own position, difference columns (`:REL`, dn/de/du) tied: LISF moved by LISK's last `--tie-days` (5) kept days less LISF's first 5 (no motion assumed across the 1-day gap); the tie is in the header. The tie is always taken on the days around the move (each mark's whole series), whatever `--start/--period` asks for. Marks more than 50 m apart get a `# warning` line: they may move differently (a fault between them); the tie only bridges the move (BGÓ 2026-11-04).
 
 First use 2026-11-04: the stations nearest the Reykjanes boreholes, from
 2023-05-25, dE/dN/dup from each file's first 5 kept days →

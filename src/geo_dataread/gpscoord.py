@@ -117,6 +117,19 @@ def build_parser() -> argparse.ArgumentParser:
                     help="one station moved: A then B count as one candidate 'A+B' "
                     "(its data span the union, its place the last one's); repeatable, "
                     "e.g. --join LISK+LISF")  # fmt: skip
+    nb.add_argument("--shifts", action="store_true",
+                    help="add how far the nearest STATION moved (not the point: that "
+                    "needs its own measurement) from its first to its last "
+                    "observation: station_shift_east_m, _north_m (on --grid) and "
+                    "_up_m (ellipsoidal), each end the mean of 5 kept days "
+                    "(cleaned view, sigma <= 10 mm); a moved station A+B on its tied series")  # fmt: skip
+    nb.add_argument("--since", metavar="DATE",
+                    help="add the same shift from DATE to the last observation, its start "
+                    "the 5 kept days nearest DATE (either side; e.g. 20230601), columns "
+                    "station_shift_*_since_<DATE>_m and the days used")  # fmt: skip
+    nb.add_argument("--grid", default="isn93", metavar="FRAME",
+                    help="projected frame of the d_east/d_north columns: the station "
+                    "less the point, metres (default isn93)")  # fmt: skip
     nb.add_argument("--frame", default="itrf14", help="the .pos product of --data-*")
     nb.add_argument("--pos-dir", metavar="DIR", help="the .pos directory")
 
@@ -221,38 +234,140 @@ def _stations_cfg() -> list[tuple[str, float, float]]:
 
 def _nearest(args: argparse.Namespace) -> int:
     from geofunc import cli as gcli
-
-    if args.candidates is not None:
-        argv = ["nearest", *_geofunc_argv(args), "--candidates", args.candidates,
-                "-k", str(args.k)]  # fmt: skip
-        if args.max_km is not None:
-            argv += ["--max-km", str(args.max_km)]
-        return gcli.main(argv)
     from geofunc import points
+    from geofunc.coords import transform
 
     pts = points.to_frame(gcli._read(args), "wgs84")
-    cands = _stations_cfg()
-    spans = _spans(args, [c[0] for c in cands]) if _needs_spans(args) else {}
+    if args.candidates is not None:
+        cand_args = argparse.Namespace(**{**vars(args), "file": args.candidates,
+                                          "src": None, "x": None, "y": None,
+                                          "name": None, "ncols": None})  # fmt: skip
+        cands = [
+            (c.name, c.x, c.y) for c in points.to_frame(gcli._read(cand_args), "wgs84")
+        ]
+    else:
+        cands = _stations_cfg()
+    spans = _spans(args, [c[0] for c in cands])
     cands = _joined(cands, args.join, spans)
     if args.data_before or args.data_after:
         cands = [c for c in cands if _in_span(spans.get(c[0]), args)]
+    where = {c[0]: (c[1], c[2]) for c in cands}
+    grid = args.grid
     max_m = args.max_km * 1000.0 if args.max_km is not None else None
     with gcli._out(args.output) as fh:
         w = csv.writer(fh, lineterminator="\n")
+        since = _iso(args.since) if args.since else None
+        extra = (
+            ["station_shift_east_m", "station_shift_north_m", "station_shift_up_m"]
+            if args.shifts
+            else []
+        )
+        if since:
+            tag = since.replace("-", "")
+            extra += [f"station_shift_east_since_{tag}_m", f"station_shift_north_since_{tag}_m",
+                      f"station_shift_up_since_{tag}_m"]  # fmt: skip
         w.writerow(["name", "lon", "lat", "rank", "nearest", "distance_km",
-                    "azimuth_deg", "first_day", "last_day"])  # fmt: skip
+                    "azimuth_deg", f"d_east_{grid}_m", f"d_north_{grid}_m",
+                    "first_day", "last_day", *extra])  # fmt: skip
+        shifts: dict[str, list[str]] = {}
         for pt in pts:
+            pe, pn, _ = transform(pt.x, pt.y, 0.0, src="wgs84", dst=grid)
             for rank, nb in enumerate(
                 points.nearest((pt.x, pt.y), cands, args.k, max_distance=max_m), 1
             ):
+                se, sn, _ = transform(*where[nb.id], 0.0, src="wgs84", dst=grid)
                 a, b = spans.get(nb.id) or ("", "")
+                if extra and nb.id not in shifts:
+                    shifts[nb.id] = _shift_cells(nb.id, args, grid, since)
                 w.writerow([pt.name, f"{pt.x:.7f}", f"{pt.y:.7f}", rank, nb.id,
-                            f"{nb.distance / 1000:.3f}", f"{nb.azimuth:.1f}", a, b])  # fmt: skip
+                            f"{nb.distance / 1000:.3f}", f"{nb.azimuth:.1f}",
+                            f"{se - pe:.1f}", f"{sn - pn:.1f}", a, b,
+                            *shifts.get(nb.id, [])])  # fmt: skip
     return 0
 
 
-def _needs_spans(args: argparse.Namespace) -> bool:
-    return bool(args.data_before or args.data_after or args.join)
+def _iso(d: str) -> str:
+    d = d.replace("-", "")
+    return f"{d[:4]}-{d[4:6]}-{d[6:8]}"
+
+
+#: kept days averaged at each end of a shift
+SHIFT_DAYS = 5
+
+
+def station_shift(
+    sta: str, src: Any, grid: str, since: str | None = None, *, n: int | None = None
+) -> dict[str, Any]:
+    """How far a station moved: the mean of its last ``n`` kept days less
+    that of its first ``n`` (``total``), and less that of the ``n`` kept
+    days nearest ``since``, before or after it (``since``); ``(east, north, up)`` [m], east/north
+    on ``grid``, up the ellipsoidal height. ``A+B`` (a moved station) on its
+    tied series. The windows are returned as ``"A..B"`` day ranges
+    (``from``, ``to``, ``since_from``): the shift's epochs. A shift is None
+    (its window '') with fewer than 2n kept days."""
+    from geofunc import local
+    from geofunc.coords import transform
+
+    from geo_dataread.products.positions import load_positions
+
+    n = SHIFT_DAYS if n is None else n
+    if "+" in sta:
+        pos, xyz, _, _ = load_joined(sta, (1900.0, 2200.0), src, doc=src.params_doc())
+    else:
+        pos = load_positions(sta, 1900.0, 2200.0, src, doc=src.params_doc())
+        xyz = pos.xyz
+    keep = np.asarray(pos.kept, bool) & np.isfinite(xyz).all(axis=1)
+    g = local.ecef_to_geodetic(xyz[keep])
+    e, nn, _ = transform(
+        np.degrees(g.lon), np.degrees(g.lat), g.h, src="wgs84", dst=grid
+    )
+    enu = np.column_stack([e, nn, g.h])
+    days = np.array([d.date() for d, k in zip(pos.dates, keep, strict=True) if k])
+
+    def window(d: Any) -> str:
+        return f"{d[0]}..{d[-1]}"
+
+    out: dict[str, Any] = {"total": None, "from": "", "to": "", "since": None,
+                           "since_from": ""}  # fmt: skip
+    if len(enu) >= 2 * n:
+        out["total"] = enu[-n:].mean(axis=0) - enu[:n].mean(axis=0)
+        out["from"], out["to"] = window(days[:n]), window(days[-n:])
+    if since is not None and len(enu) >= 2 * n:
+        # the n kept days NEAREST the date, either side: as close to it as the
+        # station has (BGÓ 2026-11-04); a station that started later: its first
+        day0 = dt.date.fromisoformat(since)
+        near = np.sort(
+            np.argsort([abs((d - day0).days) for d in days], kind="stable")[:n]
+        )
+        if near[-1] < len(enu) - n:  # the end window lies after it
+            out["since"] = enu[-n:].mean(axis=0) - enu[near].mean(axis=0)
+            out["since_from"], out["to"] = window(days[near]), window(days[-n:])
+    return out
+
+
+def _shift_cells(
+    sta: str, args: argparse.Namespace, grid: str, since: str | None
+) -> list[str]:
+    """The --shifts / --since cells of one station ('' when not known)."""
+    from geo_dataread.products.loader import Source
+
+    src = Source(frame=args.frame, view="cleaned", ref="plate", uncert=10.0,
+                 pos_dir=args.pos_dir)  # fmt: skip
+    try:
+        sh = station_shift(sta, src, grid, since)
+    except (OSError, ValueError) as err:
+        print(f"gpscoord: {sta}: no shift ({err})", file=sys.stderr)
+        sh = {"total": None, "from": "", "to": "", "since": None, "since_from": ""}
+
+    def three(v: Any) -> list[str]:
+        return [""] * 3 if v is None else [f"{x:.3f}" for x in v]
+
+    cells = []
+    if args.shifts:
+        cells += three(sh["total"])
+    if since is not None:
+        cells += three(sh["since"])
+    return cells
 
 
 def pos_span(path: Path) -> tuple[str, str] | None:
@@ -524,6 +639,10 @@ def _series(args: argparse.Namespace) -> int:
     return status
 
 
+#: marks further apart than this may move differently (a fault between them)
+SAME_SITE_M = 50.0
+
+
 def load_joined(
     name: str,
     bounds: tuple[float, float],
@@ -537,9 +656,14 @@ def load_joined(
     mean of the earlier mark's last ``tie_days`` kept days less the later
     mark's first ``tie_days``, i.e. no motion between them is assumed).
 
-    Returns ``(positions, tied_xyz, marks, header_lines)``: the positions
-    as measured (absolute columns), the tied ECEF (difference columns),
-    the mark of each row and the ties for the header.
+    The tie is always taken on the days around the move, from each mark's
+    whole series, whatever period is asked for: the same tie in every
+    request. Marks more than :data:`SAME_SITE_M` apart get a warning line —
+    they may move differently, and the tie only bridges the move.
+
+    Returns ``(positions, tied_xyz, marks, header_lines)`` for the period:
+    the positions as measured (absolute columns), the tied ECEF (difference
+    columns), the mark of each row and the ties for the header.
 
     Raises:
         ValueError: no member has data in the period, or a member has no
@@ -551,39 +675,66 @@ def load_joined(
 
     from geo_dataread.products.positions import load_positions
 
-    parts = []
+    whole = []
     for m in name.split("+"):
         try:
-            parts.append(load_positions(m, bounds[0], bounds[1], src, doc=doc))
-        except ValueError:
-            continue  # this mark has nothing in the period
-    if not parts:
-        raise ValueError(f"none of {name.replace('+', ', ')} has data in the period")
-    parts.sort(key=lambda p: float(p.t[0]))
+            whole.append(load_positions(m, 1900.0, 2200.0, src, doc=doc))
+        except (OSError, ValueError):
+            continue  # this mark has no series of the product
+    if not whole:
+        raise ValueError(f"none of {name.replace('+', ', ')} has a series")
+    whole.sort(key=lambda p: float(p.t[0]))
     offset = np.zeros(3)
-    tied_parts: list[Any] = []
+    offsets: list[Any] = []
     lines: list[str] = []
-    for k, p in enumerate(parts):
+    for k, p in enumerate(whole):
         if k:
-            prev, prev_tied = parts[k - 1], tied_parts[k - 1]
-            a = prev_tied[prev.kept][-tie_days:]
+            prev = whole[k - 1]
+            a = (prev.xyz + offsets[k - 1])[prev.kept][-tie_days:]
             b = p.xyz[p.kept][:tie_days]
             if len(a) == 0 or len(b) == 0:
                 raise ValueError(f"no kept day to tie {prev.station} and {p.station}")
             offset = a.mean(axis=0) - b.mean(axis=0)
             neu = local.displacements(b.mean(axis=0)[None], a.mean(axis=0)).d[0]
-            gap = (p.dates[int(np.argmax(p.kept))]
-                   - prev.dates[len(prev.kept) - 1 - int(np.argmax(prev.kept[::-1]))])  # fmt: skip
+            last_a = prev.dates[len(prev.kept) - 1 - int(np.argmax(prev.kept[::-1]))]
+            first_b = p.dates[int(np.argmax(p.kept))]
             lines.append(
                 f"tie {prev.station} -> {p.station}: {p.station} moved by the mean of "
-                f"{prev.station}'s last {len(a)} kept days less its own first {len(b)} "
+                f"{prev.station}'s last {len(a)} kept days (to {last_a:%Y-%m-%d}) less "
+                f"its own first {len(b)} (from {first_b:%Y-%m-%d}), whatever the period "
                 f"({p.station} is N {neu[0]:+.3f} E {neu[1]:+.3f} U {neu[2]:+.3f} m from "
-                f"{prev.station}; "
-                f"{gap.days} days between the last and first kept day, no motion "
-                "assumed across them); difference columns are tied, absolute "
-                "columns are each mark's own position"
+                f"{prev.station}; no motion assumed across the "
+                f"{(first_b - last_a).days} days between them); difference columns are "
+                "tied, absolute columns are each mark's own position"
             )
-        tied_parts.append(p.xyz + offset)
+            apart = float(np.hypot(neu[0], neu[1]))
+            if apart > SAME_SITE_M:
+                lines.append(
+                    f"warning {prev.station} and {p.station} are {apart:.0f} m apart "
+                    f"(> {SAME_SITE_M:.0f} m): {p.station} may move differently from "
+                    f"{prev.station} (e.g. a fault between them); the tie only bridges "
+                    "the move, motion after it is the new mark's"
+                )
+        offsets.append(offset)
+    parts, tied_parts = [], []
+    for p, off in zip(whole, offsets, strict=True):
+        sel = (p.t >= bounds[0]) & (p.t < bounds[1])
+        if not sel.any():
+            continue
+        idx = np.flatnonzero(sel)
+        parts.append(dataclasses.replace(
+            p, t=p.t[sel], dates=[p.dates[i] for i in idx], xyz=p.xyz[sel],
+            cov=p.cov[sel], kept=p.kept[sel],
+        ))  # fmt: skip
+        tied_parts.append(p.xyz[sel] + off)
+    if not parts:
+        from geo_dataread.products.positions import available
+
+        spans = "; ".join(
+            f"{p.station}: {available(p.t, np.array(p.dates, dtype='datetime64[D]'))}"
+            for p in whole
+        )
+        raise ValueError(f"no solution in the period; {spans}")
     pos = dataclasses.replace(
         parts[-1], station=name,
         t=np.concatenate([p.t for p in parts]),

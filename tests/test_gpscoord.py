@@ -189,3 +189,65 @@ def test_moved_station_one_tied_series(fake, monkeypatch, capsys):
     assert dup[7] == 7.0 and dup[8] == 7.0 and dup[15] == 14.0
     # the absolute columns are each mark's own position: ~300 m apart
     assert float(rows[9][2]) - float(rows[8][2]) == pytest.approx(300.0, abs=1.0)
+
+
+def test_tie_is_the_same_whatever_the_period(fake, monkeypatch, capsys):
+    monkeypatch.setattr(positions, "load_positions", _moved)
+    args = ["series", "LISK+LISF", "--columns", "date,du", "--ref-pos", "X", "--tie-days",
+            "1", "--no-header", "-q"]  # fmt: skip
+    ref = ",".join(str(v) for v in BASE)
+    assert gpscoord.main([*args[:5], ref, *args[6:]]) == 0
+    whole = {r.split(",")[0]: r for r in _rows(capsys.readouterr().out)[1:]}
+    assert gpscoord.main([*args[:5], ref, *args[6:], "--start", "20240112"]) == 0
+    part = _rows(capsys.readouterr().out)[1:]
+    assert part and all(whole[r.split(",")[0]] == r for r in part)  # LISF days alone
+
+
+def test_far_marks_warn(fake, monkeypatch, capsys):
+    monkeypatch.setattr(positions, "load_positions", _moved)
+    assert gpscoord.main(["series", "LISK+LISF", "--tie-days", "1", "-q"]) == 0
+    assert "# warning LISK and LISF are 300 m apart (> 50 m)" in capsys.readouterr().out
+
+
+def test_nearest_grid_offsets(tmp_path, capsys):
+    pts = tmp_path / "b.tsv"
+    pts.write_text(
+        "name\tX (ISN93) [m]\tY (ISN93) [m]\nP\t330000\t380000\n", encoding="utf-8"
+    )
+    cands = tmp_path / "s.tsv"
+    cands.write_text("name\tX (ISN93) [m]\tY (ISN93) [m]\nS1\t330300\t379600\n"
+                     "S2\t335000\t380000\n", encoding="utf-8")  # fmt: skip
+    assert gpscoord.main(["nearest", str(pts), "--candidates", str(cands)]) == 0
+    head, row = capsys.readouterr().out.splitlines()
+    assert head.split(",")[7:9] == ["d_east_isn93_m", "d_north_isn93_m"]
+    assert row.split(",")[4] == "S1"
+    assert [float(v) for v in row.split(",")[7:9]] == pytest.approx(
+        [300.0, -400.0], abs=0.2
+    )
+    assert float(row.split(",")[5]) == pytest.approx(0.5, abs=0.01)  # 500 m
+
+
+def test_nearest_shifts_columns(fake, monkeypatch, tmp_path, capsys):
+    """--shifts / --since: how far the nearest STATION moved (first 5 kept
+    days to last 5; since = the 5 kept days nearest the date)."""
+    pts = tmp_path / "b.tsv"
+    pts.write_text("name\tlon\tlat\nP\t-22.43\t63.88\n", encoding="utf-8")
+    cands = tmp_path / "s.csv"
+    cands.write_text("name,lon,lat\nAAAA,-22.4337,63.8822\n")
+    monkeypatch.setattr(gpscoord, "_spans", lambda args, stas: {})
+    monkeypatch.setattr(gpscoord, "SHIFT_DAYS", 3)
+    assert gpscoord.main(["nearest", str(pts), "--candidates", str(cands), "--shifts",
+                          "--since", "20240104"]) == 0  # fmt: skip
+    head, row = capsys.readouterr().out.splitlines()
+    cols = dict(zip(head.split(","), row.split(","), strict=True))
+    assert "shift_from_days" not in cols
+    # rising 1 mm/day, kept days 0,2,3,4,5,6,7 (day 1 dropped):
+    # first 3 = 0,2,3 (mean 1.67), last 3 = 5,6,7 (mean 6) → 4.33 mm
+    assert float(cols["station_shift_up_m"]) == pytest.approx(
+        0.00433, abs=6e-4
+    )  # written to the mm
+    assert float(cols["station_shift_east_m"]) == pytest.approx(0.0, abs=1e-4)
+    # nearest 2024-01-04 (day 3): days 3, then 2 and 4 → mean 3 → 3 mm
+    assert float(cols["station_shift_up_since_20240104_m"]) == pytest.approx(
+        0.003, abs=2e-5
+    )
