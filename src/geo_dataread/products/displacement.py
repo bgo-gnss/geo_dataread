@@ -110,6 +110,11 @@ class DisplacementSettings:
     #: step: the gates of each side's line (as the velocity product's)
     min_obs: int = 5
     min_cover: float = 0.8
+    #: ends: a station with no data in the start window but data later in
+    #: the period is measured from its first days instead of refused, and
+    #: flagged ``start_at:DATE`` (BGÓ 2026-11-04: stations installed after
+    #: the period's start; their displacement misses what came before)
+    late_start: bool = False
 
     def __post_init__(self) -> None:
         if self.method not in METHODS:
@@ -124,6 +129,15 @@ class DisplacementSettings:
             )
         if self.event is not None and self.at is not None:
             raise ValueError("give the step's event or its date (at), not both")
+
+
+def _settings_key(settings: DisplacementSettings) -> dict[str, Any]:
+    """The settings as they enter a fingerprint: ``late_start`` only when on,
+    so every record made before it existed keeps its fingerprint."""
+    d = dataclasses.asdict(settings)
+    if not d.get("late_start"):
+        d.pop("late_start", None)
+    return d
 
 
 def _fingerprint(view: StationView, extra: Mapping[str, Any]) -> str:
@@ -199,6 +213,15 @@ def displacement_from_view(
             flags.append(f"end_at:{_iso(t_e)}")
     else:
         w_start = (p0, p0 + n_days * DAY_YEARS)
+        if (
+            settings.late_start
+            and not ((finite >= w_start[0]) & (finite < w_start[1])).any()
+        ):
+            later = finite[(finite >= p0) & (finite < end_edge)]
+            if later.size:
+                t_s = float(later[0]) - 0.5 * step
+                w_start = (t_s, t_s + n_days * DAY_YEARS)
+                flags.append(f"start_at:{_iso(float(later[0]))}")
         w_end = (end_edge - n_days * DAY_YEARS, end_edge)
         if w_end[0] < w_start[1]:
             return {}, flags, f"period shorter than two {n_days}-day end windows"
@@ -627,7 +650,7 @@ def estimate_station_displacement(
         )
     fp = _fingerprint(
         view.sliced(p0, p1),
-        {"settings": dataclasses.asdict(settings), "steps": sorted(steps)},
+        {"settings": _settings_key(settings), "steps": sorted(steps)},
     )
     return DisplacementRecord(
         **base,
