@@ -225,20 +225,12 @@ def local_frame(xyz: FloatArray) -> tuple[Vec3, FloatArray]:
 
 def _pos_series(sta: str, src: Source) -> tuple[FloatArray, FloatArray, FloatArray]:
     """``(t, xyz (n,3), cov (n,3,3))`` of the station's ``.pos`` with the
-    reviewed junction offsets, as every product sees the coordinates."""
-    from geofunc import local
+    reviewed junction offsets, as every product sees the coordinates
+    (:func:`geo_dataread.products.positions.read_positions`)."""
+    from geo_dataread.products.positions import read_positions
 
-    from geo_dataread import pos
-
-    series = pos.read_pos(pos.pos_path(sta, src.directory(), src.pos_id))
-    rules = pos.product_junctions(src.pos_id)
-    if rules is None:
-        rules = pos._default_junctions(sta)
-    xyz = series.xyz
-    t = series.yearf
-    if rules:
-        xyz = local.apply_local_offsets(xyz, pos.junction_dlocal(t, rules))
-    return t, np.asarray(xyz, float), np.asarray(series.cov_xyz(), float)
+    t, _, xyz, cov = read_positions(sta, src)
+    return t, xyz, cov
 
 
 def _view_epochs(
