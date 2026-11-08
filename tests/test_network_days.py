@@ -173,3 +173,39 @@ def test_subtract_common_mode_matches_days_and_skips_nan() -> None:
     assert metres[2, 3] == -8e-3
     up, _ = gps_views.subtract_common_mode(t, y[2], epochs, values)  # 1-D = Up
     assert up.tolist() == [0.0, -4.0, 0.0, -8.0, 0.0]
+
+
+def test_incomplete_newest_days() -> None:
+    """A newest day solved for far fewer stations is incomplete (okada wrote
+    it before GAMIT finished, BGÓ 2026-11-08); an old thin day, a full newest
+    day or too short a history is not."""
+    full = np.full(20, 250)
+    assert not nd.incomplete_days(full).any()
+    thin = full.copy()
+    thin[-1] = 52  # 7.11: 52 of ~252
+    assert nd.incomplete_days(thin).tolist() == [False] * 19 + [True]
+    old = full.copy()
+    old[5] = 40  # long ago: a real gap, not a day still being processed
+    assert not nd.incomplete_days(old).any()
+    assert not nd.incomplete_days(np.array([250, 52])).any()  # too few days
+    edge = full.copy()
+    edge[-2] = int(0.7 * 250)  # at the share: complete enough
+    assert not nd.incomplete_days(edge).any()
+
+
+def test_incomplete_days_are_removed_by_default(tmp_path) -> None:
+    table = pd.DataFrame(
+        {
+            "date": pd.to_datetime(["2026-11-05", "2026-11-07"]),
+            "status": ["decided", "incomplete"],
+            "share": [0.9, 0.0],
+            "n_bad": [100, 0],
+            "n_voting": [110, 0],
+            "n_bad_north": [100, 0],
+            "n_bad_east": [0, 0],
+            "n_bad_up": [0, 0],
+        }
+    )
+    path = nd.write_network_days(table, tmp_path / "network_days.itrf14.csv")
+    assert len(nd.network_epochs(path)) == 2
+    assert len(nd.network_epochs(path, ("decided",))) == 1
