@@ -15,7 +15,12 @@ around it:
   (``decided`` / ``partial`` / empty), so the cut can be redrawn without a
   rescan;
 - :func:`network_epochs` gives the decided days as noon fractional years for
-  ``gps_views.resolve_network_epochs`` and every cleaned-view consumer.
+  ``gps_views.resolve_network_epochs`` and every cleaned-view consumer;
+  also the ``incomplete`` days (:func:`incomplete_days`): one of the newest
+  days solved for far fewer stations than the days before — okada wrote it
+  before GAMIT finished — taken out everywhere until the whole day arrives
+  and the next scan finds it complete (BGÓ 2026-11-08: one map mixed 7.11
+  for 52 stations with 6.11 for the rest).
 
 The scan is defined on detection WITHOUT the network mask (masking a day
 changes its neighbours' side lines, not their votes on that day).
@@ -54,6 +59,16 @@ from gps_analysis.network import (
 #: the caller holds: a bad day belongs to the processing chain, and okada's
 #: itrf08/itrf14 share their solutions (gamit-p01's IGb20 will need its own)
 NETWORK_FRAME = "itrf14"
+
+#: an ``incomplete`` day: one of the newest INCOMPLETE_DAYS days with fewer
+#: stations than INCOMPLETE_SHARE × the median of the INCOMPLETE_BASE days
+#: before them (gpsplot-daily.sh warns at the same 70 %)
+INCOMPLETE_SHARE = 0.7
+INCOMPLETE_DAYS = 3
+INCOMPLETE_BASE = 14
+
+#: the statuses every consumer takes out (``network_epochs`` default)
+REMOVED = ("decided", "incomplete")
 
 #: the plotting box (gps_plot ICELAND_REGION): W, E, S, N
 ICELAND_REGION = (-25.5, -12.5, 62.5, 67.5)
@@ -313,6 +328,22 @@ def read_common_mode(path: str | Path) -> pd.DataFrame:
     return df
 
 
+def incomplete_days(counts: np.ndarray) -> np.ndarray:
+    """A mask over the day axis: the newest :data:`INCOMPLETE_DAYS` days
+    whose station count (``counts``, one per day, oldest first) is under
+    :data:`INCOMPLETE_SHARE` of the median of the :data:`INCOMPLETE_BASE`
+    days before them; nothing when there are too few days to judge."""
+    counts = np.asarray(counts, dtype=np.float64)
+    out = np.zeros(counts.size, dtype=bool)
+    base = counts[-(INCOMPLETE_DAYS + INCOMPLETE_BASE) : -INCOMPLETE_DAYS]
+    if base.size < INCOMPLETE_BASE // 2:
+        return out
+    floor = INCOMPLETE_SHARE * float(np.median(base))
+    newest = np.arange(max(0, counts.size - INCOMPLETE_DAYS), counts.size)
+    out[newest] = counts[newest] < floor
+    return out
+
+
 def scan(
     stations: Sequence[str],
     directory: str | Path,
@@ -341,6 +372,11 @@ def scan(
         scores[i][:, np.searchsorted(axis, days)] = sc
     nd = network_days(scores)
     status = np.where(nd.decided, "decided", np.where(nd.partial, "partial", ""))
+    # a newest day solved for far fewer stations: not finished on okada yet
+    counts = np.zeros(axis.size, dtype=np.int64)
+    for days, _ in results.values():
+        counts[np.searchsorted(axis, np.unique(days))] += 1
+    status = np.where(incomplete_days(counts) & (status == ""), "incomplete", status)
     rows = (nd.n_bad > 0) | (status != "")
     table = pd.DataFrame(
         {
@@ -405,7 +441,7 @@ def read_network_days(path: str | Path) -> pd.DataFrame:
 
 
 def network_epochs(
-    path: str | Path, statuses: Sequence[str] = ("decided",)
+    path: str | Path, statuses: Sequence[str] = REMOVED
 ) -> tuple[float, ...]:
     """Noon fractional years of the days with one of ``statuses``."""
     df = read_network_days(path)
@@ -447,7 +483,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     table, used = scan(stations, directory, frame=a.frame, workers=a.workers)
     decided = table[table["status"] == "decided"]
     partial = table[table["status"] == "partial"]
-    for _, r in pd.concat([decided, partial]).sort_values("date").iterrows():
+    incomplete = table[table["status"] == "incomplete"]
+    listed = pd.concat([decided, partial, incomplete]).sort_values("date")
+    for _, r in listed.iterrows():
+        if r["status"] == "incomplete":
+            print(
+                f"{r['date']:%Y-%m-%d} incomplete (far fewer stations than the "
+                "days before: not finished on okada; out until it is)"
+            )
+            continue
         print(
             f"{r['date']:%Y-%m-%d} {r['status']:8s} {r['share']:5.0%} "
             f"({r['n_bad']}/{r['n_voting']}; N{r['n_bad_north']} "
@@ -455,7 +499,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
     print(
         f"network days ({a.frame}): {len(decided)} decided, {len(partial)} partial, "
-        f"{used} of {len(stations)} station(s) voting"
+        f"{len(incomplete)} incomplete, {used} of {len(stations)} station(s) voting"
     )
     if a.dry_run:
         return 0
@@ -464,8 +508,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     print(f"wrote {out}")
     if a.no_common_mode:
         return 0
-    # second pass: the common mode, on the series WITHOUT the decided days
-    epochs = tuple(float(v) for v in noon_yearf(pd.DatetimeIndex(decided["date"])))
+    # second pass: the common mode, on the series WITHOUT the removed days
+    removed = table[table["status"].isin(REMOVED)]
+    epochs = tuple(float(v) for v in noon_yearf(pd.DatetimeIndex(removed["date"])))
     cm_stations = common_mode_stations(directory, a.frame)
     cm = scan_common_mode(
         cm_stations, directory, network_epochs=epochs, frame=a.frame, workers=a.workers
