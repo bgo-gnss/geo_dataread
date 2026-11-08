@@ -26,7 +26,7 @@ import numpy as np
 TOP_EPILOG = """\
 examples:
   gpscoord convert borholur.tsv                      # ISN93 table (header says so) → lon/lat
-  gpscoord nearest borholur.tsv -k 2                 # the 2 nearest stations.cfg stations
+  gpscoord nearest borholur.tsv -k 2                 # the 2 nearest stations (.pos positions)
   gpscoord nearest borholur.tsv --data-before 20231110 --data-after 20261001 --join LISK+LISF
                                                      # nearest with data from before the dike, still running
   gpscoord series SENG                               # daily ISN93 + lat/lon/h to the screen
@@ -104,7 +104,8 @@ def build_parser() -> argparse.ArgumentParser:
                         epilog=f"frames: {frames}")  # fmt: skip
     _table_args(nb)
     nb.add_argument("--candidates", default=None, metavar="FILE",
-                    help="the points to search (default: every stations.cfg station)")  # fmt: skip
+                    help="the points to search (default: every station with a .pos series, "
+                    "at its latest solution within -u)")  # fmt: skip
     nb.add_argument("-k", type=int, default=1, help="how many per point (default 1)")
     nb.add_argument("--max-km", type=float, default=None,
                     help="leave out candidates farther than this")  # fmt: skip
@@ -113,6 +114,20 @@ def build_parser() -> argparse.ArgumentParser:
                     "(e.g. 20231110: data before the dike)")  # fmt: skip
     nb.add_argument("--data-after", metavar="DATE",
                     help="only stations with .pos data on or after DATE (still running)")  # fmt: skip
+    nb.add_argument("--from-series", metavar="DIR",
+                    help="--since/--shifts from the station files gpscoord series "
+                    "wrote to DIR (DIR/STA.csv, DIR/A+B.csv): the shift = the mean of "
+                    "the last 5 rows of their dE/dN/dup (else east/north/h) less "
+                    "the 5 rows nearest --since; the station's place then from "
+                    "east/north on those rows; first_day/last_day = the file's "
+                    "rows. A station without a file falls back to its .pos series")  # fmt: skip
+    nb.add_argument("-u", "--uncert", type=float, default=10.0, metavar="MM",
+                    help="--shifts/--since: drop days with a formal sigma above MM "
+                    "(default 10; e.g. 30 for a noisy station's first days)")  # fmt: skip
+    nb.add_argument("--fallback-before", metavar="DATE",
+                    help="when the nearest station starts after DATE, also give the "
+                    "nearest station with data before DATE, as rank 2 (e.g. 20230602: "
+                    "a station with data on 1 June 2023); with -k 1")  # fmt: skip
     nb.add_argument("--join", action="append", default=[], metavar="A+B",
                     help="one station moved: A then B count as one candidate 'A+B' "
                     "(its data span the union, its place the last one's); repeatable, "
@@ -218,17 +233,54 @@ def _geofunc_argv(args: argparse.Namespace) -> list[str]:
     return out
 
 
-def _stations_cfg() -> list[tuple[str, float, float]]:
-    from gps_parser import ConfigParser
+def last_position(path: Path, max_sigma_m: float) -> tuple[float, float] | None:
+    """``(lon, lat)`` of the last solution of a ``.pos`` file whose X/Y/Z σ
+    are all within ``max_sigma_m``: the station's latest GAMIT/GLOBK
+    position (read from the file's end; None when no row passes)."""
+    from geofunc import local
 
-    cfg = ConfigParser()
-    out = []
-    for sta in cfg.getStationInfo():
-        info = dict(dict(cfg.getStationInfo(sta))["station"])
-        try:
-            out.append((str(sta), float(info["longitude"]), float(info["latitude"])))
-        except (KeyError, TypeError, ValueError):
+    try:
+        with open(path, "rb") as fh:
+            fh.seek(0, 2)
+            size = fh.tell()
+            fh.seek(max(0, size - 65536))
+            tail = fh.read().decode("ascii", errors="replace").splitlines()
+    except OSError:
+        return None
+    for line in reversed(tail):
+        t = line.split()
+        if len(t) < 9 or not t[0].isdigit() or len(t[0]) != 8:
             continue
+        try:
+            xyz = np.array([float(v) for v in t[3:6]])
+            sig = [float(v) for v in t[6:9]]
+        except ValueError:
+            continue
+        if max(sig) <= max_sigma_m:
+            g = local.ecef_to_geodetic(xyz)
+            lon = (float(np.degrees(g.lon)) + 180.0) % 360.0 - 180.0
+            return lon, float(np.degrees(g.lat))
+    return None
+
+
+def pos_candidates(args: argparse.Namespace) -> list[tuple[str, float, float]]:
+    """Every station with a ``.pos`` series of the product, placed at its
+    latest solution within the sigma screen (``-u``) — the GAMIT/GLOBK
+    coordinates, never the approximate stations.cfg ones (BGÓ 2026-11-04)."""
+    from geo_dataread import pos
+    from geo_dataread.products.loader import Source
+
+    src = Source(frame=args.frame, pos_dir=args.pos_dir)
+    folder = src.directory()
+    out = []
+    for sta, _, _ in pos.pos_stations(src.pos_id, folder):
+        try:
+            path = Path(pos.pos_path(sta, folder, src.pos_id))
+        except FileNotFoundError:
+            continue
+        at = last_position(path, args.uncert / 1000.0)
+        if at is not None:
+            out.append((sta, *at))
     return out
 
 
@@ -246,7 +298,7 @@ def _nearest(args: argparse.Namespace) -> int:
             (c.name, c.x, c.y) for c in points.to_frame(gcli._read(cand_args), "wgs84")
         ]
     else:
-        cands = _stations_cfg()
+        cands = pos_candidates(args)
     spans = _spans(args, [c[0] for c in cands])
     cands = _joined(cands, args.join, spans)
     if args.data_before or args.data_after:
@@ -266,23 +318,63 @@ def _nearest(args: argparse.Namespace) -> int:
             tag = since.replace("-", "")
             extra += [f"station_shift_east_since_{tag}_m", f"station_shift_north_since_{tag}_m",
                       f"station_shift_up_since_{tag}_m"]  # fmt: skip
+        # with --since the station is placed where it was then (station_lon/lat)
+        place = ["station_lon", "station_lat"] if since else []
         w.writerow(["name", "lon", "lat", "rank", "nearest", "distance_km",
-                    "azimuth_deg", f"d_east_{grid}_m", f"d_north_{grid}_m",
+                    "azimuth_deg", f"d_east_{grid}_m", f"d_north_{grid}_m", *place,
                     "first_day", "last_day", *extra])  # fmt: skip
         shifts: dict[str, list[str]] = {}
+        since_at: dict[str, tuple[float, float] | None] = {}
+        fallback = _iso(args.fallback_before) if args.fallback_before else None
+        early = (
+            [c for c in cands if c[0] in spans and spans[c[0]][0] < fallback]
+            if fallback
+            else []
+        )
         for pt in pts:
             pe, pn, _ = transform(pt.x, pt.y, 0.0, src="wgs84", dst=grid)
-            for rank, nb in enumerate(
-                points.nearest((pt.x, pt.y), cands, args.k, max_distance=max_m), 1
+            found = points.nearest((pt.x, pt.y), cands, args.k, max_distance=max_m)
+            if (
+                fallback
+                and found
+                and not (spans.get(found[0].id, ("9999",))[0] < fallback)
             ):
+                # the nearest started after the date: the nearest with data before it too
+                found += points.nearest((pt.x, pt.y), early, 1, max_distance=max_m)
+            for rank, nb in enumerate(found, 1):
                 se, sn, _ = transform(*where[nb.id], 0.0, src="wgs84", dst=grid)
                 a, b = spans.get(nb.id) or ("", "")
                 if extra and nb.id not in shifts:
-                    shifts[nb.id] = _shift_cells(nb.id, args, grid, since)
+                    file = (Path(args.from_series).expanduser() / f"{nb.id}.csv"
+                            if args.from_series else None)  # fmt: skip
+                    if file is not None and file.is_file():
+                        shifts[nb.id], since_at[nb.id] = series_file_cells(
+                            file, args, since
+                        )
+                    else:
+                        if file is not None:
+                            print(f"gpscoord: {nb.id}: no {file.name}; from its .pos",
+                                  file=sys.stderr)  # fmt: skip
+                        shifts[nb.id], since_at[nb.id] = _shift_cells(
+                            nb.id, args, grid, since
+                        )
+                if extra:  # the usable span the shifts were measured on
+                    a, b, *cells = shifts[nb.id]
+                    a, b = a or "", b or ""
+                else:
+                    cells = []
+                then = since_at.get(nb.id)
+                at = ["", ""] if since else []
+                if then is not None:
+                    at = [f"{then[0]:.7f}", f"{then[1]:.7f}"]
+                    # the points' coordinates are of about --since (BGÓ: the
+                    # boreholes' ISN93 of June 2023): the station where it was
+                    # then, not its latest position
+                    (nb,) = points.nearest((pt.x, pt.y), [(nb.id, *then)])
+                    se, sn, _ = transform(*then, 0.0, src="wgs84", dst=grid)
                 w.writerow([pt.name, f"{pt.x:.7f}", f"{pt.y:.7f}", rank, nb.id,
                             f"{nb.distance / 1000:.3f}", f"{nb.azimuth:.1f}",
-                            f"{se - pe:.1f}", f"{sn - pn:.1f}", a, b,
-                            *shifts.get(nb.id, [])])  # fmt: skip
+                            f"{se - pe:.1f}", f"{sn - pn:.1f}", *at, a, b, *cells])  # fmt: skip
     return 0
 
 
@@ -328,7 +420,9 @@ def station_shift(
         return f"{d[0]}..{d[-1]}"
 
     out: dict[str, Any] = {"total": None, "from": "", "to": "", "since": None,
-                           "since_from": ""}  # fmt: skip
+                           "since_from": "",
+                           "first_kept": str(days[0]) if len(days) else "",
+                           "last_kept": str(days[-1]) if len(days) else ""}  # fmt: skip
     if len(enu) >= 2 * n:
         out["total"] = enu[-n:].mean(axis=0) - enu[:n].mean(axis=0)
         out["from"], out["to"] = window(days[:n]), window(days[-n:])
@@ -342,32 +436,92 @@ def station_shift(
         if near[-1] < len(enu) - n:  # the end window lies after it
             out["since"] = enu[-n:].mean(axis=0) - enu[near].mean(axis=0)
             out["since_from"], out["to"] = window(days[near]), window(days[-n:])
+            # where the station was then: the epoch of the points' coordinates
+            out["since_lonlat"] = (float(np.degrees(g.lon[near]).mean()),
+                                   float(np.degrees(g.lat[near]).mean()))  # fmt: skip
     return out
+
+
+def series_file_cells(
+    path: Path, args: argparse.Namespace, since: str | None, *, n: int | None = None
+) -> tuple[list[str], tuple[float, float] | None]:
+    """The --shifts/--since cells from a gpscoord series file (the same layout
+    as :func:`_shift_cells`), and the station's lon/lat on the rows nearest
+    ``since``. Differences from its dE/dN/dup columns [mm] when present (tied
+    across a moved station), else from east/north/h [m]; ISN93 east/north."""
+    from geofunc.coords import transform
+
+    n = SHIFT_DAYS if n is None else n
+    rows = list(csv.DictReader(
+        ln for ln in path.read_text(encoding="utf-8").splitlines() if not ln.startswith("#")
+    ))  # fmt: skip
+    rows = [r for r in rows if r.get("kept", "1") != "0"]
+    cols = list(rows[0].keys()) if rows else []
+    grid = next((c.split("_", 1)[1] for c in cols if c.startswith("east_")), "isn93")
+    if {"dE", "dN", "dup"} <= set(cols):
+        diff = (
+            np.array([[float(r["dE"]), float(r["dN"]), float(r["dup"])] for r in rows])
+            / 1000
+        )
+    else:
+        diff = np.array([[float(r[f"east_{grid}"]), float(r[f"north_{grid}"]), float(r["h"])]
+                         for r in rows])  # fmt: skip
+    en = np.array([[float(r[f"east_{grid}"]), float(r[f"north_{grid}"])] for r in rows])
+    days = [dt.date.fromisoformat(r["date"]) for r in rows]
+
+    def three(v: Any) -> list[str]:
+        return [""] * 3 if v is None else [f"{x:.3f}" for x in v]
+
+    cells = [str(days[0]) if days else "", str(days[-1]) if days else ""]
+    total = (
+        diff[-n:].mean(axis=0) - diff[:n].mean(axis=0) if len(rows) >= 2 * n else None
+    )
+    if args.shifts:
+        cells += three(total)
+    lonlat = None
+    if since is not None:
+        after = None
+        if len(rows) >= 2 * n:
+            day0 = dt.date.fromisoformat(since)
+            near = np.sort(
+                np.argsort([abs((d - day0).days) for d in days], kind="stable")[:n]
+            )
+            if near[-1] < len(rows) - n:
+                after = diff[-n:].mean(axis=0) - diff[near].mean(axis=0)
+                e, nn = en[near].mean(axis=0)
+                lon, lat, _ = transform(e, nn, 0.0, src=grid, dst="wgs84")
+                lonlat = (float(lon), float(lat))
+        cells += three(after)
+    return cells, lonlat
 
 
 def _shift_cells(
     sta: str, args: argparse.Namespace, grid: str, since: str | None
-) -> list[str]:
-    """The --shifts / --since cells of one station ('' when not known)."""
+) -> tuple[list[str], tuple[float, float] | None]:
+    """The --shifts / --since cells of one station ('' when not known), and
+    its lon/lat at the start of the since-shift (None without one)."""
     from geo_dataread.products.loader import Source
 
-    src = Source(frame=args.frame, view="cleaned", ref="plate", uncert=10.0,
+    src = Source(frame=args.frame, view="cleaned", ref="plate", uncert=args.uncert,
                  pos_dir=args.pos_dir)  # fmt: skip
     try:
         sh = station_shift(sta, src, grid, since)
     except (OSError, ValueError) as err:
         print(f"gpscoord: {sta}: no shift ({err})", file=sys.stderr)
-        sh = {"total": None, "from": "", "to": "", "since": None, "since_from": ""}
+        sh = {"total": None, "from": "", "to": "", "since": None, "since_from": "",
+              "first_kept": "", "last_kept": ""}  # fmt: skip
 
     def three(v: Any) -> list[str]:
         return [""] * 3 if v is None else [f"{x:.3f}" for x in v]
 
-    cells = []
+    # first_day/last_day: the station's first and last USABLE day (kept by the
+    # view and the sigma screen), the epochs the shifts are measured on
+    cells = [sh["first_kept"], sh["last_kept"]]
     if args.shifts:
         cells += three(sh["total"])
     if since is not None:
         cells += three(sh["since"])
-    return cells
+    return cells, sh.get("since_lonlat")
 
 
 def pos_span(path: Path) -> tuple[str, str] | None:
@@ -421,7 +575,7 @@ def _joined(
         known = [m for m in members if m in by]
         if len(members) < 2 or not known:
             raise SystemExit(
-                f"gpscoord: --join {spec}: give A+B of stations.cfg stations"
+                f"gpscoord: --join {spec}: give A+B of stations with a .pos series"
             )
         name = "+".join(members)
         last = by[known[-1]]

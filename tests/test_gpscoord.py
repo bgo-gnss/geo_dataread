@@ -251,3 +251,46 @@ def test_nearest_shifts_columns(fake, monkeypatch, tmp_path, capsys):
     assert float(cols["station_shift_up_since_20240104_m"]) == pytest.approx(
         0.003, abs=2e-5
     )
+
+
+def test_nearest_fallback_before(tmp_path, monkeypatch, capsys):
+    """--fallback-before: a nearest station that starts too late gets the
+    nearest one with data before the date as rank 2; an early one stands alone."""
+    pts = tmp_path / "b.csv"
+    pts.write_text("name,lon,lat\nLATE,-22.43,63.88\nEARLY,-22.60,63.84\n")
+    cands = tmp_path / "s.csv"
+    cands.write_text(
+        "name,lon,lat\nNEW,-22.431,63.881\nOLD,-22.45,63.87\nOLD2,-22.601,63.841\n"
+    )
+    spans = {"NEW": ("2023-11-02", "2026-11-03"), "OLD": ("2015-06-26", "2026-11-03"),
+             "OLD2": ("2012-04-30", "2026-11-03")}  # fmt: skip
+    monkeypatch.setattr(gpscoord, "_spans", lambda args, stas: dict(spans))
+    assert gpscoord.main(["nearest", str(pts), "--candidates", str(cands),
+                          "--fallback-before", "20230602"]) == 0  # fmt: skip
+    rows = [r.split(",") for r in capsys.readouterr().out.splitlines()[1:]]
+    assert [(r[0], r[3], r[4]) for r in rows] == [
+        ("LATE", "1", "NEW"),
+        ("LATE", "2", "OLD"),
+        ("EARLY", "1", "OLD2"),
+    ]
+
+
+def test_shifts_from_series_file(tmp_path):
+    """--from-series: shift = last 5 rows of dE/dN/dup less the 5 nearest the
+    date; the place from east/north on those rows; the file's first/last day."""
+    import argparse
+
+    f = tmp_path / "SENG.csv"
+    rows = ["# gpscoord series", "date,east_isn93,north_isn93,lat,lon,h,dE,dN,dup"]
+    for k in range(20):
+        d = dt.date(2023, 5, 25) + dt.timedelta(days=k)
+        rows.append(
+            f"{d},{331340 + k * 0.001:.4f},379972.0,0,0,97,{k:.2f},{-k:.2f},{2 * k:.2f}"
+        )
+    f.write_text("\n".join(rows) + "\n")
+    args = argparse.Namespace(shifts=False)
+    cells, lonlat = gpscoord.series_file_cells(f, args, "2023-06-01")
+    # nearest 2023-06-01 = rows 5..9 (mean k 7) less ... last 5 = rows 15..19 (mean 17)
+    assert cells[:2] == ["2023-05-25", "2023-06-13"]
+    assert [float(v) for v in cells[2:]] == pytest.approx([0.010, -0.010, 0.020])
+    assert lonlat is not None and lonlat[1] == pytest.approx(63.88, abs=0.01)
