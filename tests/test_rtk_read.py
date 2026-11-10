@@ -27,6 +27,12 @@ def _write_day(root: Path, day: dt.date, rows: list[str]) -> None:
     (d / f"{BASELINE}{day:%Y%m%d}0000b.pos").write_text("".join(rows))
 
 
+@pytest.fixture(autouse=True)
+def _no_real_archive(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """The tests never see the real archive mount."""
+    monkeypatch.setenv("GPS_RTK_ARCHIVE", str(tmp_path / "no-archive"))
+
+
 @pytest.fixture
 def root(tmp_path: Path) -> Path:
     """Two day files, 1 Hz over a few minutes each, overlapping at midnight.
@@ -222,3 +228,52 @@ def test_old_cache_entries_are_not_read() -> None:
         rtk_read._cache_key("60s", (5,), 0.1)
         != rtk_read.hashlib.sha1(b"60s|[5]|0.1").hexdigest()[:10]
     )
+
+
+def _minute(day: dt.date, e: float) -> list[str]:
+    t0 = dt.datetime.combine(day, dt.time(12))
+    return [_line(t0 + dt.timedelta(seconds=k), e, -2582.0, 35.0) for k in range(60)]
+
+
+def test_days_missing_here_come_from_the_archive(tmp_path: Path) -> None:
+    """The live directory starts in 2025: older days are in the archive; a
+    day both have is read from the live directory."""
+    live, old = tmp_path / "live", tmp_path / "old"
+    d1, d2, d3 = dt.date(2024, 1, 1), dt.date(2024, 1, 2), dt.date(2024, 1, 3)
+    _write_day(old, d1, _minute(d1, 1.0))
+    _write_day(old, d2, _minute(d2, 2.0))
+    _write_day(live, d2, _minute(d2, 20.0))
+    _write_day(live, d3, _minute(d3, 3.0))
+    span = (dt.datetime(2024, 1, 1), dt.datetime(2024, 1, 3, 23))
+    s = rtk_read.read_rtk_baseline(
+        BASELINE, *span, root=live, archive=old, use_cache=False
+    )
+    np.testing.assert_allclose(s.neu[1], [1.0, 20.0, 3.0])  # E row, one per day
+    alone = rtk_read.read_rtk_baseline(
+        BASELINE, *span, root=live, archive=old, use_cache=False, use_archive=False
+    )
+    np.testing.assert_allclose(alone.neu[1], [20.0, 3.0])
+
+
+def test_a_baseline_only_in_the_archive_is_read(tmp_path: Path) -> None:
+    live, old = tmp_path / "live", tmp_path / "old"
+    live.mkdir()
+    d = dt.date(2023, 11, 10)
+    _write_day(old, d, _minute(d, 5.0))
+    s = rtk_read.read_rtk_baseline(
+        BASELINE, dt.datetime(2023, 11, 10), dt.datetime(2023, 11, 10, 23),
+        root=live, archive=old, use_cache=False,
+    )  # fmt: skip
+    np.testing.assert_allclose(s.neu[1], [5.0])
+    with pytest.raises(FileNotFoundError):
+        rtk_read.read_rtk_baseline(
+            BASELINE, dt.datetime(2023, 11, 10), dt.datetime(2023, 11, 10, 23),
+            root=live, archive=old, use_cache=False, use_archive=False,
+        )  # fmt: skip
+
+
+def test_archive_dir_from_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("GPS_RTK_ARCHIVE", "/x/rtk-old")
+    assert rtk_read.rtk_archive_dir() == Path("/x/rtk-old")
+    monkeypatch.delenv("GPS_RTK_ARCHIVE")
+    assert rtk_read.rtk_archive_dir() == Path(rtk_read.DEFAULT_RTK_ARCHIVE)

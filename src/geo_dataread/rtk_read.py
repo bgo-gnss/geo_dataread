@@ -27,7 +27,11 @@ epoch they become correlations ρ = sign·sd²/(σᵢσⱼ), and the interval ke
 the median of each (beside the median σ): :attr:`RtkBaseline.cov` puts the
 two back together.
 
-Reading is from a read-only point of view: nothing is ever written under
+Days before the live directory's start (January 2025) are in the older
+archive on ananas (``/mnt_data/gps/rtk-timeseries``, the same layout and
+files; :func:`rtk_archive_dir`): a day is read from the live directory
+when it has the file, else from the archive (the two agree where they
+overlap). Reading is from a read-only point of view: nothing is ever written under
 the data directory. Medians of complete past days can be cached locally
 (:func:`default_cache_dir`), keyed on the interval and the filter.
 """
@@ -50,6 +54,9 @@ FloatArray = npt.NDArray[np.float64]
 
 #: the deployed mount of rtk.vedur.is:/home/gpsops/rtklib-run/data
 DEFAULT_RTK_DIR = "/mnt_data/rtgpsdata"
+
+#: the older archive (ananas.vedur.is:/gps/rtk-timeseries): 2018/2020 → 2025
+DEFAULT_RTK_ARCHIVE = "/mnt_data/gps/rtk-timeseries"
 
 #: a baseline directory: two 4-character codes (skips e.g. ELDV-SNAE_24h)
 BASELINE_DIR = re.compile(r"^[A-Z0-9]{4}-[A-Z0-9]{4}$")
@@ -81,6 +88,11 @@ def rtk_dir(path: str | os.PathLike[str] | None = None) -> Path:
     return Path(path or os.environ.get("GPS_RTK_DIR") or DEFAULT_RTK_DIR)
 
 
+def rtk_archive_dir(path: str | os.PathLike[str] | None = None) -> Path:
+    """The older RTK archive: ``path``, ``$GPS_RTK_ARCHIVE`` or the mount."""
+    return Path(path or os.environ.get("GPS_RTK_ARCHIVE") or DEFAULT_RTK_ARCHIVE)
+
+
 def default_cache_dir() -> Path:
     """``$GPS_RTK_CACHE``, else ``$XDG_CACHE_HOME/geo_dataread/rtk``."""
     env = os.environ.get("GPS_RTK_CACHE")
@@ -100,6 +112,16 @@ def list_baselines(root: str | os.PathLike[str] | None = None) -> list[str]:
 
 def day_file(root: Path, baseline: str, day: dt.date) -> Path:
     return root / baseline / f"{baseline}{day:%Y%m%d}0000b.pos"
+
+
+def find_day_file(roots: Sequence[Path], baseline: str, day: dt.date) -> Path:
+    """The day's file in the first of ``roots`` that has it (else the first
+    root's path, which does not exist)."""
+    for r in roots:
+        path = day_file(r, baseline, day)
+        if path.is_file():
+            return path
+    return day_file(roots[0], baseline, day)
 
 
 def read_file(path: str | os.PathLike[str]) -> pd.DataFrame:
@@ -212,11 +234,11 @@ def _filtered(
     return df[keep]
 
 
-def _day_raw(root: Path, baseline: str, day: dt.date) -> pd.DataFrame:
+def _day_raw(roots: Sequence[Path], baseline: str, day: dt.date) -> pd.DataFrame:
     """The raw epochs of UTC ``day``: its file plus the previous file's tail."""
     frames = [
-        read_file(day_file(root, baseline, day - dt.timedelta(days=1))),
-        read_file(day_file(root, baseline, day)),
+        read_file(find_day_file(roots, baseline, day - dt.timedelta(days=1))),
+        read_file(find_day_file(roots, baseline, day)),
     ]
     frames = [f for f in frames if not f.empty]
     if not frames:
@@ -249,7 +271,7 @@ def _stat(path: Path) -> tuple[int, int] | None:
 
 
 def _day_medians(
-    root: Path,
+    roots: Sequence[Path],
     baseline: str,
     day: dt.date,
     *,
@@ -264,7 +286,7 @@ def _day_medians(
     then its own file may still be growing.
     """
     path = None
-    complete = day_file(root, baseline, day + dt.timedelta(days=1)).is_file()
+    complete = find_day_file(roots, baseline, day + dt.timedelta(days=1)).is_file()
     if cache is not None and complete:
         key = _cache_key(interval, drop_q, max_sigma)
         path = cache / baseline / f"{day:%Y%m%d}-{key}.pkl"
@@ -273,14 +295,15 @@ def _day_medians(
     open_key: tuple[object, ...] | None = None
     if not complete:
         open_key = (
-            str(root), baseline, day, interval, tuple(sorted(drop_q)), max_sigma,
-            _stat(day_file(root, baseline, day - dt.timedelta(days=1))),
-            _stat(day_file(root, baseline, day)),
+            tuple(map(str, roots)), baseline, day, interval, tuple(sorted(drop_q)),
+            max_sigma,
+            _stat(find_day_file(roots, baseline, day - dt.timedelta(days=1))),
+            _stat(find_day_file(roots, baseline, day)),
         )  # fmt: skip
         if open_key in _OPEN_DAYS:
             return _OPEN_DAYS[open_key].copy()
     out = _medians(
-        _filtered(_day_raw(root, baseline, day), drop_q, max_sigma), interval
+        _filtered(_day_raw(roots, baseline, day), drop_q, max_sigma), interval
     )
     if open_key is not None:
         if len(_OPEN_DAYS) >= _OPEN_DAYS_MAX:
@@ -305,6 +328,8 @@ def read_rtk_baseline(
     max_sigma: float = 0.1,
     cache_dir: str | os.PathLike[str] | None = None,
     use_cache: bool = True,
+    archive: str | os.PathLike[str] | None = None,
+    use_archive: bool = True,
 ) -> RtkBaseline:
     """Interval medians of an RTK baseline over ``[start, end]`` (UTC).
 
@@ -318,12 +343,20 @@ def read_rtk_baseline(
         cache_dir: Local cache of complete days' medians (default
             :func:`default_cache_dir`).
         use_cache: False reads every day from the files.
+        archive: The older archive (default :func:`rtk_archive_dir`), read
+            for the days the data directory lacks; absent = skipped.
+        use_archive: False reads the data directory alone.
 
     Raises:
-        FileNotFoundError: no such baseline directory.
+        FileNotFoundError: no such baseline directory in either.
     """
     base = rtk_dir(root)
-    if not (base / baseline).is_dir():
+    roots = [base]
+    if use_archive:
+        old = rtk_archive_dir(archive)
+        if old != base and (old / baseline).is_dir():
+            roots.append(old)
+    if not any((r / baseline).is_dir() for r in roots):
         raise FileNotFoundError(f"no RTK baseline {baseline} under {base}")
     cache = (
         (Path(cache_dir) if cache_dir else default_cache_dir()) if use_cache else None
@@ -331,7 +364,7 @@ def read_rtk_baseline(
     days = pd.date_range(pd.Timestamp(start).normalize(), pd.Timestamp(end).normalize())
     parts = [
         _day_medians(
-            base,
+            roots,
             baseline,
             d.date(),
             interval=interval,
