@@ -149,6 +149,12 @@ Known rows:
 - **1993** (117 characters): `num` zero-padded (`0001`), coordinates to 0.01°, `depth 40–48`.
   It then has several **unidentified** magnitude-like columns, some of them blank, at
   48–61, 61–69, 69–81, 81–93 and 93–111. The boundaries were inferred from 5 rows only.
+  **Corrected by T1 (2026-11-13):** these boundaries are wrong. Real 1992–93 lines
+  have right-aligned columns ending at 61, 69, 75, … 117. `sil_files.read_aut_mag`
+  reads them as `aux1`…`aux10` (meaning not verified) and leaves `ml` NA in this
+  layout. The pinned row above happens to pass only because the misaligned slices
+  are blank there. Also: the 117 layout is mixed with the 61 layout within 1993, and
+  late 1995 to early 1996 has a further 57-character layout (Q, no id).
 
 Known rows:
 

@@ -1,6 +1,7 @@
 """Earthquake catalogues: readers, common schema, comparison (PLAN-seismicity.md).
 
-T2 provides the common schema (:mod:`geo_dataread.seismic.schema`); the
+T2 provides the common schema (:mod:`geo_dataread.seismic.schema`); T1 the
+per-file SIL parsers (:mod:`geo_dataread.seismic.sil_files`); the
 readers (SIL files, Quakes API, Skjálftalísa, FDSN) and the comparison build
 on it.
 """
@@ -41,8 +42,30 @@ from geo_dataread.seismic.schema import (
     validate_mechanisms,
     with_provenance,
 )
+from geo_dataread.seismic.sil_files import (
+    FILE_KINDS,
+    LineIssue,
+    ParsedFile,
+    ParseReport,
+    read_aut_mag,
+    read_cleanaut_mag,
+    read_events_fps,
+    read_events_lib,
+    read_lib_mag,
+    read_sil_file,
+)
 
 __all__ = [
+    "FILE_KINDS",
+    "LineIssue",
+    "ParseReport",
+    "ParsedFile",
+    "read_aut_mag",
+    "read_cleanaut_mag",
+    "read_events_fps",
+    "read_events_lib",
+    "read_lib_mag",
+    "read_sil_file",
     "ATTRS_KEY",
     "DEFAULT_PLANE_TOL_DEG",
     "EVALUATION_MODES",
