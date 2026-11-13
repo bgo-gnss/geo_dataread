@@ -154,6 +154,7 @@ SIL_EVENT_TYPES: Final[Mapping[str, str]] = {
 MECHANISM_METHODS: Final = (
     "sil_fps",
     "sil_sp3",
+    "sil_ap3",
     "first_motion",
     "moment_tensor",
     "other",

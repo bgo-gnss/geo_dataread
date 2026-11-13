@@ -6,6 +6,25 @@ readers (SIL files, Quakes API, Skjálftalísa, FDSN) and the comparison build
 on it.
 """
 
+from geo_dataread.seismic.mechanisms import (
+    BLOCK_KINDS,
+    EXTRA_COLUMNS,
+    FAULTING_CLASSES,
+    FPS_BLOCK_METHOD,
+    DayMechanisms,
+    DayMechanismsReport,
+    ParsedSp3,
+    Sp3Block,
+    Sp3Report,
+    block_path,
+    mechanisms_from_blocks,
+    mechanisms_from_fps,
+    normalize_plane,
+    read_sil_day_mechanisms,
+    read_sp3,
+    same_plane_deg,
+    sp3_to_aki_richards,
+)
 from geo_dataread.seismic.schema import (
     ATTRS_KEY,
     DEFAULT_PLANE_TOL_DEG,
@@ -79,6 +98,23 @@ from geo_dataread.seismic.sil_files import (
 )
 
 __all__ = [
+    "BLOCK_KINDS",
+    "EXTRA_COLUMNS",
+    "FAULTING_CLASSES",
+    "FPS_BLOCK_METHOD",
+    "DayMechanisms",
+    "DayMechanismsReport",
+    "ParsedSp3",
+    "Sp3Block",
+    "Sp3Report",
+    "block_path",
+    "mechanisms_from_blocks",
+    "mechanisms_from_fps",
+    "normalize_plane",
+    "read_sil_day_mechanisms",
+    "read_sp3",
+    "same_plane_deg",
+    "sp3_to_aki_richards",
     "DEFAULT_MATCH_TOL",
     "DEFAULT_MATCH_TOL_NO_ID",
     "MatchTolerance",
