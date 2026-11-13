@@ -396,7 +396,11 @@ def test_report_summary_and_raise(events: pd.DataFrame) -> None:
     assert "missing_column [quality]" in text and "index_unsorted" in text
     with pytest.raises(SchemaError):
         rep.raise_for_errors()
-    assert validate(events).summary().startswith("events schema v1: 3 rows")
+    assert (
+        validate(events)
+        .summary()
+        .startswith(f"events schema v{SCHEMA_VERSION}: 3 rows")
+    )
 
 
 # -------------------------------------------------------------- mechanisms

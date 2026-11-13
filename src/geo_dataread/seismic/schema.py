@@ -44,7 +44,8 @@ import pandas as pd
 
 #: Version of the column tables below. Bump on any change to a column's name,
 #: dtype, nullability, allowed values or meaning; cache keys carry it (T4).
-SCHEMA_VERSION: Final = 1
+#: v2 (T3): + ``sil_aut_path``, + magnitude type ``M``.
+SCHEMA_VERSION: Final = 2
 
 #: Name of the time index of both frames.
 INDEX_NAME: Final = "time"
@@ -74,9 +75,18 @@ SOURCES: Final = (
 #: ``Msil_auto`` the SIL automatic magnitude as SeisComP labels it;
 #: ``aut.mag`` the SIL automatic magnitude as the Quakes API (``system=sil``)
 #: labels it; ``ML_SIL`` SeisComP's recomputed local magnitude; ``Mpgv_w``
-#: SeisComP's PGV magnitude. Whether ``aut.mag`` and ``Msil_auto`` are the same
-#: number is not verified, so they are kept apart.
-MAGNITUDE_TYPES: Final = ("Mlw", "ML", "Msil_auto", "aut.mag", "ML_SIL", "Mpgv_w")
+#: SeisComP's PGV magnitude; ``M`` an unlabelled magnitude as the Quakes API
+#: gives it (14 events in 2024-25, T9). Whether ``aut.mag`` and ``Msil_auto``
+#: are the same number is not verified, so they are kept apart.
+MAGNITUDE_TYPES: Final = (
+    "Mlw",
+    "ML",
+    "Msil_auto",
+    "aut.mag",
+    "ML_SIL",
+    "Mpgv_w",
+    "M",
+)
 
 #: QuakeML evaluation modes.
 EVALUATION_MODES: Final = ("manual", "automatic")
@@ -221,6 +231,14 @@ EVENT_COLUMNS: Final[tuple[ColumnSpec, ...]] = (
         True,
         "SIL file id (e.g. /2024/aug/22/21:55:00/59:59:641), the exact join "
         "key between SIL files and the legacy API",
+    ),
+    ColumnSpec(
+        "sil_aut_path",
+        "string",
+        True,
+        "SIL file id of the event's automatic solution where known; it can "
+        "differ from `sil_path` (by 1 ms, or in the 5-minute directory) for a "
+        "reviewed event",
     ),
     ColumnSpec("latitude", "float64", False, "epicentre", "deg", (), -90.0, 90.0),
     ColumnSpec("longitude", "float64", False, "epicentre", "deg", (), -180.0, 180.0),

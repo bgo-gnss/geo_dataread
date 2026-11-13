@@ -54,6 +54,17 @@ from geo_dataread.seismic.filters import (
     with_derived_moment,
     within_distance,
 )
+from geo_dataread.seismic.sil_catalog import (
+    DEFAULT_MATCH_TOL,
+    DEFAULT_MATCH_TOL_NO_ID,
+    MatchTolerance,
+    SilReadReport,
+    day_dir,
+    horizontal_error_km,
+    read_sil_catalog,
+    read_sil_day,
+    sil_dir,
+)
 from geo_dataread.seismic.sil_files import (
     FILE_KINDS,
     LineIssue,
@@ -68,6 +79,15 @@ from geo_dataread.seismic.sil_files import (
 )
 
 __all__ = [
+    "DEFAULT_MATCH_TOL",
+    "DEFAULT_MATCH_TOL_NO_ID",
+    "MatchTolerance",
+    "SilReadReport",
+    "day_dir",
+    "horizontal_error_km",
+    "read_sil_catalog",
+    "read_sil_day",
+    "sil_dir",
     "DERIVED_MOMENT_FLAG",
     "FilterError",
     "daily_counts",
