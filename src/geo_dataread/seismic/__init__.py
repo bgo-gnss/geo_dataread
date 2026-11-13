@@ -42,6 +42,18 @@ from geo_dataread.seismic.schema import (
     validate_mechanisms,
     with_provenance,
 )
+from geo_dataread.seismic.filters import (
+    DERIVED_MOMENT_FLAG,
+    FilterError,
+    daily_counts,
+    distance_km,
+    moment_from_magnitude,
+    points_in_polygon,
+    subset,
+    to_utc,
+    with_derived_moment,
+    within_distance,
+)
 from geo_dataread.seismic.sil_files import (
     FILE_KINDS,
     LineIssue,
@@ -56,6 +68,16 @@ from geo_dataread.seismic.sil_files import (
 )
 
 __all__ = [
+    "DERIVED_MOMENT_FLAG",
+    "FilterError",
+    "daily_counts",
+    "distance_km",
+    "moment_from_magnitude",
+    "points_in_polygon",
+    "subset",
+    "to_utc",
+    "with_derived_moment",
+    "within_distance",
     "FILE_KINDS",
     "LineIssue",
     "ParseReport",
