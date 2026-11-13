@@ -1,0 +1,14 @@
+Error 400: Bad Request
+
+filtering based on update time not supported
+
+Usage details are available from /fdsnws/event/1/
+
+Request:
+/fdsnws/event/1/query?starttime=2024-08-22T00:00:00&endtime=2024-08-22T01:00:00&format=text&updateafter=2026-01-01T00:00:00
+
+Request Submitted:
+2026-11-13T20:27:55.958175
+
+Service Version:
+1.2.6

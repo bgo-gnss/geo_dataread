@@ -1,0 +1,1 @@
+{"detail":[{"type":"value_error","loc":["query"],"msg":"Value error, Start time is out of bounds.","input":{"start_time":"1991-01-07T00:00:00Z","end_time":"2026-11-13T00:00:00Z","lat":[],"lon":[]},"ctx":{"error":{}}}]}

@@ -1,0 +1,155 @@
+[
+ {
+  "file": "text_20240822T00.txt",
+  "url": "http://seiscomp-p01.vedur.is:8080/fdsnws/event/1/query?starttime=2024-08-22T00:00:00&endtime=2024-08-22T01:00:00&format=text",
+  "kind": "list",
+  "format": "text",
+  "recorded": "2026-11-13",
+  "status": 200,
+  "headers": {
+   "content-type": "text/plain; charset=utf-8",
+   "server": "SeisComP-FDSNWS/1.2.5"
+  },
+  "bytes": 952,
+  "events": 6,
+  "redactions": 0
+ },
+ {
+  "file": "text_20260910.txt",
+  "url": "http://seiscomp-p01.vedur.is:8080/fdsnws/event/1/query?starttime=2026-09-10T00:00:00&endtime=2026-09-11T00:00:00&format=text",
+  "kind": "list",
+  "format": "text",
+  "recorded": "2026-11-13",
+  "status": 200,
+  "headers": {
+   "content-type": "text/plain; charset=utf-8",
+   "server": "SeisComP-FDSNWS/1.2.5"
+  },
+  "bytes": 8931,
+  "events": 48,
+  "redactions": 83
+ },
+ {
+  "file": "quakeml_20240822T00.xml",
+  "url": "http://seiscomp-p01.vedur.is:8080/fdsnws/event/1/query?starttime=2024-08-22T00:00:00&endtime=2024-08-22T01:00:00",
+  "kind": "list",
+  "format": "xml",
+  "recorded": "2026-11-13",
+  "status": 200,
+  "headers": {
+   "content-type": "application/xml; charset=utf-8",
+   "server": "SeisComP-FDSNWS/1.2.5"
+  },
+  "bytes": 14831,
+  "events": 6,
+  "redactions": 0
+ },
+ {
+  "file": "quakeml_IMO2024qnogqh_all.xml",
+  "url": "http://seiscomp-p01.vedur.is:8080/fdsnws/event/1/query?eventid=IMO2024qnogqh&includeallorigins=true&includeallmagnitudes=true&includefocalmechanism=true",
+  "kind": "detail",
+  "format": "xml",
+  "recorded": "2026-11-13",
+  "status": 200,
+  "headers": {
+   "content-type": "application/xml; charset=utf-8",
+   "server": "SeisComP-FDSNWS/1.2.5"
+  },
+  "bytes": 4014,
+  "events": 1,
+  "redactions": 0
+ },
+ {
+  "file": "quakeml_IMO2026rusibb_all.xml",
+  "url": "http://seiscomp-p01.vedur.is:8080/fdsnws/event/1/query?eventid=IMO2026rusibb&includeallorigins=true&includeallmagnitudes=true&includefocalmechanism=true",
+  "kind": "detail",
+  "format": "xml",
+  "recorded": "2026-11-13",
+  "status": 200,
+  "headers": {
+   "content-type": "application/xml; charset=utf-8",
+   "server": "SeisComP-FDSNWS/1.2.5"
+  },
+  "bytes": 20614,
+  "events": 1,
+  "redactions": 3
+ },
+ {
+  "file": "text_20240822T00_limit2_asc.txt",
+  "url": "http://seiscomp-p01.vedur.is:8080/fdsnws/event/1/query?starttime=2024-08-22T00:00:00&endtime=2024-08-22T01:00:00&format=text&limit=2&orderby=time-asc",
+  "kind": "sample",
+  "format": "text",
+  "recorded": "2026-11-13",
+  "status": 200,
+  "headers": {
+   "content-type": "text/plain; charset=utf-8",
+   "server": "SeisComP-FDSNWS/1.2.5"
+  },
+  "bytes": 408,
+  "events": 2,
+  "redactions": 0
+ },
+ {
+  "file": "error_nodata404.txt",
+  "url": "http://seiscomp-p01.vedur.is:8080/fdsnws/event/1/query?starttime=2024-08-22T00:00:00&endtime=2024-08-22T00:02:00&format=text&nodata=404",
+  "kind": "error",
+  "format": "text",
+  "recorded": "2026-11-13",
+  "status": 404,
+  "headers": {
+   "content-type": "text/plain; charset=utf-8",
+   "server": "SeisComP-FDSNWS/1.2.5"
+  },
+  "bytes": 282,
+  "events": null,
+  "redactions": 0
+ },
+ {
+  "file": "error_bad_param.txt",
+  "url": "http://seiscomp-p01.vedur.is:8080/fdsnws/event/1/query?starttime=2024-08-22T00:00:00&endtime=2024-08-22T01:00:00&format=text&bogus=1",
+  "kind": "error",
+  "format": "text",
+  "recorded": "2026-11-13",
+  "status": 400,
+  "headers": {
+   "content-type": "text/plain; charset=utf-8",
+   "content-length": "277",
+   "server": "SeisComP-FDSNWS/1.2.5"
+  },
+  "bytes": 277,
+  "events": null,
+  "redactions": 0
+ },
+ {
+  "file": "error_updatedafter.txt",
+  "url": "http://seiscomp-p01.vedur.is:8080/fdsnws/event/1/query?starttime=2024-08-22T00:00:00&endtime=2024-08-22T01:00:00&format=text&updatedafter=2026-01-01T00:00:00",
+  "kind": "error",
+  "format": "text",
+  "recorded": "2026-11-13",
+  "status": 400,
+  "headers": {
+   "content-type": "text/plain; charset=utf-8",
+   "content-length": "309",
+   "server": "SeisComP-FDSNWS/1.2.5"
+  },
+  "bytes": 309,
+  "events": null,
+  "redactions": 0
+ },
+ {
+  "file": "error_updateafter.txt",
+  "url": "http://seiscomp-p01.vedur.is:8080/fdsnws/event/1/query?starttime=2024-08-22T00:00:00&endtime=2024-08-22T01:00:00&format=text&updateafter=2026-01-01T00:00:00",
+  "kind": "error",
+  "format": "text",
+  "recorded": "2026-11-13",
+  "status": 400,
+  "headers": {
+   "content-type": "text/plain; charset=utf-8",
+   "content-length": "325",
+   "server": "SeisComP-FDSNWS/1.2.5"
+  },
+  "bytes": 325,
+  "events": null,
+  "redactions": 0
+ }
+]

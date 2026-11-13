@@ -1,0 +1,197 @@
+[
+ {
+  "file": "internal_20240822T00.json",
+  "url": "https://vi-api.vedur.is/skjalftalisa/internal/quakes?start_time=2024-08-22T00:00:00Z&end_time=2024-08-22T01:00:00Z",
+  "kind": "list",
+  "format": "geojson",
+  "recorded": "2026-11-13",
+  "status": 200,
+  "headers": {
+   "content-type": "application/json",
+   "content-length": "3571"
+  },
+  "bytes": 3571,
+  "events": 13,
+  "redactions": 0
+ },
+ {
+  "file": "internal_20260910.json",
+  "url": "https://vi-api.vedur.is/skjalftalisa/internal/quakes?start_time=2026-09-10T00:00:00Z&end_time=2026-09-11T00:00:00Z",
+  "kind": "list",
+  "format": "geojson",
+  "recorded": "2026-11-13",
+  "status": 200,
+  "headers": {
+   "content-type": "application/json",
+   "content-length": "4580"
+  },
+  "bytes": 4580,
+  "events": 19,
+  "redactions": 0
+ },
+ {
+  "file": "public_20240822T00.json",
+  "url": "https://api.vedur.is/skjalftalisa/quakes?start_time=2024-08-22T00:00:00Z&end_time=2024-08-22T01:00:00Z",
+  "kind": "list",
+  "format": "geojson",
+  "recorded": "2026-11-13",
+  "status": 200,
+  "headers": {
+   "content-type": "application/json",
+   "content-length": "2564"
+  },
+  "bytes": 2564,
+  "events": 10,
+  "redactions": 0
+ },
+ {
+  "file": "public_20260910.json",
+  "url": "https://api.vedur.is/skjalftalisa/quakes?start_time=2026-09-10T00:00:00Z&end_time=2026-09-11T00:00:00Z",
+  "kind": "list",
+  "format": "geojson",
+  "recorded": "2026-11-13",
+  "status": 200,
+  "headers": {
+   "content-type": "application/json",
+   "content-length": "4341"
+  },
+  "bytes": 4341,
+  "events": 18,
+  "redactions": 0
+ },
+ {
+  "file": "internal_20240822T00_count.json",
+  "url": "https://vi-api.vedur.is/skjalftalisa/internal/quakes/count?start_time=2024-08-22T00:00:00Z&end_time=2024-08-22T01:00:00Z",
+  "kind": "count",
+  "format": "json",
+  "recorded": "2026-11-13",
+  "status": 200,
+  "headers": {
+   "content-type": "application/json",
+   "content-length": "17"
+  },
+  "bytes": 17,
+  "events": null,
+  "redactions": 0
+ },
+ {
+  "file": "internal_detail_1352381.json",
+  "url": "https://vi-api.vedur.is/skjalftalisa/internal/quakes/1352381",
+  "kind": "detail",
+  "format": "json",
+  "recorded": "2026-11-13",
+  "status": 200,
+  "headers": {
+   "content-type": "application/json",
+   "content-length": "3132"
+  },
+  "bytes": 3132,
+  "events": null,
+  "redactions": 0
+ },
+ {
+  "file": "internal_detail_1352541.json",
+  "url": "https://vi-api.vedur.is/skjalftalisa/internal/quakes/1352541",
+  "kind": "detail",
+  "format": "json",
+  "recorded": "2026-11-13",
+  "status": 200,
+  "headers": {
+   "content-type": "application/json",
+   "content-length": "772"
+  },
+  "bytes": 772,
+  "events": null,
+  "redactions": 0
+ },
+ {
+  "file": "internal_detail_1453678.json",
+  "url": "https://vi-api.vedur.is/skjalftalisa/internal/quakes/1453678",
+  "kind": "detail",
+  "format": "json",
+  "recorded": "2026-11-13",
+  "status": 200,
+  "headers": {
+   "content-type": "application/json",
+   "content-length": "775"
+  },
+  "bytes": 775,
+  "events": null,
+  "redactions": 0
+ },
+ {
+  "file": "public_detail_1352381.json",
+  "url": "https://api.vedur.is/skjalftalisa/quakes/1352381",
+  "kind": "detail",
+  "format": "json",
+  "recorded": "2026-11-13",
+  "status": 200,
+  "headers": {
+   "content-type": "application/json",
+   "content-length": "229"
+  },
+  "bytes": 229,
+  "events": null,
+  "redactions": 0
+ },
+ {
+  "file": "internal_empty.json",
+  "url": "https://vi-api.vedur.is/skjalftalisa/internal/quakes?start_time=2024-08-22T00:00:00Z&end_time=2024-08-22T00:02:00Z",
+  "kind": "empty",
+  "format": "geojson",
+  "recorded": "2026-11-13",
+  "status": 200,
+  "headers": {
+   "content-type": "application/json",
+   "content-length": "42"
+  },
+  "bytes": 42,
+  "events": 0,
+  "redactions": 0
+ },
+ {
+  "file": "error_naive_time.json",
+  "url": "https://vi-api.vedur.is/skjalftalisa/internal/quakes?start_time=2024-08-22T00:00:00&end_time=2024-08-22T01:00:00",
+  "kind": "error",
+  "format": "json",
+  "recorded": "2026-11-13",
+  "status": 422,
+  "headers": {
+   "content-type": "application/json",
+   "content-length": "260"
+  },
+  "bytes": 260,
+  "events": null,
+  "redactions": 0
+ },
+ {
+  "file": "error_count_out_of_bounds.json",
+  "url": "https://vi-api.vedur.is/skjalftalisa/internal/quakes/count?start_time=1991-01-07T00:00:00Z&end_time=2026-11-13T00:00:00Z",
+  "kind": "error",
+  "format": "json",
+  "recorded": "2026-11-13",
+  "status": 422,
+  "headers": {
+   "content-type": "application/json",
+   "content-length": "218"
+  },
+  "bytes": 218,
+  "events": null,
+  "redactions": 0
+ },
+ {
+  "file": "error_detail_404.json",
+  "url": "https://vi-api.vedur.is/skjalftalisa/internal/quakes/999999999",
+  "kind": "error",
+  "format": "json",
+  "recorded": "2026-11-13",
+  "status": 404,
+  "headers": {
+   "content-type": "application/json",
+   "content-length": "29"
+  },
+  "bytes": 29,
+  "events": null,
+  "redactions": 0
+ }
+]

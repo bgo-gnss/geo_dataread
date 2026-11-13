@@ -1,0 +1,7 @@
+#EventID|Time|Latitude|Longitude|Depth/km|Author|Catalog|Contributor|ContributorID|MagType|Magnitude|MagAuthor|EventLocationName|EventType
+IMO2024qnpdkq|2024-08-22T00:36:30.772|63.86|-22.426|1.1|SIL||VI|IMO2024qnpdkq|ML_SIL|-0.4527024203630591|scmag@seiscomp-p01|Reykjanes|
+IMO2024qnoqbg|2024-08-22T00:21:00.452|63.863|-22.414|2.7|SIL||VI|IMO2024qnoqbg|ML_SIL|-0.39655273373904554|scmag@seiscomp-p01|Reykjanes|
+IMO2024qnopim|2024-08-22T00:20:10.194|63.861|-22.462|6.1|SIL||VI|IMO2024qnopim|ML_SIL|-0.6274330511186914|scmag@seiscomp-p01|Reykjanes|
+IMO2024qnooms|2024-08-22T00:19:11.927|63.87|-22.407|5.3|SIL||VI|IMO2024qnooms|ML_SIL|-0.26025362491141174|scmag@seiscomp-p01|Reykjanes|
+IMO2024qnohcr|2024-08-22T00:10:37.669|64.045|-21.164|3.0|SIL||VI|IMO2024qnohcr|ML_SIL|-0.122719793510153|scmag@seiscomp-p01|Hengill|
+IMO2024qnogqh|2024-08-22T00:10:04.454|63.888|-22.375|2.1|SIL||VI|IMO2024qnogqh|ML_SIL|-0.5881404930458574|scmag@seiscomp-p01|Reykjanes|

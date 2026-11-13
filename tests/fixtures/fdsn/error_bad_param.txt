@@ -1,0 +1,14 @@
+Error 400: Bad Request
+
+invalid param: bogus
+
+Usage details are available from /fdsnws/event/1/
+
+Request:
+/fdsnws/event/1/query?starttime=2024-08-22T00:00:00&endtime=2024-08-22T01:00:00&format=text&bogus=1
+
+Request Submitted:
+2026-11-13T20:27:53.527927
+
+Service Version:
+1.2.6

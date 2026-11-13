@@ -1,0 +1,1 @@
+{"detail":[{"type":"literal_error","loc":["query","system"],"msg":"Input should be 'sil' or 'seiscomp'","input":"bogus","ctx":{"expected":"'sil' or 'seiscomp'"}}]}

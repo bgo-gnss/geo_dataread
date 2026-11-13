@@ -1,0 +1,332 @@
+[
+ {
+  "file": "internal_seiscomp_20240822T00.json",
+  "url": "https://vi-api.vedur.is/quakes/internal/events?start_time=2024-08-22T00:00:00Z&end_time=2024-08-22T01:00:00Z&size_min=-3&size_max=10&depth_min=0&depth_max=50&system=seiscomp",
+  "kind": "list",
+  "format": "geojson",
+  "recorded": "2026-11-13",
+  "status": 200,
+  "headers": {
+   "content-type": "application/json",
+   "content-length": "2140"
+  },
+  "bytes": 2140,
+  "events": 6,
+  "redactions": 0
+ },
+ {
+  "file": "internal_seiscomp_20260910.json",
+  "url": "https://vi-api.vedur.is/quakes/internal/events?start_time=2026-09-10T00:00:00Z&end_time=2026-09-11T00:00:00Z&size_min=-3&size_max=10&depth_min=0&depth_max=50&system=seiscomp",
+  "kind": "list",
+  "format": "geojson",
+  "recorded": "2026-11-13",
+  "status": 200,
+  "headers": {
+   "content-type": "application/json",
+   "content-length": "17998"
+  },
+  "bytes": 17998,
+  "events": 48,
+  "redactions": 0
+ },
+ {
+  "file": "internal_sil_20240822T00.json",
+  "url": "https://vi-api.vedur.is/quakes/internal/events?start_time=2024-08-22T00:00:00Z&end_time=2024-08-22T01:00:00Z&size_min=-3&size_max=10&depth_min=0&depth_max=50&system=sil",
+  "kind": "list",
+  "format": "geojson",
+  "recorded": "2026-11-13",
+  "status": 200,
+  "headers": {
+   "content-type": "application/json",
+   "content-length": "2000"
+  },
+  "bytes": 2000,
+  "events": 7,
+  "redactions": 0
+ },
+ {
+  "file": "internal_sil_20260910.json",
+  "url": "https://vi-api.vedur.is/quakes/internal/events?start_time=2026-09-10T00:00:00Z&end_time=2026-09-11T00:00:00Z&size_min=-3&size_max=10&depth_min=0&depth_max=50&system=sil",
+  "kind": "list",
+  "format": "geojson",
+  "recorded": "2026-11-13",
+  "status": 200,
+  "headers": {
+   "content-type": "application/json",
+   "content-length": "5346"
+  },
+  "bytes": 5346,
+  "events": 19,
+  "redactions": 0
+ },
+ {
+  "file": "public_seiscomp_20240822T00.json",
+  "url": "https://api.vedur.is/quakes/events?start_time=2024-08-22T00:00:00Z&end_time=2024-08-22T01:00:00Z&size_min=-3&size_max=10&depth_min=0&depth_max=50&system=seiscomp",
+  "kind": "list",
+  "format": "geojson",
+  "recorded": "2026-11-13",
+  "status": 200,
+  "headers": {
+   "content-type": "application/json",
+   "content-length": "1793"
+  },
+  "bytes": 1793,
+  "events": 6,
+  "redactions": 0
+ },
+ {
+  "file": "public_seiscomp_20260910.json",
+  "url": "https://api.vedur.is/quakes/events?start_time=2026-09-10T00:00:00Z&end_time=2026-09-11T00:00:00Z&size_min=-3&size_max=10&depth_min=0&depth_max=50&system=seiscomp",
+  "kind": "list",
+  "format": "geojson",
+  "recorded": "2026-11-13",
+  "status": 200,
+  "headers": {
+   "content-type": "application/json",
+   "content-length": "11740"
+  },
+  "bytes": 11740,
+  "events": 37,
+  "redactions": 0
+ },
+ {
+  "file": "public_sil_20240822T00.json",
+  "url": "https://api.vedur.is/quakes/events?start_time=2024-08-22T00:00:00Z&end_time=2024-08-22T01:00:00Z&size_min=-3&size_max=10&depth_min=0&depth_max=50&system=sil",
+  "kind": "list",
+  "format": "geojson",
+  "recorded": "2026-11-13",
+  "status": 200,
+  "headers": {
+   "content-type": "application/json",
+   "content-length": "2000"
+  },
+  "bytes": 2000,
+  "events": 7,
+  "redactions": 0
+ },
+ {
+  "file": "public_sil_20260910.json",
+  "url": "https://api.vedur.is/quakes/events?start_time=2026-09-10T00:00:00Z&end_time=2026-09-11T00:00:00Z&size_min=-3&size_max=10&depth_min=0&depth_max=50&system=sil",
+  "kind": "list",
+  "format": "geojson",
+  "recorded": "2026-11-13",
+  "status": 200,
+  "headers": {
+   "content-type": "application/json",
+   "content-length": "5346"
+  },
+  "bytes": 5346,
+  "events": 19,
+  "redactions": 0
+ },
+ {
+  "file": "internal_seiscomp_20240822T00.csv",
+  "url": "https://vi-api.vedur.is/quakes/internal/events?start_time=2024-08-22T00:00:00Z&end_time=2024-08-22T01:00:00Z&size_min=-3&size_max=10&depth_min=0&depth_max=50&system=seiscomp&format=csv",
+  "kind": "list",
+  "format": "csv",
+  "recorded": "2026-11-13",
+  "status": 200,
+  "headers": {
+   "content-type": "text/plain; charset=utf-8",
+   "content-length": "979"
+  },
+  "bytes": 979,
+  "events": 6,
+  "redactions": 0
+ },
+ {
+  "file": "internal_sil_20240822T00.csv",
+  "url": "https://vi-api.vedur.is/quakes/internal/events?start_time=2024-08-22T00:00:00Z&end_time=2024-08-22T01:00:00Z&size_min=-3&size_max=10&depth_min=0&depth_max=50&system=sil&format=csv",
+  "kind": "list",
+  "format": "csv",
+  "recorded": "2026-11-13",
+  "status": 200,
+  "headers": {
+   "content-type": "text/plain; charset=utf-8",
+   "content-length": "730"
+  },
+  "bytes": 730,
+  "events": 7,
+  "redactions": 0
+ },
+ {
+  "file": "public_sil_20240822T00.csv",
+  "url": "https://api.vedur.is/quakes/events?start_time=2024-08-22T00:00:00Z&end_time=2024-08-22T01:00:00Z&size_min=-3&size_max=10&depth_min=0&depth_max=50&system=sil&format=csv",
+  "kind": "list",
+  "format": "csv",
+  "recorded": "2026-11-13",
+  "status": 200,
+  "headers": {
+   "content-type": "text/plain; charset=utf-8",
+   "content-length": "656"
+  },
+  "bytes": 656,
+  "events": 7,
+  "redactions": 0
+ },
+ {
+  "file": "internal_seiscomp_20240822T00_count.json",
+  "url": "https://vi-api.vedur.is/quakes/internal/events/count?start_time=2024-08-22T00:00:00Z&end_time=2024-08-22T01:00:00Z&size_min=-3&size_max=10&depth_min=0&depth_max=50&system=seiscomp",
+  "kind": "count",
+  "format": "json",
+  "recorded": "2026-11-13",
+  "status": 200,
+  "headers": {
+   "content-type": "application/json",
+   "content-length": "1"
+  },
+  "bytes": 1,
+  "events": null,
+  "redactions": 0
+ },
+ {
+  "file": "internal_sil_20240822T00_count.json",
+  "url": "https://vi-api.vedur.is/quakes/internal/events/count?start_time=2024-08-22T00:00:00Z&end_time=2024-08-22T01:00:00Z&size_min=-3&size_max=10&depth_min=0&depth_max=50&system=sil",
+  "kind": "count",
+  "format": "json",
+  "recorded": "2026-11-13",
+  "status": 200,
+  "headers": {
+   "content-type": "application/json",
+   "content-length": "1"
+  },
+  "bytes": 1,
+  "events": null,
+  "redactions": 0
+ },
+ {
+  "file": "internal_detail_IMO2024qnogqh.json",
+  "url": "https://vi-api.vedur.is/quakes/internal/events/IMO2024qnogqh",
+  "kind": "detail",
+  "format": "json",
+  "recorded": "2026-11-13",
+  "status": 200,
+  "headers": {
+   "content-type": "application/json",
+   "content-length": "2902"
+  },
+  "bytes": 2902,
+  "events": null,
+  "redactions": 0
+ },
+ {
+  "file": "public_detail_IMO2024qnogqh.json",
+  "url": "https://api.vedur.is/quakes/events/IMO2024qnogqh",
+  "kind": "detail",
+  "format": "json",
+  "recorded": "2026-11-13",
+  "status": 200,
+  "headers": {
+   "content-type": "application/json",
+   "content-length": "433"
+  },
+  "bytes": 433,
+  "events": null,
+  "redactions": 0
+ },
+ {
+  "file": "internal_detail_IMO2026rusibb.json",
+  "url": "https://vi-api.vedur.is/quakes/internal/events/IMO2026rusibb",
+  "kind": "detail",
+  "format": "json",
+  "recorded": "2026-11-13",
+  "status": 200,
+  "headers": {
+   "content-type": "application/json",
+   "content-length": "16353"
+  },
+  "bytes": 16362,
+  "events": null,
+  "redactions": 3
+ },
+ {
+  "file": "internal_detail_IMO2026rutiqi.json",
+  "url": "https://vi-api.vedur.is/quakes/internal/events/IMO2026rutiqi",
+  "kind": "detail",
+  "format": "json",
+  "recorded": "2026-11-13",
+  "status": 200,
+  "headers": {
+   "content-type": "application/json",
+   "content-length": "8584"
+  },
+  "bytes": 8590,
+  "events": null,
+  "redactions": 3
+ },
+ {
+  "file": "internal_empty.json",
+  "url": "https://vi-api.vedur.is/quakes/internal/events?start_time=2024-08-22T00:00:00Z&end_time=2024-08-22T00:02:00Z&size_min=-3&size_max=10&depth_min=0&depth_max=50&system=seiscomp",
+  "kind": "empty",
+  "format": "geojson",
+  "recorded": "2026-11-13",
+  "status": 200,
+  "headers": {
+   "content-type": "application/json",
+   "content-length": "42"
+  },
+  "bytes": 42,
+  "events": 0,
+  "redactions": 0
+ },
+ {
+  "file": "internal_empty.csv",
+  "url": "https://vi-api.vedur.is/quakes/internal/events?start_time=2024-08-22T00:00:00Z&end_time=2024-08-22T00:02:00Z&size_min=-3&size_max=10&depth_min=0&depth_max=50&system=seiscomp&format=csv",
+  "kind": "empty",
+  "format": "csv",
+  "recorded": "2026-11-13",
+  "status": 200,
+  "headers": {
+   "content-type": "text/plain; charset=utf-8",
+   "content-length": "118"
+  },
+  "bytes": 118,
+  "events": 0,
+  "redactions": 0
+ },
+ {
+  "file": "error_bad_system.json",
+  "url": "https://vi-api.vedur.is/quakes/internal/events?start_time=2024-08-22T00:00:00Z&end_time=2024-08-22T01:00:00Z&system=bogus",
+  "kind": "error",
+  "format": "json",
+  "recorded": "2026-11-13",
+  "status": 422,
+  "headers": {
+   "content-type": "application/json",
+   "content-length": "163"
+  },
+  "bytes": 163,
+  "events": null,
+  "redactions": 0
+ },
+ {
+  "file": "empty_before_1991.json",
+  "url": "https://vi-api.vedur.is/quakes/internal/events?start_time=1990-01-01T00:00:00Z&end_time=1990-01-02T00:00:00Z&system=sil",
+  "kind": "empty",
+  "format": "json",
+  "recorded": "2026-11-13",
+  "status": 200,
+  "headers": {
+   "content-type": "application/json",
+   "content-length": "49"
+  },
+  "bytes": 49,
+  "events": null,
+  "redactions": 0
+ },
+ {
+  "file": "error_sil_detail_404.json",
+  "url": "https://vi-api.vedur.is/quakes/internal/events/SIL1352381",
+  "kind": "error",
+  "format": "json",
+  "recorded": "2026-11-13",
+  "status": 404,
+  "headers": {
+   "content-type": "application/json",
+   "content-length": "29"
+  },
+  "bytes": 29,
+  "events": null,
+  "redactions": 0
+ }
+]

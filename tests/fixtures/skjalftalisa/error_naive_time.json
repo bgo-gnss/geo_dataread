@@ -1,0 +1,1 @@
+{"detail":[{"type":"timezone_aware","loc":["query","start_time"],"msg":"Input should have timezone info","input":"2024-08-22T00:00:00"},{"type":"timezone_aware","loc":["query","end_time"],"msg":"Input should have timezone info","input":"2024-08-22T01:00:00"}]}
