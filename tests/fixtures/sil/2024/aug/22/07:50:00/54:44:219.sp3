@@ -1,0 +1,50 @@
+  file: /sk2/2024/aug/22/07:50:00/54:44:219.sp3                          
+      24 822  75440    0  
+      lib 0.60   -0.002  0.259   66.8
+      DYNAMIC SOURCE PARAMETERS
+      Size measures
+      seismic moment:  0.395E+11 Nm
+      local magnitude: 0.6
+      Shear wave corner frequency range at close distances (900km)
+       6.5Hz - 5.9Hz     (  5.9Hz)
+      Fault radius range  135m - 122m     ( 135m)
+      Stress drop range  0.009Mpa - 0.007Mpa     ( 0.007Mpa)
+      Range of the peak slip at the fault 0.03mm - 0.03mm ( 0.03mm)
+      The orientation of the relaxed stress
+              azimuth   dip
+      P-axis    150.   -52. degrees
+      T-axis    153.    38.
+      The horizontal deviatoric stress as given by the P- and T-axes
+      the azimuth of compression  66 degrees 
+      the relative size 0.13
+      The two possible fault planes
+                strike   dip   slip
+      plane a   251.   172.   260. degrees
+      plane b   241.    83.    89.
+      The normal directions of the fault planes
+               azimuth   dip
+      plane a   161.    82. degrees
+      plane b   331.     7.
+      Dip-slip faulting dominates 
+      STATISTICAL INFORMATION
+      Of  0 first motion polarity observations
+      at least  0 are required to fit
+      The optimum mechanism has  0 polarity misfits
+        9 amplitudes for P and S at  3 stations are used
+      Only mechanisms giving an estimated standard 
+      deviation of the amplitude error factor of less
+      than 2.72 for single p-wave observations are
+      taken as acceptable and included in the figures
+      14.84 % of all mechanisms are acceptable
+      100.0 % acceptable due to first motion observations
+       14.8 % of these fitted also the amplitudes
+      The part of well fitting planes is 55.8%
+      The amplitude fit of the optimal mechanism
+      gives a mean error factor of 1.38
+      This corresponds to a standard deviation factor of 1.54
+      for single P-wave observations
+      The double couple solution is not significant
+      (f-value: f( 8, 5) =  3.58)
+      The measure of the misfit to an earthquake spectrum
+      P-waves  0.21
+      S-waves  0.34

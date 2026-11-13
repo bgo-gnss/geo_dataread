@@ -1,0 +1,50 @@
+  file: /sk2/2025/may/03/08:15:00/18:43:000.sp3                          
+      25 5 3  81840  120  
+      lib 2.22   -0.088  0.641  -76.4
+      DYNAMIC SOURCE PARAMETERS
+      Size measures
+      seismic moment:  0.174E+13 Nm
+      local magnitude: 2.2
+      Shear wave corner frequency range at close distances (900km)
+       7.6Hz - 3.5Hz     (  3.5Hz)
+      Fault radius range  227m - 104m     ( 227m)
+      Stress drop range  0.662Mpa - 0.065Mpa     ( 0.065Mpa)
+      Range of the peak slip at the fault  4.4mm -  0.9mm (  0.9mm)
+      The orientation of the relaxed stress
+              azimuth   dip
+      P-axis     55.    60. degrees
+      T-axis     23.   -26.
+      The horizontal deviatoric stress as given by the P- and T-axes
+      the azimuth of compression -76 degrees 
+      the relative size 0.36
+      The two possible fault planes
+                strike   dip   slip
+      plane a    83.    22.    52. degrees
+      plane b   124.   107.   256.
+      The normal directions of the fault planes
+               azimuth   dip
+      plane a   173.    68. degrees
+      plane b    34.    17.
+      Normal faulting dominates
+      STATISTICAL INFORMATION
+      Of  2 first motion polarity observations
+      at least  2 are required to fit
+      The optimum mechanism has  0 polarity misfits
+       93 amplitudes for P and S at 31 stations are used
+      Only mechanisms giving an estimated standard 
+      deviation of the amplitude error factor of less
+      than 3.67 for single p-wave observations are
+      taken as acceptable and included in the figures
+      15.85 % of all mechanisms are acceptable
+       31.5 % acceptable due to first motion observations
+       50.4 % of these fitted also the amplitudes
+      The part of well fitting planes is 91.2%
+      The amplitude fit of the optimal mechanism
+      gives a mean error factor of 2.80
+      This corresponds to a standard deviation factor of 2.87
+      for single P-wave observations
+      The double couple solution is not significant
+      (f-value: f(92,89) =  1.10)
+      The measure of the misfit to an earthquake spectrum
+      P-waves  0.35
+      S-waves  0.29

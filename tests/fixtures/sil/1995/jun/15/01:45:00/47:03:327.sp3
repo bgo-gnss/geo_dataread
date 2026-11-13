@@ -1,0 +1,51 @@
+  file: /eq1/1995/jun/15/01:45:00/47:03:327.sp3                          
+      95 615  147 0    0  
+      lib 1.20   -1.000  0.411   82.8  3.00 Hz
+      DYNAMIC SOURCE PARAMETERS
+      Size measures
+      seismic moment:  0.159E+12 Nm
+      local magnitude: 1.2
+      Shear wave corner frequency range at close distances (900km)
+       5.6Hz - 7.3Hz     (  7.4Hz)
+      Fault radius range   94m - 123m     (  93m)
+      Stress drop range  0.037Mpa - 0.082Mpa     ( 0.086Mpa)
+      Range of the peak slip at the fault  0.2mm -  0.3mm (  0.3mm)
+      The orientation of the relaxed stress
+              azimuth   dip
+      P-axis     83.     0. degrees
+      T-axis    172.    50.
+      The horizontal deviatoric stress as given by the P- and T-axes
+      the azimuth of compression  82 degrees 
+      the relative size 0.71
+      The two possible fault planes        0
+                strike   dip   slip
+      plane a   -40.   123.   140. degrees
+      plane b   205.   123.    40.
+      The normal directions of the fault planes
+               azimuth   dip
+      plane a   230.    33. degrees
+      plane b   115.    33.
+      Reverse faulting dominates
+      STATISTICAL INFORMATION
+      Of  0 first motion polarity observations
+      at least  0 are required to fit
+      The optimum mechanism has  0 polarity misfits
+       15 amplitudes for P and S at  5 stations are used
+      Only mechanisms giving an estimated standard 
+      deviation of the amplitude error factor of less
+      than 2.72 for single p-wave observations are
+      taken as acceptable and included in the figures
+      22.50 % of all mechanisms are acceptable
+      100.0 % acceptable due to first motion observations
+       22.5 % of these fitted also the amplitudes
+      The part of well fitting planes is 71.5%
+      The amplitude fit of the optimal mechanism
+      gives a mean error factor of 1.65
+      This corresponds to a standard deviation factor of 1.80
+      for single P-wave observations
+      The double couple solution is not significant
+      (f-value: f(14,11) =  2.22)
+      The measure of the misfit to an earthquake spectrum
+      P-waves  0.26
+      S-waves  0.23
+      Low frequency limit   3.000 Hz
