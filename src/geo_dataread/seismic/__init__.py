@@ -6,6 +6,16 @@ readers (SIL files, Quakes API, Skjálftalísa, FDSN) and the comparison build
 on it.
 """
 
+from geo_dataread.seismic.cache import (
+    BuildSummary,
+    CacheStats,
+    DEFAULT_RECENT_DAYS,
+    ENV_SIL_CACHE,
+    build_sil_cache,
+    read_sil_catalog_cached,
+    read_sil_mechanisms_cached,
+    sil_cache_dir,
+)
 from geo_dataread.seismic.mechanisms import (
     BLOCK_KINDS,
     EXTRA_COLUMNS,
@@ -118,6 +128,14 @@ from geo_dataread.seismic.sil_files import (
 )
 
 __all__ = [
+    "BuildSummary",
+    "CacheStats",
+    "DEFAULT_RECENT_DAYS",
+    "ENV_SIL_CACHE",
+    "build_sil_cache",
+    "read_sil_catalog_cached",
+    "read_sil_mechanisms_cached",
+    "sil_cache_dir",
     "SkjalftalisaDetail",
     "SkjalftalisaError",
     "SkjalftalisaNotFound",

@@ -21,6 +21,10 @@ dependencies = [
     "scipy>=1.16.0",
 ]
 
+[project.optional-dependencies]
+# Parquet cache for the seismic catalogues (seismic/cache.py)
+parquet = ["pyarrow>=15"]
+
 [dependency-groups]
 dev = [
     "mypy>=1.13",
