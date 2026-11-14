@@ -45,7 +45,7 @@ import pandas as pd
 #: Version of the column tables below. Bump on any change to a column's name,
 #: dtype, nullability, allowed values or meaning; cache keys carry it (T4).
 #: v2 (T3): + ``sil_aut_path``, + magnitude type ``M``.
-SCHEMA_VERSION: Final = 2
+SCHEMA_VERSION: Final = 3
 
 #: Name of the time index of both frames.
 INDEX_NAME: Final = "time"
@@ -86,6 +86,7 @@ MAGNITUDE_TYPES: Final = (
     "ML_SIL",
     "Mpgv_w",
     "M",
+    "Mpgv_alert",  # our PGV magnitude from alertMap (median), PLAN B5
 )
 
 #: QuakeML evaluation modes.
@@ -151,6 +152,11 @@ SIL_EVENT_TYPES: Final[Mapping[str, str]] = {
 #: ``sil_fps`` the SIL solution in ``events.fps``; ``sil_sp3`` the SIL ``sp3``
 #: fault-plane block; ``first_motion`` / ``moment_tensor`` / ``other`` for
 #: other systems (SeisComP, to be checked in T12b).
+#: Faulting classes as SIL's ``sp3`` blocks label them (normalised), stored in
+#: the nullable ``sil_faulting_class`` column (PLAN R3). The computed,
+#: source-independent class is a function of the planes, not a column.
+SIL_FAULTING_CLASSES: Final = ("strike-slip", "normal", "reverse", "dip-slip")
+
 MECHANISM_METHODS: Final = (
     "sil_fps",
     "sil_sp3",
@@ -370,6 +376,13 @@ MECHANISM_COLUMNS: Final[tuple[ColumnSpec, ...]] = (
         (),
         0.0,
         None,
+    ),
+    ColumnSpec(
+        "sil_faulting_class",
+        "category",
+        True,
+        "SIL's own faulting label from the sp3 block (source data, PLAN R3)",
+        allowed=SIL_FAULTING_CLASSES,
     ),
 )
 
