@@ -80,6 +80,19 @@ from geo_dataread.seismic.filters import (
     with_derived_moment,
     within_distance,
 )
+from geo_dataread.seismic.skjalftalisa_api import (
+    SkjalftalisaDetail,
+    SkjalftalisaError,
+    SkjalftalisaNotFound,
+    SkjalftalisaOrigin,
+    SkjalftalisaReport,
+    SkjalftalisaUnreachable,
+    count_skjalftalisa,
+    fetch_skjalftalisa_rows,
+    read_skjalftalisa,
+    read_skjalftalisa_detail,
+    resolve_solutions,
+)
 from geo_dataread.seismic.sil_catalog import (
     DEFAULT_MATCH_TOL,
     DEFAULT_MATCH_TOL_NO_ID,
@@ -105,6 +118,17 @@ from geo_dataread.seismic.sil_files import (
 )
 
 __all__ = [
+    "SkjalftalisaDetail",
+    "SkjalftalisaError",
+    "SkjalftalisaNotFound",
+    "SkjalftalisaOrigin",
+    "SkjalftalisaReport",
+    "SkjalftalisaUnreachable",
+    "count_skjalftalisa",
+    "fetch_skjalftalisa_rows",
+    "read_skjalftalisa",
+    "read_skjalftalisa_detail",
+    "resolve_solutions",
     "FetchPolicy",
     "QuakesApiError",
     "QuakesApiUnreachable",

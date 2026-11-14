@@ -27,7 +27,7 @@ headers, sizes and counts.
 | `internal_empty.json` | `2024-08-22T00:00:00Z` to `00:02:00Z` | 200 | 0 |
 | `error_naive_time.json` | window A without a timezone | **422** `timezone_aware` | — |
 | `error_count_out_of_bounds.json` | count, `1991-01-07T00:00:00Z` to `2026-11-13T00:00:00Z` | 422 `Start time is out of bounds.` | — |
-| `error_detail_404.json` | `/internal/quakes/999999999` | 404 `{"message":"Event not found"}` | — |
+| `error_detail_404.json` | `/internal/quakes/999999999` | 404 `{"message":"Quake not found"}` | — |
 
 ## What the reader (T12, T12b) needs to know
 
