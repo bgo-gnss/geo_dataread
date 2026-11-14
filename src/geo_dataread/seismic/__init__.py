@@ -41,6 +41,16 @@ from geo_dataread.seismic.quakes_api import (
     QuakesApiUnreachable,
     QuakesReadReport,
     read_quakes,
+    MAX_DETAIL_SAMPLE,
+    QuakeDetail,
+    QuakeDetailNotFound,
+    QuakeDetailSample,
+    QuakeMagnitude,
+    QuakeOrigin,
+    parse_quake_detail,
+    read_quake_detail,
+    read_quake_details,
+    sigma_divisor,
 )
 from geo_dataread.seismic.schema import (
     ATTRS_KEY,
@@ -141,6 +151,16 @@ from geo_dataread.seismic.sil_files import (
 )
 
 __all__ = [
+    "MAX_DETAIL_SAMPLE",
+    "QuakeDetail",
+    "QuakeDetailNotFound",
+    "QuakeDetailSample",
+    "QuakeMagnitude",
+    "QuakeOrigin",
+    "parse_quake_detail",
+    "read_quake_detail",
+    "read_quake_details",
+    "sigma_divisor",
     "DEFAULT_TOLERANCES",
     "EXACT_TOLERANCE",
     "CatalogMatch",

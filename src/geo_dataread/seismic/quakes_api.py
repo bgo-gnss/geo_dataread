@@ -100,6 +100,19 @@ status or evaluation mode the schema does not know fails loudly
 silently dropped. A ``"features": null`` body (a window before 1991) is an
 empty catalogue. The :class:`QuakesReadReport` (requests, splits, retries,
 mismatches) rides on ``df.attrs["catalog"]["report"]``.
+
+Detail on request (T11)
+-----------------------
+
+:func:`read_quake_detail` reads ``/events/{event_id}`` (SeisComP only) into a
+:class:`QuakeDetail`: every origin (uncertainties normalised to 1σ km and
+flagged by method: LOCSAT km at 90 %, SIL-imported degrees at 1σ), every
+magnitude, the preferred ones, and ``.to_catalog()`` (one schema row with
+``h_err_km``, ``depth_err_km``, ``azimuthal_gap`` and the per-scale
+magnitudes). :func:`read_quake_details` fetches a bounded *sample*
+(explicit ``max_events``, hard ceiling :data:`MAX_DETAIL_SAMPLE`), never a
+catalogue. The unit rules are in the comment block above
+:class:`QuakeOrigin`.
 """
 
 from __future__ import annotations
@@ -115,6 +128,7 @@ import urllib.request
 from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from datetime import date, datetime, timedelta
+from statistics import NormalDist
 from typing import Any, Final, Literal, Protocol, TypeAlias
 
 import numpy as np
@@ -128,6 +142,7 @@ from geo_dataread.seismic.schema import (
     validate,
     with_provenance,
 )
+from geo_dataread.seismic.sil_catalog import KM_PER_DEG
 
 System = Literal["seiscomp", "sil"]
 TimeLike: TypeAlias = date | datetime | str | pd.Timestamp
@@ -809,23 +824,751 @@ def read_quakes(
     return with_provenance(df, prov)
 
 
+# --------------------------------------------------------------------------
+# Detail on request (T11)
+# --------------------------------------------------------------------------
+#
+# ``/events/{event_id}`` answers QuakeML as JSON (SeisComP events only;
+# ``SIL…`` ids are 404 there, their detail is in the legacy Skjálftalísa API,
+# :func:`geo_dataread.seismic.skjalftalisa_api.read_skjalftalisa_detail`).
+#
+# Shape: every number is a string; ``origin`` and ``magnitude`` are a dict
+# when there is one and a list when there are several (T9). The public
+# detail is reduced to the preferred origin and magnitude, with no ids,
+# authors, methods or quality.
+#
+# Uncertainty units (T9, measured on the fixtures)
+# ------------------------------------------------
+#
+# ===========  =====================================  ========================
+# Method       Recognised by                          ``latitude/longitude``
+#                                                     ``.uncertainty``
+# ===========  =====================================  ========================
+# ``locsat``   ``methodID`` ends in ``LOCSAT``        km, at ``confidenceLevel``
+#                                                     (90 %, per axis)
+# ``sil``      author ``SIL``, earth model            degrees, 1σ (the SIL file
+#              ``smi:local/imo/SIL`` or publicID      errors)
+#              containing ``/imo/SIL``
+# ``unknown``  anything else (e.g. the public         not used: NaN
+#              detail, which names no method)
+# ===========  =====================================  ========================
+#
+# Normalised values (``*_err_km``, ``time_err_s``) are 1σ in km (s):
+#
+# * A value with a ``confidenceLevel`` p is divided by the two-sided normal
+#   quantile z = Φ⁻¹(0.5 + p/200) (1.645 for 90 %). Evidence that LOCSAT's
+#   per-axis numbers are 90 % one-dimensional values: on IMO2026rusibb's
+#   manual origin the 2-D 90 % ellipse axes / 2.146 (310.6 → 144.7 m,
+#   211.3 → 98.5 m) equal the lat/lon uncertainties / 1.645 (236.8 → 144.0 m,
+#   163.7 → 99.5 m).
+# * SIL degrees become km as :func:`~geo_dataread.seismic.sil_catalog.
+#   horizontal_error_km` does: latitude × 111.19, longitude × 111.19 ×
+#   cos(lat). SeisComP's import wrote ``originUncertainty`` without cos(lat),
+#   so that block is kept raw and not used.
+# * ``h_err_km`` is the larger of the two 1σ axes, the same rule as the SIL
+#   files and the legacy API, so the sources compare like with like.
+# * A depth with ``depthType: operator assigned`` (no uncertainty) has
+#   ``depth_err_km`` NaN and ``depth_fixed=True``.
+# * Self-check (``uncertainty_consistent``): for SIL origins the two axes ×
+#   111.195 km must equal ``min/maxHorizontalUncertainty``; for LOCSAT
+#   hypot(lat, lon) must equal ``horizontalUncertainty``. ``False`` means the
+#   server's units may have changed: the values are kept, the flag rides into
+#   the provenance. ``None``: nothing to check against.
+
+UncertaintyMethod = Literal["locsat", "sil", "unknown"]
+
+#: Hard ceiling of :func:`read_quake_details`: details are for samples,
+#: never for whole catalogues (plan §7 T11).
+MAX_DETAIL_SAMPLE: Final = 500
+
+#: Degree → km for the SIL self-check: SeisComP's import uses the mean
+#: Earth radius 6371 km (111.195 km/deg), not :data:`KM_PER_DEG` (111.19).
+_IMPORT_KM_PER_DEG: Final = 6371.0 * math.pi / 180.0
+
+#: Detail magnitude labels → per-scale schema column. ``Msil_lw`` / ``Msil_l``
+#: are SeisComP's names for the SIL Mlw / ML of a back-imported event
+#: (IMO2024qnogqh: ``Msil_lw`` 0.25 = SIL1352381's Mlw). They are not in
+#: :data:`~geo_dataread.seismic.schema.MAGNITUDE_TYPES` and never reach the
+#: ``magnitude_type`` column; only their values fill these columns.
+_DETAIL_SCALE_COLUMNS: Final[Mapping[str, str]] = {
+    "Mlw": "mag_mlw",
+    "Msil_lw": "mag_mlw",
+    "ML": "mag_ml",
+    "Msil_l": "mag_ml",
+    "aut.mag": "mag_auto",
+    "Msil_auto": "mag_auto",
+}
+
+
+class QuakeDetailNotFound(QuakesApiError, LookupError):
+    """The Quakes API has no detail for this event id (HTTP 404)."""
+
+
+def _qnum(value: Any) -> float:
+    """A QuakeML JSON number (a string, a number or absent) → float/NaN."""
+    if value is None or isinstance(value, bool):
+        return math.nan
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return math.nan
+
+
+def _qint(value: Any) -> int | None:
+    v = _qnum(value)
+    return None if math.isnan(v) else int(v)
+
+
+def _qstr(value: Any) -> str | None:
+    return None if value is None else str(value)
+
+
+def _quantity(block: Any) -> tuple[float, float, float]:
+    """``(value, uncertainty, confidence_level)`` of a QuakeML quantity."""
+    if not isinstance(block, Mapping):
+        return _qnum(block), math.nan, math.nan
+    return (
+        _qnum(block.get("value")),
+        _qnum(block.get("uncertainty")),
+        _qnum(block.get("confidenceLevel")),
+    )
+
+
+def sigma_divisor(confidence_level: float) -> float:
+    """The divisor turning a two-sided ``confidence_level`` (percent) value
+    into 1σ: Φ⁻¹(0.5 + p/200); 1.0 when no level is given (NaN)."""
+    if math.isnan(confidence_level):
+        return 1.0
+    if not 0.0 < confidence_level < 100.0:
+        raise ValueError(f"confidence level {confidence_level} is not in (0, 100)")
+    return NormalDist().inv_cdf(0.5 + confidence_level / 200.0)
+
+
+def _as_list(value: Any, what: str) -> list[Mapping[str, Any]]:
+    """Normalise the dict-for-one / list-for-several shape (T9)."""
+    if value is None:
+        return []
+    items = [value] if isinstance(value, Mapping) else value
+    if not isinstance(items, list) or not all(isinstance(i, Mapping) for i in items):
+        raise QuakesApiError(f"detail {what} is not an object or a list of objects")
+    return list(items)
+
+
+def _ts(value: Any) -> pd.Timestamp:
+    ts = pd.Timestamp(value) if value is not None else pd.NaT
+    if ts is pd.NaT:
+        return pd.Timestamp("NaT")
+    return ts.tz_localize("UTC") if ts.tzinfo is None else ts.tz_convert("UTC")
+
+
+@dataclasses.dataclass(frozen=True)
+class QuakeOrigin:
+    """One origin (solution) of a detail. NaN/None where not given.
+
+    Normalised (1σ, km/s): ``time_err_s``, ``lat_err_km``, ``lon_err_km``,
+    ``depth_err_km``, ``h_err_km`` (the larger horizontal axis). Raw, as
+    served: ``*_uncertainty_raw`` with ``confidence_level`` (percent, NaN =
+    none stated), the ``sigma_factor`` divided out, and ``origin_uncertainty``
+    (ellipse/ellipsoid block, metres). ``uncertainty_method`` and
+    ``uncertainty_unit`` say how the raw lat/lon numbers were read (module
+    notes above). Quality: ``n_phases`` = ``usedPhaseCount`` (what the list's
+    ``phases`` gives), distances in degrees.
+    """
+
+    origin_id: str | None
+    time: pd.Timestamp
+    latitude: float
+    longitude: float
+    depth_km: float
+    time_err_s: float
+    lat_err_km: float
+    lon_err_km: float
+    depth_err_km: float
+    h_err_km: float
+    uncertainty_method: UncertaintyMethod
+    uncertainty_unit: Literal["deg", "km"] | None
+    confidence_level: float
+    sigma_factor: float
+    uncertainty_consistent: bool | None
+    time_uncertainty_raw: float
+    latitude_uncertainty_raw: float
+    longitude_uncertainty_raw: float
+    depth_uncertainty_raw: float
+    depth_fixed: bool
+    depth_type: str | None
+    evaluation_mode: str | None
+    evaluation_status: str | None
+    origin_type: str | None
+    author: str | None
+    method_id: str | None
+    earth_model_id: str | None
+    creation_time: pd.Timestamp
+    n_phases: int | None
+    n_phases_associated: int | None
+    n_stations: int | None
+    azimuthal_gap: float
+    standard_error: float
+    minimum_distance_deg: float
+    median_distance_deg: float
+    maximum_distance_deg: float
+    origin_uncertainty: Mapping[str, Any]
+
+
+@dataclasses.dataclass(frozen=True)
+class QuakeMagnitude:
+    """One magnitude of a detail: the raw ``magnitude_type`` label (e.g.
+    ``ML_SIL``, ``Mpgv_w``, ``Msil_lw``), value, uncertainty (as served; no
+    confidence level is given), station count, and the origin it belongs to."""
+
+    magnitude_id: str | None
+    magnitude_type: str | None
+    value: float
+    uncertainty: float
+    station_count: int | None
+    origin_id: str | None
+    method_id: str | None
+    author: str | None
+    evaluation_status: str | None
+    creation_time: pd.Timestamp
+
+
+def _uncertainty_method(o: Mapping[str, Any]) -> UncertaintyMethod:
+    method = str(o.get("methodID") or "")
+    if method.rstrip("/").upper().endswith("LOCSAT"):
+        return "locsat"
+    author = str((o.get("creationInfo") or {}).get("author") or "")
+    model = str(o.get("earthModelID") or "")
+    pid = str(o.get("publicID") or "")
+    if author == "SIL" or model == "smi:local/imo/SIL" or "/imo/SIL" in pid:
+        return "sil"
+    return "unknown"
+
+
+def _close(a: float, b: float, rel: float = 2e-3) -> bool:
+    return math.isclose(a, b, rel_tol=rel, abs_tol=1e-6)
+
+
+def _parse_origin(o: Mapping[str, Any]) -> QuakeOrigin:
+    _, t_unc, t_cl = _quantity(o.get("time"))
+    lat, lat_unc, lat_cl = _quantity(o.get("latitude"))
+    lon, lon_unc, lon_cl = _quantity(o.get("longitude"))
+    dep, dep_unc, dep_cl = _quantity(o.get("depth"))
+    tblock = o.get("time")
+    tval = tblock.get("value") if isinstance(tblock, Mapping) else tblock
+    method = _uncertainty_method(o)
+    ou = o.get("originUncertainty")
+    ou = dict(ou) if isinstance(ou, Mapping) else {}
+    depth_type = _qstr(o.get("depthType"))
+    depth_fixed = depth_type == "operator assigned"
+
+    unit: Literal["deg", "km"] | None
+    consistent: bool | None = None
+    if method == "sil":
+        unit = "deg"
+        lat_km = lat_unc * KM_PER_DEG
+        lon_km = lon_unc * KM_PER_DEG * math.cos(math.radians(lat))
+        lo_m = _qnum(ou.get("minHorizontalUncertainty"))
+        hi_m = _qnum(ou.get("maxHorizontalUncertainty"))
+        axes = sorted((lat_unc, lon_unc))
+        if not any(math.isnan(v) for v in (*axes, lo_m, hi_m)):
+            consistent = _close(axes[0] * _IMPORT_KM_PER_DEG * 1e3, lo_m) and _close(
+                axes[1] * _IMPORT_KM_PER_DEG * 1e3, hi_m
+            )
+    elif method == "locsat":
+        unit = "km"
+        lat_km = lat_unc / sigma_divisor(lat_cl)
+        lon_km = lon_unc / sigma_divisor(lon_cl)
+        h_m = _qnum(ou.get("horizontalUncertainty"))
+        if not any(math.isnan(v) for v in (lat_unc, lon_unc, h_m)):
+            consistent = _close(math.hypot(lat_unc, lon_unc) * 1e3, h_m)
+    else:
+        unit = None
+        lat_km = lon_km = math.nan
+    if method == "unknown":
+        dep_err = t_err = math.nan
+    else:
+        dep_err = math.nan if depth_fixed else dep_unc / sigma_divisor(dep_cl)
+        t_err = t_unc / sigma_divisor(t_cl)
+    with np.errstate(invalid="ignore"):
+        h_err = float(np.fmax(lat_km, lon_km))
+    levels = [v for v in (lat_cl, lon_cl) if not math.isnan(v)]
+    cl = levels[0] if levels and method == "locsat" else math.nan
+    q = o.get("quality")
+    q = q if isinstance(q, Mapping) else {}
+    info = o.get("creationInfo")
+    info = info if isinstance(info, Mapping) else {}
+    return QuakeOrigin(
+        origin_id=_qstr(o.get("publicID")),
+        time=_ts(tval),
+        latitude=lat,
+        longitude=lon,
+        depth_km=dep,
+        time_err_s=t_err,
+        lat_err_km=lat_km,
+        lon_err_km=lon_km,
+        depth_err_km=dep_err,
+        h_err_km=h_err,
+        uncertainty_method=method,
+        uncertainty_unit=unit,
+        confidence_level=cl,
+        sigma_factor=sigma_divisor(cl),
+        uncertainty_consistent=consistent,
+        time_uncertainty_raw=t_unc,
+        latitude_uncertainty_raw=lat_unc,
+        longitude_uncertainty_raw=lon_unc,
+        depth_uncertainty_raw=dep_unc,
+        depth_fixed=depth_fixed,
+        depth_type=depth_type,
+        evaluation_mode=_qstr(o.get("evaluationMode")),
+        evaluation_status=_qstr(o.get("evaluationStatus")),
+        origin_type=_qstr(o.get("type")),
+        author=_qstr(info.get("author")),
+        method_id=_qstr(o.get("methodID")),
+        earth_model_id=_qstr(o.get("earthModelID")),
+        creation_time=_ts(info.get("creationTime")),
+        n_phases=_qint(q.get("usedPhaseCount")),
+        n_phases_associated=_qint(q.get("associatedPhaseCount")),
+        n_stations=_qint(q.get("usedStationCount")),
+        azimuthal_gap=_qnum(q.get("azimuthalGap")),
+        standard_error=_qnum(q.get("standardError")),
+        minimum_distance_deg=_qnum(q.get("minimumDistance")),
+        median_distance_deg=_qnum(q.get("medianDistance")),
+        maximum_distance_deg=_qnum(q.get("maximumDistance")),
+        origin_uncertainty=ou,
+    )
+
+
+def _parse_magnitude(m: Mapping[str, Any]) -> QuakeMagnitude:
+    value, unc, _ = _quantity(m.get("mag"))
+    info = m.get("creationInfo")
+    info = info if isinstance(info, Mapping) else {}
+    return QuakeMagnitude(
+        magnitude_id=_qstr(m.get("publicID")),
+        magnitude_type=_qstr(m.get("type")),
+        value=value,
+        uncertainty=unc,
+        station_count=_qint(m.get("stationCount")),
+        origin_id=_qstr(m.get("originID")),
+        method_id=_qstr(m.get("methodID")),
+        author=_qstr(info.get("author")),
+        evaluation_status=_qstr(m.get("evaluationStatus")),
+        creation_time=_ts(info.get("creationTime")),
+    )
+
+
+@dataclasses.dataclass(frozen=True)
+class QuakeDetail:
+    """The detail of one SeisComP event (``/events/{event_id}``).
+
+    ``origins`` / ``magnitudes``: all of them, in server order.
+    ``preferred_origin`` / ``preferred_magnitude``: by the event's
+    ``preferredOriginID`` / ``preferredMagnitudeID``; in the public detail
+    (no ids, one of each) the single one. ``event_type_code``: the event's
+    ``type``, raw. ``region``: ``description.text``. ``raw``: the decoded
+    answer.
+    """
+
+    event_id: str
+    event_type_code: str | None
+    region: str | None
+    origins: tuple[QuakeOrigin, ...]
+    magnitudes: tuple[QuakeMagnitude, ...]
+    preferred_origin_id: str | None
+    preferred_magnitude_id: str | None
+    url: str
+    internal: bool
+    raw: Mapping[str, Any]
+
+    @property
+    def preferred_origin(self) -> QuakeOrigin | None:
+        if self.preferred_origin_id is None:
+            return self.origins[0] if len(self.origins) == 1 else None
+        return next(
+            (o for o in self.origins if o.origin_id == self.preferred_origin_id), None
+        )
+
+    @property
+    def preferred_magnitude(self) -> QuakeMagnitude | None:
+        if self.preferred_magnitude_id is None:
+            return self.magnitudes[0] if len(self.magnitudes) == 1 else None
+        return next(
+            (
+                m
+                for m in self.magnitudes
+                if m.magnitude_id == self.preferred_magnitude_id
+            ),
+            None,
+        )
+
+    def magnitudes_of(self, origin_id: str | None) -> tuple[QuakeMagnitude, ...]:
+        """The magnitudes computed for one origin."""
+        return tuple(m for m in self.magnitudes if m.origin_id == origin_id)
+
+    def scale_magnitudes(self) -> dict[str, float]:
+        """``mag_mlw`` / ``mag_ml`` / ``mag_auto`` from the detail's labels
+        (``Msil_lw``/``Mlw``, ``Msil_l``/``ML``, ``Msil_auto``/``aut.mag``).
+
+        A value on the preferred origin wins; otherwise the first one on any
+        other origin of the same event is taken (``Msil_auto`` sits on the
+        SIL automatic origin, which is rarely the preferred one). NaN where
+        absent.
+        """
+        out = {c: math.nan for c in ("mag_mlw", "mag_ml", "mag_auto")}
+        pref = self.preferred_origin
+        pref_id = pref.origin_id if pref is not None else None
+        ordered = sorted(self.magnitudes, key=lambda m: m.origin_id != pref_id)
+        for m in ordered:
+            col = _DETAIL_SCALE_COLUMNS.get(m.magnitude_type or "")
+            if col is not None and math.isnan(out[col]) and not math.isnan(m.value):
+                out[col] = m.value
+        return out
+
+    def to_catalog(self, *, extras: bool = False) -> pd.DataFrame:
+        """A one-row schema events frame (source ``quakes-seiscomp``) of the
+        preferred origin and magnitude, with ``h_err_km``, ``depth_err_km``,
+        ``azimuthal_gap`` and the per-scale magnitudes filled.
+
+        The list columns are mapped exactly as :func:`read_quakes` maps them
+        (same code path), so the row equals that event's list row in the
+        columns both have. ``updated_time`` is NaT (the detail does not carry
+        the list's value). ``extras=True`` keeps ``region``. Raises
+        :class:`ValueError` without a preferred origin, and
+        :class:`~geo_dataread.seismic.schema.SchemaError` when the preferred
+        magnitude type is not a schema type.
+        """
+        o = self.preferred_origin
+        if o is None:
+            raise ValueError(f"event {self.event_id}: no preferred origin")
+        m = self.preferred_magnitude
+        props: dict[str, Any] = {
+            "event_id": self.event_id,
+            "time": o.time.isoformat() if o.time is not pd.NaT else None,
+            "depth": o.depth_km,
+            "magnitude": m.value if m is not None else None,
+            "evaluation_mode": o.evaluation_mode,
+            "status": o.evaluation_status,
+            "type": self.event_type_code,
+            "phases": o.n_phases,
+            "updated_time": None,
+            "region": self.region,
+        }
+        if m is not None:
+            props["magnitude_type"] = m.magnitude_type
+        feat = {
+            "type": "Feature",
+            "geometry": {"type": "Point", "coordinates": [o.longitude, o.latitude]},
+            "properties": props,
+        }
+        tally: Counter[str] = Counter()
+        df = features_to_frame([feat], system="seiscomp", extras=extras, tally=tally)
+        fill = {
+            "h_err_km": o.h_err_km,
+            "depth_err_km": o.depth_err_km,
+            "azimuthal_gap": o.azimuthal_gap,
+            **self.scale_magnitudes(),
+        }
+        for col, val in fill.items():
+            spec = next(s for s in EVENT_COLUMNS if s.name == col)
+            ok = not math.isnan(val) and (spec.minimum is None or val >= spec.minimum)
+            ok = ok and (spec.maximum is None or val <= spec.maximum)
+            if not ok and not math.isnan(val):
+                tally[f"out_of_range:{col}"] += 1
+            if len(df):
+                df[col] = np.array([val if ok else np.nan], dtype="float64")
+        notes = []
+        if o.uncertainty_method == "unknown":
+            notes.append(
+                "origin method not stated (public detail?): uncertainties not "
+                "normalised, h_err_km/depth_err_km NA; use internal=True"
+            )
+        if o.uncertainty_consistent is False:
+            notes.append(
+                "lat/lon uncertainties disagree with originUncertainty: the "
+                "server's units may have changed"
+            )
+        prov = catalog_provenance(
+            source=SOURCES_BY_SYSTEM["seiscomp"],
+            location=self.url,
+            extra={
+                "detail": True,
+                "endpoint": "internal" if self.internal else "public",
+                "preferred_origin_id": o.origin_id,
+                "preferred_magnitude_id": m.magnitude_id if m is not None else None,
+                "uncertainty_method": o.uncertainty_method,
+                "confidence_level": (
+                    None if math.isnan(o.confidence_level) else o.confidence_level
+                ),
+                "sigma_factor": o.sigma_factor,
+                "uncertainty_consistent": o.uncertainty_consistent,
+                "depth_fixed": o.depth_fixed,
+                "n_origins": len(self.origins),
+                "n_magnitudes": len(self.magnitudes),
+                "counts": dict(tally),
+                "notes": notes,
+            },
+        )
+        with_provenance(df, prov)
+        validate(df, strict=True)
+        return df
+
+
+def _event_id_of(public_id: str | None) -> str | None:
+    if not public_id:
+        return None
+    return public_id.rstrip("/").rsplit("/", 1)[-1]
+
+
+def parse_quake_detail(
+    body: Any, *, event_id: str | None = None, url: str = "", internal: bool = True
+) -> QuakeDetail:
+    """A decoded detail answer → :class:`QuakeDetail` (no network).
+
+    ``event_id``: the id asked for; it must match the answer's ``publicID``
+    when that is present (the public detail has none). Raises
+    :class:`QuakesApiError` for a malformed answer, or when a preferred id
+    names no origin/magnitude of the answer.
+    """
+    if not isinstance(body, Mapping) or "origin" not in body:
+        raise QuakesApiError(f"{url or 'detail'}: not a QuakeML event answer", url=url)
+    origins = tuple(_parse_origin(o) for o in _as_list(body.get("origin"), "origin"))
+    mags = tuple(
+        _parse_magnitude(m) for m in _as_list(body.get("magnitude"), "magnitude")
+    )
+    served_id = _event_id_of(_qstr(body.get("publicID")))
+    if event_id is not None and served_id is not None and served_id != event_id:
+        raise QuakesApiError(
+            f"asked for {event_id}, the answer is {served_id}", url=url
+        )
+    eid = served_id or event_id
+    if eid is None:
+        raise QuakesApiError("detail answer without an event id", url=url)
+    pref_o = _qstr(body.get("preferredOriginID"))
+    pref_m = _qstr(body.get("preferredMagnitudeID"))
+    if pref_o is not None and pref_o not in {o.origin_id for o in origins}:
+        raise QuakesApiError(f"{eid}: preferredOriginID {pref_o} not among origins")
+    if pref_m is not None and pref_m not in {m.magnitude_id for m in mags}:
+        raise QuakesApiError(
+            f"{eid}: preferredMagnitudeID {pref_m} not among magnitudes"
+        )
+    desc = body.get("description")
+    region = _qstr(desc.get("text")) if isinstance(desc, Mapping) else None
+    return QuakeDetail(
+        event_id=eid,
+        event_type_code=_qstr(body.get("type")),
+        region=region,
+        origins=origins,
+        magnitudes=mags,
+        preferred_origin_id=pref_o,
+        preferred_magnitude_id=pref_m,
+        url=url,
+        internal=internal,
+        raw=dict(body),
+    )
+
+
+def _check_detail_args(event_id: str, system: str) -> str:
+    if system not in SOURCES_BY_SYSTEM:
+        raise ValueError(f"system {system!r}: 'seiscomp' or 'sil'")
+    text = str(event_id).strip()
+    if system == "sil" or text.upper().startswith("SIL"):
+        raise ValueError(
+            f"{event_id!r}: the Quakes API has no detail for SIL events (404); "
+            "use geo_dataread.seismic.skjalftalisa_api.read_skjalftalisa_detail"
+        )
+    if not text or "/" in text or "?" in text or "#" in text:
+        raise ValueError(f"event_id {event_id!r} is not a SeisComP event id")
+    return text
+
+
+def _fetch_detail(client: _Client, event_id: str) -> QuakeDetail:
+    path = f"/events/{urllib.parse.quote(event_id, safe='')}"
+    client.tally["detail_requests"] += 1
+    try:
+        body = client.get(path, ())
+    except QuakesApiError as exc:
+        if exc.status == 404 and not isinstance(exc, QuakesApiUnreachable):
+            raise QuakeDetailNotFound(
+                f"no Quakes API detail for {event_id}: {exc}",
+                status=404,
+                url=exc.url,
+            ) from exc
+        raise
+    try:
+        doc = json.loads(body)
+    except ValueError as exc:
+        raise QuakesApiError(f"detail is not JSON: {body[:200]!r}") from exc
+    return parse_quake_detail(
+        doc,
+        event_id=event_id,
+        url=f"{client.base}{path}",
+        internal=client.internal,
+    )
+
+
+def read_quake_detail(
+    event_id: str,
+    *,
+    system: System = "seiscomp",
+    internal: bool | None = None,
+    session: Session | None = None,
+    policy: FetchPolicy = DEFAULT_POLICY,
+) -> QuakeDetail:
+    """The detail of one SeisComP event: all origins (uncertainties
+    normalised to 1σ km and flagged by method), all magnitudes, the
+    preferred ones; ``.to_catalog()`` gives the one-row schema frame.
+
+    For samples, never whole catalogues (:func:`read_quake_details` for a
+    few). ``system="sil"`` or a ``SIL…`` id raises :class:`ValueError` before
+    any request (use the legacy Skjálftalísa detail). Endpoint, transport,
+    timeout and 5xx retries as :func:`read_quakes`. Raises
+    :class:`QuakeDetailNotFound` (also a :class:`LookupError`) for an
+    unknown id, :class:`QuakesApiUnreachable`, :class:`QuakesApiError`.
+    """
+    eid = _check_detail_args(event_id, system)
+    base, is_internal = resolve_endpoint(internal)
+    client = _Client(session or UrllibSession(), base, is_internal, policy, Counter())
+    return _fetch_detail(client, eid)
+
+
+@dataclasses.dataclass(frozen=True)
+class QuakeDetailSample:
+    """What :func:`read_quake_details` fetched: ``details`` in input order
+    (ids not found are left out and listed in ``missing``), and the request
+    tally (``requests``, ``detail_requests``, ``retries``)."""
+
+    details: tuple[QuakeDetail, ...]
+    missing: tuple[str, ...]
+    counts: Mapping[str, int]
+    elapsed_s: float
+
+    def to_catalog(self, *, extras: bool = False) -> pd.DataFrame:
+        """The details' one-row frames concatenated (schema-valid, sorted)."""
+        frames = [d.to_catalog(extras=extras) for d in self.details]
+        if not frames:
+            return features_to_frame([], system="seiscomp", extras=extras)
+        df = coerce_catalog(pd.concat(frames), source=SOURCES_BY_SYSTEM["seiscomp"])
+        validate(df, strict=True)
+        prov = dict(frames[0].attrs.get("catalog", {}))
+        for key in (
+            "preferred_origin_id",
+            "preferred_magnitude_id",
+            "uncertainty_method",
+            "confidence_level",
+            "sigma_factor",
+            "uncertainty_consistent",
+            "depth_fixed",
+            "n_origins",
+            "n_magnitudes",
+            "counts",
+            "notes",
+        ):
+            prov.pop(key, None)
+        prov["location"] = prov.get("location", "").rsplit("/", 1)[0]
+        prov["sample"] = {
+            "events": len(self.details),
+            "missing": list(self.missing),
+            "uncertainty_methods": dict(
+                Counter(
+                    o.uncertainty_method
+                    for d in self.details
+                    if (o := d.preferred_origin) is not None
+                )
+            ),
+            "counts": dict(self.counts),
+        }
+        return with_provenance(df, prov)
+
+
+def read_quake_details(
+    event_ids: Sequence[str] | pd.Series,
+    *,
+    max_events: int,
+    system: System = "seiscomp",
+    internal: bool | None = None,
+    session: Session | None = None,
+    policy: FetchPolicy = DEFAULT_POLICY,
+    missing: Literal["raise", "skip"] = "raise",
+) -> QuakeDetailSample:
+    """Details for a *sample* of events, one request each, politely.
+
+    ``max_events`` is required: more ids than that raise :class:`ValueError`
+    (never truncated silently), and it may not exceed
+    :data:`MAX_DETAIL_SAMPLE`. Draw the sample first (e.g.
+    ``df["event_id"].sample(50, random_state=0)``). Duplicate ids are fetched
+    once. One client serves the whole loop, so ``policy.pause_s`` separates
+    every request (N ids → N−1 pauses). ``missing="skip"`` lists 404 ids in
+    :attr:`QuakeDetailSample.missing` instead of raising
+    :class:`QuakeDetailNotFound`. Every id is checked before the first
+    request.
+    """
+    t0 = _time.perf_counter()
+    if isinstance(max_events, bool) or not isinstance(max_events, int):
+        raise TypeError("max_events must be an int")
+    if not 1 <= max_events <= MAX_DETAIL_SAMPLE:
+        raise ValueError(
+            f"max_events={max_events}: must be 1…{MAX_DETAIL_SAMPLE} "
+            "(details are for samples, not catalogues)"
+        )
+    if missing not in ("raise", "skip"):
+        raise ValueError("missing must be 'raise' or 'skip'")
+    if isinstance(event_ids, str):
+        raise TypeError("event_ids is a sequence of ids, not one string")
+    ids = list(dict.fromkeys(_check_detail_args(str(e), system) for e in event_ids))
+    if len(ids) > max_events:
+        raise ValueError(
+            f"{len(ids)} event ids > max_events={max_events}: draw a smaller "
+            "sample (details are never fetched for whole catalogues)"
+        )
+    base, is_internal = resolve_endpoint(internal)
+    tally: Counter[str] = Counter(
+        {"requests": 0, "detail_requests": 0, "retries": 0, "missing": 0}
+    )
+    client = _Client(session or UrllibSession(), base, is_internal, policy, tally)
+    details: list[QuakeDetail] = []
+    lost: list[str] = []
+    for eid in ids:
+        try:
+            details.append(_fetch_detail(client, eid))
+        except QuakeDetailNotFound:
+            if missing == "raise":
+                raise
+            lost.append(eid)
+            tally["missing"] += 1
+    return QuakeDetailSample(
+        details=tuple(details),
+        missing=tuple(lost),
+        counts=dict(tally),
+        elapsed_s=_time.perf_counter() - t0,
+    )
+
+
 __all__ = [
     "DEFAULT_POLICY",
     "DEPTH_BOUNDS",
     "ENV_ENDPOINT",
     "INTERNAL_BASE",
+    "MAX_DETAIL_SAMPLE",
     "PUBLIC_BASE",
     "SIZE_BOUNDS",
     "SOURCES_BY_SYSTEM",
     "USER_AGENT",
     "FetchPolicy",
+    "QuakeDetail",
+    "QuakeDetailNotFound",
+    "QuakeDetailSample",
+    "QuakeMagnitude",
+    "QuakeOrigin",
     "QuakesApiError",
     "QuakesApiUnreachable",
     "QuakesReadReport",
     "Session",
     "UrllibSession",
     "features_to_frame",
+    "parse_quake_detail",
     "polygon_wkt",
+    "read_quake_detail",
+    "read_quake_details",
     "read_quakes",
     "resolve_endpoint",
+    "sigma_divisor",
 ]
