@@ -940,10 +940,13 @@ def validate_mechanisms(
             marked = (
                 df["planes_inconsistent"].astype("boolean").fillna(False).to_numpy(bool)
             )
-        for sel, severity, note in (
+        cases: tuple[
+            tuple[npt.NDArray[np.bool_], Literal["error", "warning"], str], ...
+        ] = (
             (bad & ~marked, "error", ""),
             (bad & marked, "warning", "; kept, marked in planes_inconsistent"),
-        ):
+        )
+        for sel, severity, note in cases:
             if sel.any():
                 worst = float(np.nanmax(mis[sel]))
                 issues.append(
