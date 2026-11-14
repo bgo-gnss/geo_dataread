@@ -77,6 +77,15 @@ of the chosen row, ``n_solutions`` (1 or 2), and the reviewed row's raw
 fps plane a, *not normalised* — strikes of −72 and 434 occur). The raw rows
 with every field are available from :func:`fetch_skjalftalisa_rows`.
 
+Fault planes (T12b): :func:`read_skjalftalisa_mechanisms` gives the
+schema mechanisms frame (``method="sil_fps"``, SIL's own solution): plane 1
+from the list's raw strike/dip/slip (normalised), plane 2 computed; with
+``detail=True`` both planes from the detail's ``sp3`` ``fp[ab]_*_AR`` fields
+plus ``sil_path``. Only planes are taken (the ETL truncates the scalars), the
+detail's ``sp3.faulting_mechanism`` is always empty (checked live 2026-11-14),
+and a mutually inconsistent pair is kept and marked (``planes_inconsistent``).
+SeisComP carries no mechanisms (T9).
+
 Known limits: the API's ETL truncates some scalars (T3b); the public list
 rounds coordinates to 0.001° and ``m_mlw`` to 0.1, drops strike/dip/slip and
 drops some whole events (event magnitude < 0?, not verified).
@@ -100,11 +109,24 @@ import numpy as np
 import numpy.typing as npt
 import pandas as pd
 
-from geo_dataread.seismic.filters import TimeLike, subset, to_utc
+from geo_dataread.seismic.filters import TimeLike, points_in_polygon, subset, to_utc
+from geo_dataread.seismic.mechanisms import (
+    FAULTING_CLASSES,
+    normalize_plane,
+    output_columns,
+    same_plane_deg,
+    validate_marked_mechanisms,
+    with_planes_inconsistent,
+)
 from geo_dataread.seismic.schema import (
+    DEFAULT_PLANE_TOL_DEG,
     EVENT_COLUMNS,
+    STRING_DTYPE,
+    auxiliary_plane,
     catalog_provenance,
     coerce_catalog,
+    coerce_mechanisms,
+    plane_mismatch_deg,
     sil_event_type,
     validate,
     with_provenance,
@@ -1175,9 +1197,349 @@ def read_skjalftalisa_detail(
     return parse_detail(body, url=url, internal=internal)
 
 
+# --------------------------------------------------------------------------
+# Fault planes (T12b)
+# --------------------------------------------------------------------------
+
+#: ``method`` of every legacy mechanism row: the API serves SIL's own
+#: solution, the one in ``events.fps`` (T3b: the planes are equal), so it is
+#: labelled as the files label it (schema: method = how, not which door).
+MECHANISM_METHOD: Final = "sil_fps"
+
+#: Extra (non-schema) columns of :func:`read_skjalftalisa_mechanisms`:
+#: ``planes_from`` (``list`` = plane 1 from the list, plane 2 computed;
+#: ``detail`` = both planes from the detail's ``sp3``) and ``sil_path``
+#: (``slungapath``, the SIL file id = the ``sil-files`` ``event_id``; detail
+#: only).
+MECHANISM_EXTRA_COLUMNS: Final = ("planes_from", "sil_path")
+
+#: Default cap on detail requests of one :func:`read_skjalftalisa_mechanisms`
+#: call (one request per mechanism; the detail is for samples).
+DEFAULT_MAX_DETAILS: Final = 200
+
+#: sp3 ``fp[ab]_{strike,dip,slip}_AR`` keys: the Aki & Richards planes. The
+#: unsuffixed ``fp[ab]_*`` are the raw block planes (left-hand strike, dip to
+#: 180) and are not used.
+_SP3_PLANE_KEYS: Final = tuple(
+    tuple(f"fp{w}_{a}_AR" for a in ("strike", "dip", "slip")) for w in ("a", "b")
+)
+
+
+def sil_faulting_label(text: Any) -> str | None:
+    """SIL's faulting label → :data:`~geo_dataread.seismic.schema.SIL_FAULTING_CLASSES`.
+
+    Accepts the block's wording with or without the tail (``"Strike slip"``,
+    ``"Normal faulting dominates"``); blank, ``None`` or an unknown text give
+    ``None``. (The detail's ``sp3.faulting_mechanism`` was empty in every
+    recorded answer, although the file block of the same event carries
+    "Strike slip faulting dominates": the ETL drops it.)
+    """
+    if not isinstance(text, str):
+        return None
+    t = " ".join(text.split())
+    t = t.removesuffix(" faulting dominates").removesuffix(" dominates").strip()
+    for key, value in FAULTING_CLASSES.items():
+        if t.lower() == key.lower():
+            return value
+    return None
+
+
+def _empty_mechanism_rows() -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "time": pd.Series([], dtype="datetime64[ns, UTC]"),
+            "event_id": pd.Series([], dtype=object),
+            "strike1": pd.Series([], dtype="float64"),
+        }
+    )
+
+
+def mechanisms_from_rows(
+    rows: pd.DataFrame,
+) -> tuple[pd.DataFrame, Counter[str]]:
+    """The fault planes of raw list rows (:func:`rows_from_features`).
+
+    One row per reviewed (``SIL picks``) event whose ``strike``/``dip``/
+    ``slip`` are all given (internal list only). The list's plane is fps
+    plane a in Aki & Richards with the strike **not** wrapped (−72, 434
+    occur): it becomes plane 1 through
+    :func:`~geo_dataread.seismic.mechanisms.normalize_plane`; plane 2 is
+    computed (:func:`~geo_dataread.seismic.schema.auxiliary_plane`). Nothing
+    else is taken: the list's scalars are truncated by its ETL (T3b, §9d),
+    and the list has no polarity/amplitude counts. Returns the raw frame
+    (column ``time``, not yet coerced) with ``latitude``/``longitude`` of the
+    picks row for region cuts, and counts: ``mech:picks_rows``,
+    ``mech:no_plane`` (picks rows without a plane), ``mech:bad_plane`` (a dip
+    outside [0, 90] or a partial plane), ``mech:duplicate_rows``,
+    ``mech:planes`` (rows out).
+    """
+    tally: Counter[str] = Counter()
+    picks = rows.loc[(rows["originating_system"] == SYSTEM_PICKS).to_numpy()]
+    dup = picks.duplicated(["event_id"], keep="first").to_numpy()
+    tally["mech:duplicate_rows"] += int(dup.sum())
+    picks = picks.loc[~dup]
+    tally["mech:picks_rows"] += len(picks)
+    s = picks["strike"].to_numpy(dtype=np.float64)
+    d = picks["dip"].to_numpy(dtype=np.float64)
+    r = picks["slip"].to_numpy(dtype=np.float64)
+    given = np.stack([~np.isnan(s), ~np.isnan(d), ~np.isnan(r)])
+    none = ~given.any(axis=0)
+    with np.errstate(invalid="ignore"):
+        bad = (given.any(axis=0) & ~given.all(axis=0)) | (
+            given.all(axis=0) & ((d < 0.0) | (d > 90.0))
+        )
+    tally["mech:no_plane"] += int(none.sum())
+    tally["mech:bad_plane"] += int(bad.sum())
+    keep = ~none & ~bad
+    p = picks.loc[keep]
+    s1, d1, r1 = normalize_plane(s[keep], d[keep], r[keep])
+    s2, d2, r2 = auxiliary_plane(s1, d1, r1)
+    out = pd.DataFrame(
+        {
+            "time": p["time"].to_numpy(),
+            "event_id": [str(int(v)) for v in p["event_id"]],
+            "method": MECHANISM_METHOD,
+            "strike1": s1,
+            "dip1": d1,
+            "rake1": r1,
+            "strike2": s2,
+            "dip2": d2,
+            "rake2": r2,
+            "planes_from": "list",
+            "sil_path": None,
+            "latitude": p["latitude"].to_numpy(dtype=np.float64),
+            "longitude": p["longitude"].to_numpy(dtype=np.float64),
+        }
+    )
+    out["time"] = pd.to_datetime(out["time"], utc=True)
+    tally["mech:planes"] += len(out)
+    return out, tally
+
+
+@dataclasses.dataclass(frozen=True)
+class DetailPlanes:
+    """The fault planes of one detail answer (:func:`detail_planes`).
+
+    Planes in Aki & Richards, normalised; ``plane2`` is ``None`` when the
+    detail has no complete plane b. ``mismatch_deg`` is how far plane b is
+    from plane a's auxiliary plane (``consistent`` False beyond the
+    tolerance; such a pair is kept and marked, not dropped). ``time`` is the
+    reviewed origin's.
+    """
+
+    event_id: str
+    sil_path: str | None
+    time: pd.Timestamp
+    plane1: tuple[float, float, float]
+    plane2: tuple[float, float, float] | None
+    mismatch_deg: float
+    sil_faulting_class: str | None
+    plane_tol_deg: float = DEFAULT_PLANE_TOL_DEG
+
+    @property
+    def consistent(self) -> bool | None:
+        """Plane 2 is the auxiliary plane of plane 1 within the tolerance
+        (``None`` without plane 2)."""
+        if self.plane2 is None:
+            return None
+        return bool(self.mismatch_deg <= self.plane_tol_deg)
+
+
+def detail_planes(
+    detail: SkjalftalisaDetail, *, plane_tol_deg: float = DEFAULT_PLANE_TOL_DEG
+) -> DetailPlanes | None:
+    """Both planes of a detail's ``sp3`` (``fp[ab]_*_AR``), or ``None``.
+
+    ``None`` when the answer has no ``sp3`` (automatic events, the public
+    detail), no reviewed origin, or no complete plane a. Only the planes and
+    SIL's label are read; the sp3 scalars are not (truncated, T3b).
+    """
+    sp3 = detail.sp3
+    o = detail.origin(SYSTEM_PICKS)
+    if sp3 is None or o is None:
+        return None
+    a, b = ([_num(sp3.get(k)) for k in keys] for keys in _SP3_PLANE_KEYS)
+    if any(math.isnan(v) for v in a) or not 0.0 <= a[1] <= 90.0:
+        return None
+    pa = tuple(float(x) for x in normalize_plane(*a))
+    pb: tuple[float, ...] | None = None
+    mis = math.nan
+    if not any(math.isnan(v) for v in b) and 0.0 <= b[1] <= 90.0:
+        pb = tuple(float(x) for x in normalize_plane(*b))
+        mis = float(plane_mismatch_deg(*pa, *pb))
+    return DetailPlanes(
+        event_id=detail.event_id,
+        sil_path=detail.sil_path,
+        time=o.time,
+        plane1=(pa[0], pa[1], pa[2]),
+        plane2=None if pb is None else (pb[0], pb[1], pb[2]),
+        mismatch_deg=mis,
+        sil_faulting_class=sil_faulting_label(sp3.get("faulting_mechanism")),
+        plane_tol_deg=plane_tol_deg,
+    )
+
+
+def _apply_details(
+    mech: pd.DataFrame,
+    client: _Client,
+    tally: Counter[str],
+    plane_tol_deg: float,
+) -> pd.DataFrame:
+    """Replace each list row's planes by its detail's ``_AR`` planes."""
+    mech = mech.copy()
+    mech["sil_faulting_class"] = None
+    mech["sil_path"] = mech["sil_path"].astype(object)
+    for i, eid in zip(mech.index, mech["event_id"], strict=True):
+        url = f"{base_url(client.internal)}/{int(eid)}"
+        try:
+            det = parse_detail(client.get_json(url), url=url, internal=client.internal)
+        except SkjalftalisaNotFound:
+            tally["mech:detail_not_found"] += 1
+            continue
+        tally["mech:details"] += 1
+        mech.at[i, "sil_path"] = det.sil_path
+        dp = detail_planes(det, plane_tol_deg=plane_tol_deg)
+        if dp is None:
+            tally["mech:detail_without_planes"] += 1
+            continue
+        row = mech.loc[i]
+        off = float(
+            same_plane_deg(*dp.plane1, row["strike1"], row["dip1"], row["rake1"])
+        )
+        if not off <= plane_tol_deg:
+            tally["mech:detail_differs_from_list"] += 1
+        if dp.consistent is False:
+            tally["mech:detail_planes_inconsistent"] += 1
+        p2 = dp.plane2 or (math.nan, math.nan, math.nan)
+        for k, v in zip(("strike", "dip", "rake"), dp.plane1, strict=True):
+            mech.at[i, f"{k}1"] = v
+        for k, v in zip(("strike", "dip", "rake"), p2, strict=True):
+            mech.at[i, f"{k}2"] = v
+        mech.at[i, "planes_from"] = "detail"
+        if dp.sil_faulting_class is None:
+            tally["mech:no_sil_label"] += 1
+        mech.at[i, "sil_faulting_class"] = dp.sil_faulting_class
+    return mech
+
+
+def read_skjalftalisa_mechanisms(
+    start: TimeLike,
+    end: TimeLike,
+    *,
+    detail: bool = False,
+    max_details: int = DEFAULT_MAX_DETAILS,
+    bbox: Sequence[float] | None = None,
+    polygon: Sequence[Sequence[float]] | npt.ArrayLike | None = None,
+    server_buffer_km: float = DEFAULT_SERVER_BUFFER_KM,
+    plane_tol_deg: float = DEFAULT_PLANE_TOL_DEG,
+    chunk: timedelta = DEFAULT_CHUNK,
+    pause_s: float = DEFAULT_PAUSE_S,
+    timeout_s: float = DEFAULT_TIMEOUT_S,
+    retries: int = DEFAULT_RETRIES,
+    session: Transport | None = None,
+) -> tuple[pd.DataFrame, SkjalftalisaReport]:
+    """SIL fault planes from the legacy list (LEGACY source, internal only).
+
+    Returns ``(mechanisms, report)``: a validated schema mechanisms frame
+    (``source="skjalftalisa"``, ``method="sil_fps"``, ``event_id`` the
+    legacy integer id as a string, index the reviewed origin time), one row
+    per reviewed event in ``[start, end)`` that has a plane, plus the extra
+    columns :data:`MECHANISM_EXTRA_COLUMNS`.
+
+    * Default: plane 1 from the list (:func:`mechanisms_from_rows`), plane 2
+      computed. ``sil_faulting_class`` NA (the list has no label).
+    * ``detail=True``: one detail request per row (``pause_s`` apart, at
+      most ``max_details``, else :class:`ValueError` before any detail is
+      fetched); both planes from the detail's ``sp3`` ``_AR`` fields
+      (:func:`detail_planes`), ``sil_path`` filled (the join key to
+      ``sil-files``), SIL's label where the detail has one. Report counts
+      ``mech:detail_differs_from_list`` and
+      ``mech:detail_planes_inconsistent`` (kept, marked in
+      ``planes_inconsistent``).
+
+    Only planes are taken: quality, misfit, counts, stress drop and corner
+    frequency stay NA (truncated by the API's ETL, T3b/§9d; for those read
+    ``sil-files``). ``bbox``/``polygon`` act on the reviewed origin (exact,
+    inclusive), sent to the server as a buffered box. The public endpoint
+    carries no planes, so there is no ``internal`` switch.
+    """
+    t0 = _time.perf_counter()
+    if max_details < 0:
+        raise ValueError("max_details must be >= 0")
+    lo, hi = to_utc(start, what="start"), to_utc(end, what="end")
+    qs, qe = _query_window(lo, hi, timedelta(0))
+    client = _Client(
+        session, internal=True, pause_s=pause_s, timeout_s=timeout_s, retries=retries
+    )
+    rows, tally = _fetch(client, qs, qe, bbox, polygon, server_buffer_km, chunk)
+    mech, mtally = mechanisms_from_rows(rows)
+    tally.update(mtally)
+    t = pd.DatetimeIndex(mech["time"])
+    keep = np.asarray((t >= lo) & (t < hi), dtype=bool)
+    tally["mech:outside_window"] += int((~keep).sum())
+    if bbox is not None or polygon is not None:
+        lon = mech["longitude"].to_numpy(dtype=np.float64)
+        lat = mech["latitude"].to_numpy(dtype=np.float64)
+        if bbox is not None:
+            a_lon, a_lat, b_lon, b_lat = (float(v) for v in bbox)
+            with np.errstate(invalid="ignore"):
+                inside = (lon >= a_lon) & (lon <= b_lon) & (lat >= a_lat)
+                inside &= lat <= b_lat
+        else:
+            assert polygon is not None
+            inside = np.asarray(points_in_polygon(lon, lat, polygon), dtype=bool)
+        tally["mech:outside_region"] += int((keep & ~inside).sum())
+        keep &= inside
+    mech = mech.loc[keep].drop(columns=["latitude", "longitude"])
+    if detail:
+        if len(mech) > max_details:
+            raise ValueError(
+                f"{len(mech)} mechanisms need {len(mech)} detail requests, more "
+                f"than max_details={max_details}; narrow the window or raise it"
+            )
+        mech = _apply_details(mech, client, tally, plane_tol_deg)
+    mechs = coerce_mechanisms(mech.set_index("time"), source=SOURCE, assume_utc=True)
+    mechs = with_planes_inconsistent(mechs, plane_tol_deg=plane_tol_deg)
+    keep_cols = list(output_columns()) + list(MECHANISM_EXTRA_COLUMNS)
+    mechs = mechs[keep_cols].astype({"planes_from": "category"})
+    mechs["sil_path"] = mechs["sil_path"].astype(object).astype(STRING_DTYPE)
+    tally["mechanisms"] = len(mechs)
+    tally["requests"] = client.n_requests
+    report = SkjalftalisaReport(
+        dict(tally), tuple(client.urls), _time.perf_counter() - t0
+    )
+    prov = catalog_provenance(
+        source=SOURCE,
+        location=base_url(True),
+        start=lo.to_pydatetime(),
+        end=hi.to_pydatetime(),
+        filters={
+            "bbox": None if bbox is None else [float(v) for v in bbox],
+            "polygon": (
+                None if polygon is None else np.asarray(polygon, float).tolist()
+            ),
+        },
+        frame="mechanisms",
+        extra={
+            "legacy": True,
+            "endpoint": "internal",
+            "planes_from": "detail" if detail else "list",
+            "plane_tol_deg": plane_tol_deg,
+            "query_window": {"start": _fmt(qs), "end": _fmt(qe)},
+            "report": report.as_dict(),
+        },
+    )
+    with_provenance(mechs, prov)
+    validate_marked_mechanisms(mechs, strict=True, plane_tol_deg=plane_tol_deg)
+    return mechs, report
+
+
 __all__ = [
     "API_START",
     "DEFAULT_CHUNK",
+    "DEFAULT_MAX_DETAILS",
+    "MECHANISM_EXTRA_COLUMNS",
+    "MECHANISM_METHOD",
     "DEFAULT_PAD",
     "INTERNAL_URL",
     "PUBLIC_URL",
@@ -1185,6 +1547,7 @@ __all__ = [
     "SOURCE",
     "SYSTEM_AUT",
     "SYSTEM_PICKS",
+    "DetailPlanes",
     "HttpResponse",
     "SkjalftalisaDetail",
     "SkjalftalisaError",
@@ -1196,10 +1559,14 @@ __all__ = [
     "UrllibTransport",
     "base_url",
     "count_skjalftalisa",
+    "detail_planes",
     "fetch_skjalftalisa_rows",
+    "mechanisms_from_rows",
     "parse_detail",
     "read_skjalftalisa",
     "read_skjalftalisa_detail",
+    "read_skjalftalisa_mechanisms",
     "resolve_solutions",
     "rows_from_features",
+    "sil_faulting_label",
 ]

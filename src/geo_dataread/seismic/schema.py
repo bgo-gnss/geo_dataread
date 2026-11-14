@@ -187,7 +187,7 @@ def sil_event_type(code: object) -> str | None:
 # Column tables
 # --------------------------------------------------------------------------
 
-ColumnKind = Literal["float64", "Int64", "string", "category", "datetime"]
+ColumnKind = Literal["float64", "Int64", "string", "category", "datetime", "boolean"]
 
 #: Canonical dtypes. Strings use the pandas 3 default ``str`` dtype (NaN for
 #: missing); validation accepts any ``StringDtype`` storage.
@@ -221,6 +221,8 @@ class ColumnSpec:
             return STRING_DTYPE
         if self.kind == "datetime":
             return TIME_DTYPE
+        if self.kind == "boolean":
+            return pd.BooleanDtype()
         return np.dtype("float64") if self.kind == "float64" else pd.Int64Dtype()
 
 
@@ -384,6 +386,13 @@ MECHANISM_COLUMNS: Final[tuple[ColumnSpec, ...]] = (
         "SIL's own faulting label from the sp3 block (source data, PLAN R3)",
         allowed=SIL_FAULTING_CLASSES,
     ),
+    ColumnSpec(
+        "planes_inconsistent",
+        "boolean",
+        True,
+        "plane 2 is not the auxiliary plane of plane 1 within the tolerance "
+        "(kept and marked, BGÓ T12b); NA without plane 2",
+    ),
 )
 
 #: Columns that identify one mechanism row (warned on, not refused, if
@@ -492,6 +501,11 @@ def _coerce_column(col: Any, spec: ColumnSpec, *, assume_utc: bool) -> Any:
         return out.astype(pd.CategoricalDtype(cats, ordered=False))
     if spec.kind == "string":
         return col.astype(object).where(col.notna(), None).astype(STRING_DTYPE)
+    if spec.kind == "boolean":
+        try:
+            return col.astype("boolean")
+        except (TypeError, ValueError) as exc:
+            raise CoercionError(f"{where}: not boolean ({exc})") from exc
     if spec.kind == "datetime":
         idx = _to_utc(col, assume_utc=assume_utc, what=where)
         return pd.Series(idx, index=col.index, dtype=TIME_DTYPE)
@@ -921,19 +935,28 @@ def validate_mechanisms(
         )
         with np.errstate(invalid="ignore"):
             bad = np.asarray(mis > plane_tol_deg, dtype=bool)
-        if bad.any():
-            worst = float(np.nanmax(mis[bad]))
-            issues.append(
-                SchemaIssue(
-                    "planes_inconsistent",
-                    "error",
-                    "strike2",
-                    f"plane 2 is not the auxiliary plane of plane 1 within "
-                    f"{plane_tol_deg}° (worst {worst:.1f}°)",
-                    int(bad.sum()),
-                    _examples(df, bad),
-                )
+        marked = np.zeros(len(df), dtype=bool)
+        if "planes_inconsistent" in df.columns:
+            marked = (
+                df["planes_inconsistent"].astype("boolean").fillna(False).to_numpy(bool)
             )
+        for sel, severity, note in (
+            (bad & ~marked, "error", ""),
+            (bad & marked, "warning", "; kept, marked in planes_inconsistent"),
+        ):
+            if sel.any():
+                worst = float(np.nanmax(mis[sel]))
+                issues.append(
+                    SchemaIssue(
+                        "planes_inconsistent",
+                        severity,
+                        "strike2",
+                        f"plane 2 is not the auxiliary plane of plane 1 within "
+                        f"{plane_tol_deg}° (worst {worst:.1f}°){note}",
+                        int(sel.sum()),
+                        _examples(df, sel),
+                    )
+                )
     if all(c in df.columns for c in MECHANISM_KEY) and len(df):
         dup = np.asarray(
             df.reset_index(drop=True).duplicated(list(MECHANISM_KEY), keep=False),

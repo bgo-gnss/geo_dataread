@@ -35,6 +35,12 @@ Decisions (PLAN-seismicity.md §9b, verified in T3b):
   and blocks of ids that are not in the day's catalogue are counted in the
   report and give no row.
 
+T12b adds :func:`pt_axes` and the computed, source-independent
+:func:`faulting_class` (Frohlich 1992 by default, or the World Stress Map
+regimes), fills the schema column ``sil_faulting_class`` from the block's
+label, and marks (never drops) rows whose two planes are not each other's
+auxiliary plane (:data:`PLANES_INCONSISTENT`, :func:`validate_marked_mechanisms`).
+
 Angles out: strike in [0, 360), dip in [0, 90], rake in (-180, 180].
 ``quality`` is the block's "% of all mechanisms are acceptable" (0-100;
 not fps ``unknown_pacc``, which is a flat 100.00 from 2022); ``misfit`` the
@@ -61,10 +67,12 @@ from geo_dataread.seismic.schema import (
     STRING_DTYPE,
     TIME_DTYPE,
     FloatArray,
+    ValidationReport,
     auxiliary_plane,
     coerce_mechanisms,
     column_names,
     plane_mismatch_deg,
+    validate_mechanisms,
 )
 from geo_dataread.seismic.sil_files import (
     LineIssue,
@@ -83,7 +91,11 @@ FPS_BLOCK_METHOD: Final[Mapping[str, str]] = {"sp3": "sil_fps", "ap3": "sil_ap3"
 #: Block extensions the fault-plane program writes.
 BLOCK_KINDS: Final = ("sp3", "ap3")
 
-#: Extra (non-schema) columns written with ``extras=True``.
+#: Extra (non-schema) columns written with ``extras=True``. ``faulting_class``
+#: is **deprecated** (T12b): it repeats the schema column
+#: ``sil_faulting_class`` (SIL's own label) and is kept only so older callers
+#: and caches keep working; it is dropped once T18b reads the schema column.
+#: The computed, source-independent class is :func:`faulting_class`.
 EXTRA_COLUMNS: Final = (
     "block",
     "faulting_class",
@@ -172,6 +184,283 @@ def same_plane_deg(
     """
     s2, d2, r2 = auxiliary_plane(strike2, dip2, rake2)
     return plane_mismatch_deg(strike1, dip1, rake1, s2, d2, r2)
+
+
+# --------------------------------------------------------------------------
+# P, B, T axes and the faulting class (T12b, PLAN R3)
+# --------------------------------------------------------------------------
+
+
+class PBTAxes(NamedTuple):
+    """Azimuth (degrees clockwise from north, [0, 360)) and plunge (degrees
+    below horizontal, [0, 90]) of the P, B and T axes; float arrays."""
+
+    p_azimuth: FloatArray
+    p_plunge: FloatArray
+    b_azimuth: FloatArray
+    b_plunge: FloatArray
+    t_azimuth: FloatArray
+    t_plunge: FloatArray
+
+
+def _normal_and_slip(
+    strike: FloatArray, dip: FloatArray, rake: FloatArray
+) -> tuple[FloatArray, FloatArray]:
+    """Unit fault normal and slip (north, east, down), Aki & Richards (2002)
+    eq. 4.88 (the same vectors as the schema's double-couple helpers)."""
+    phi, delta, lam = np.radians(strike), np.radians(dip), np.radians(rake)
+    n = np.stack(
+        [-np.sin(delta) * np.sin(phi), np.sin(delta) * np.cos(phi), -np.cos(delta)]
+    )
+    s = np.stack(
+        [
+            np.cos(lam) * np.cos(phi) + np.cos(delta) * np.sin(lam) * np.sin(phi),
+            np.cos(lam) * np.sin(phi) - np.cos(delta) * np.sin(lam) * np.cos(phi),
+            -np.sin(lam) * np.sin(delta),
+        ]
+    )
+    return n, s
+
+
+def _trend_plunge(v: FloatArray) -> tuple[FloatArray, FloatArray]:
+    """Azimuth/plunge of axes (3, ...) in (north, east, down), lower hemisphere.
+
+    An axis has no sign, so it is turned to point down; a horizontal axis is
+    given with its azimuth in [0, 180), a vertical one with azimuth 0.
+    """
+    norm = np.linalg.norm(v, axis=0)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        u = v / norm
+    up = u[2] < 0.0
+    u = np.where(up, -u, u)
+    plunge = np.degrees(np.arcsin(np.clip(u[2], 0.0, 1.0)))
+    az = np.mod(np.degrees(np.arctan2(u[1], u[0])), 360.0)
+    flat = plunge < 1e-7
+    az = np.where(flat & (az >= 180.0 - 1e-9), az - 180.0, az)
+    az = np.where(np.isclose(az, 360.0, atol=1e-9, rtol=0.0), 0.0, az)
+    az = np.where(plunge > 90.0 - 1e-6, 0.0, az)
+    return az, plunge
+
+
+def pt_axes(strike: npt.ArrayLike, dip: npt.ArrayLike, rake: npt.ArrayLike) -> PBTAxes:
+    """The P (pressure), B (null) and T (tension) axes of a double couple.
+
+    With unit normal n and slip s of either nodal plane (Aki & Richards
+    convention): T ∝ n + s, P ∝ n − s, B = n × s. The two nodal planes give
+    the same axes, so the result does not depend on which plane is passed.
+    Plunges are positive down (lower hemisphere), so an axis is described
+    once. Scalars or arrays (broadcast), float arrays out (0-d for scalars);
+    NaN in any angle gives NaN axes. Example: ``0/90/0`` (left-lateral on a
+    N-S plane) has P at 45°, T at 135°, B vertical.
+    """
+    s, d, r = _floats(strike, dip, rake)
+    n, u = _normal_and_slip(s, d, r)
+    p_az, p_pl = _trend_plunge(n - u)
+    t_az, t_pl = _trend_plunge(n + u)
+    b_az, b_pl = _trend_plunge(np.cross(n, u, axis=0))
+    missing = np.isnan(s) | np.isnan(d) | np.isnan(r)
+    nan = np.float64(np.nan)
+    out = (np.where(missing, nan, x) for x in (p_az, p_pl, b_az, b_pl, t_az, t_pl))
+    return PBTAxes(*out)
+
+
+#: Rules of :func:`faulting_class` → the classes each can return.
+FAULTING_RULES: Final[Mapping[str, tuple[str, ...]]] = {
+    "frohlich": ("strike-slip", "normal", "reverse", "odd"),
+    "wsm": (
+        "normal",
+        "normal-oblique",
+        "strike-slip",
+        "reverse-oblique",
+        "reverse",
+        "odd",
+    ),
+}
+
+#: The rule used when none is named.
+DEFAULT_FAULTING_RULE: Final = "frohlich"
+
+
+def _classes_frohlich(p: FloatArray, b: FloatArray, t: FloatArray) -> Any:
+    return np.select(
+        [b > 60.0, p > 60.0, t > 50.0],
+        ["strike-slip", "normal", "reverse"],
+        default="odd",
+    )
+
+
+def _classes_wsm(p: FloatArray, b: FloatArray, t: FloatArray) -> Any:
+    return np.select(
+        [
+            (p >= 52.0) & (t <= 35.0),
+            (p >= 40.0) & (p < 52.0) & (t <= 20.0),
+            (p < 40.0) & (b >= 45.0) & (t <= 20.0),
+            (p <= 20.0) & (b >= 45.0) & (t < 40.0),
+            (p <= 20.0) & (t >= 40.0) & (t < 52.0),
+            (p <= 35.0) & (t >= 52.0),
+        ],
+        [
+            "normal",
+            "normal-oblique",
+            "strike-slip",
+            "strike-slip",
+            "reverse-oblique",
+            "reverse",
+        ],
+        default="odd",
+    )
+
+
+def faulting_class(
+    strike: npt.ArrayLike,
+    dip: npt.ArrayLike,
+    rake: npt.ArrayLike,
+    *,
+    rule: str = DEFAULT_FAULTING_RULE,
+) -> npt.NDArray[np.object_]:
+    """The faulting class of a double couple from the plunges of its axes.
+
+    One computed class for every source (PLAN R3); SIL's own label stays
+    data (``sil_faulting_class``). Only the plunges of P, B and T
+    (:func:`pt_axes`) are used, so the class is the same whichever nodal
+    plane is passed and whatever the strike/rake wrap.
+
+    ``rule="frohlich"`` (default), Frohlich (1992), *Phys. Earth Planet.
+    Inter.* 75, 193–198 (also Frohlich 2001, *J. Seismol.* 5, 187–196):
+
+    * ``strike-slip`` — B plunge > 60°;
+    * ``normal`` — P plunge > 60°;
+    * ``reverse`` (Frohlich's "thrust") — T plunge > 50°;
+    * ``odd`` — none of these (oblique and mixed mechanisms).
+
+    The three are exclusive (sin² of the three plunges sums to 1).
+
+    ``rule="wsm"``, the World Stress Map regimes, Zoback (1992), *J. Geophys.
+    Res.* 97(B8), 11703–11728, table 1 (plunges P, B, T in degrees):
+    ``normal`` (NF: P ≥ 52, T ≤ 35), ``normal-oblique`` (NS: 40 ≤ P < 52,
+    T ≤ 20), ``strike-slip`` (SS: P < 40, B ≥ 45, T ≤ 20, or P ≤ 20,
+    B ≥ 45, T < 40), ``reverse-oblique`` (TS: P ≤ 20, 40 ≤ T < 52),
+    ``reverse`` (TF: P ≤ 35, T ≥ 52), else ``odd`` (WSM "U").
+
+    SIL's labels map onto ``strike-slip`` / ``normal`` / ``reverse``; SIL's
+    ``dip-slip`` has no counterpart (it lands in ``odd`` or one of the
+    oblique classes). Scalars or arrays (broadcast); an object array of
+    class names out (0-d for scalars, ``.item()`` gives the string), ``None``
+    where an angle is NaN.
+    """
+    if rule not in FAULTING_RULES:
+        raise ValueError(f"rule {rule!r} is not one of {tuple(FAULTING_RULES)}")
+    ax = pt_axes(strike, dip, rake)
+    fn = _classes_frohlich if rule == "frohlich" else _classes_wsm
+    with np.errstate(invalid="ignore"):
+        names = np.asarray(fn(ax.p_plunge, ax.b_plunge, ax.t_plunge), dtype=object)
+    missing = np.isnan(ax.p_plunge)
+    out: npt.NDArray[np.object_] = names.copy()
+    out[missing] = None
+    return out
+
+
+def faulting_classes(
+    df: pd.DataFrame, *, rule: str = DEFAULT_FAULTING_RULE
+) -> pd.Series:
+    """:func:`faulting_class` of plane 1 of every row of a mechanisms frame,
+    as a categorical Series on the frame's index (categories in
+    :data:`FAULTING_RULES` order; NA where plane 1 is missing)."""
+    cls = faulting_class(
+        df["strike1"].to_numpy(dtype=np.float64),
+        df["dip1"].to_numpy(dtype=np.float64),
+        df["rake1"].to_numpy(dtype=np.float64),
+        rule=rule,
+    )
+    dtype = pd.CategoricalDtype(list(FAULTING_RULES[rule]), ordered=False)
+    return pd.Series(list(cls), index=df.index, dtype=dtype, name="faulting_class")
+
+
+# --------------------------------------------------------------------------
+# Inconsistent plane pairs: kept and marked (BGÓ, T12b)
+# --------------------------------------------------------------------------
+
+#: The marker column: True where plane 2 is not the auxiliary plane of plane
+#: 1 within the tolerance, False where it is, NA where plane 2 (or 1) is
+#: missing. Such rows are **kept** (e.g. the two 2023 fps rows with
+#: 180/39/−79 and 14/52/−81, 22° apart). Not yet a schema column: every
+#: mechanisms frame of this package carries it after the schema columns
+#: (:func:`output_columns`).
+PLANES_INCONSISTENT: Final = "planes_inconsistent"
+
+
+def output_columns() -> tuple[str, ...]:
+    """Schema mechanisms columns, then :data:`PLANES_INCONSISTENT` unless the
+    schema already has it."""
+    cols = column_names("mechanisms")
+    return cols if PLANES_INCONSISTENT in cols else (*cols, PLANES_INCONSISTENT)
+
+
+def planes_inconsistent(
+    df: pd.DataFrame, *, plane_tol_deg: float = DEFAULT_PLANE_TOL_DEG
+) -> pd.Series:
+    """The :data:`PLANES_INCONSISTENT` marker of a mechanisms frame (nullable
+    boolean Series on its index), from
+    :func:`~geo_dataread.seismic.schema.plane_mismatch_deg`."""
+    a = [
+        pd.to_numeric(df[f"{x}{n}"], errors="coerce").to_numpy(dtype=np.float64)
+        for n in (1, 2)
+        for x in ("strike", "dip", "rake")
+    ]
+    mis = plane_mismatch_deg(*a)
+    known = ~np.isnan(mis)
+    with np.errstate(invalid="ignore"):
+        flag = mis > plane_tol_deg
+    values = pd.array(np.where(known, flag, False), dtype="boolean")
+    values[~known] = pd.NA
+    return pd.Series(values, index=df.index, name=PLANES_INCONSISTENT)
+
+
+def with_planes_inconsistent(
+    df: pd.DataFrame, *, plane_tol_deg: float = DEFAULT_PLANE_TOL_DEG
+) -> pd.DataFrame:
+    """``df`` with the :data:`PLANES_INCONSISTENT` column set (in place) and
+    returned."""
+    df[PLANES_INCONSISTENT] = planes_inconsistent(df, plane_tol_deg=plane_tol_deg)
+    return df
+
+
+def validate_marked_mechanisms(
+    df: pd.DataFrame,
+    *,
+    strict: bool = False,
+    plane_tol_deg: float = DEFAULT_PLANE_TOL_DEG,
+) -> ValidationReport:
+    """:func:`~geo_dataread.seismic.schema.validate_mechanisms`, with
+    inconsistent plane pairs that are **marked** reported as a warning.
+
+    The schema check calls a pair that misses its auxiliary plane an error.
+    Rows whose :data:`PLANES_INCONSISTENT` is True are kept on purpose, so
+    when every such row is marked the ``planes_inconsistent`` issue becomes a
+    warning and a strict check passes; an unmarked one stays an error.
+    """
+    base = validate_mechanisms(df, strict=False, plane_tol_deg=plane_tol_deg)
+    if PLANES_INCONSISTENT in df.columns and "planes_inconsistent" in base.kinds():
+        marked = df[PLANES_INCONSISTENT].astype("boolean").fillna(False).to_numpy()
+        found = planes_inconsistent(df, plane_tol_deg=plane_tol_deg)
+        found_np = found.fillna(False).to_numpy(dtype=bool)
+        if not (found_np & ~marked.astype(bool)).any():
+            issues = tuple(
+                (
+                    dataclasses.replace(
+                        i,
+                        severity="warning",
+                        message=f"{i.message}; kept, marked in {PLANES_INCONSISTENT}",
+                    )
+                    if i.kind == "planes_inconsistent"
+                    else i
+                )
+                for i in base.issues
+            )
+            base = dataclasses.replace(base, issues=issues)
+    if strict:
+        base.raise_for_errors()
+    return base
 
 
 # --------------------------------------------------------------------------
@@ -595,6 +884,7 @@ def mechanisms_from_fps(
     *,
     blocks: Mapping[str, Sp3Block] | None = None,
     extras: bool = False,
+    plane_tol_deg: float = DEFAULT_PLANE_TOL_DEG,
 ) -> pd.DataFrame:
     """The ``mechanisms`` frame from a :func:`read_events_fps` frame.
 
@@ -602,8 +892,9 @@ def mechanisms_from_fps(
     give none. Planes: fps plane a → plane 1, plane b → plane 2, normalised
     (:func:`normalize_plane`; a negative strike is wrapped). ``method`` from
     ``source_file`` (:data:`FPS_BLOCK_METHOD`). Counts, stress drop and corner
-    frequency come from fps; ``quality`` and ``misfit`` from the matching
-    block in ``blocks`` (keyed by fps ``id``; the caller must pass the block
+    frequency come from fps; ``quality``, ``misfit`` and
+    ``sil_faulting_class`` (the block's "… faulting dominates" label) from the
+    matching block in ``blocks`` (keyed by fps ``id``; the caller must pass the block
     named by ``source_file``), NaN without one. ``extras=True`` adds
     :data:`EXTRA_COLUMNS`. The result is coerced to the schema
     (``source="sil-files"``, index ``time``, sorted).
@@ -631,6 +922,7 @@ def mechanisms_from_fps(
         "n_amplitudes": rows["num_of_amplitudes"].to_numpy(),
         "stress_drop_mpa": rows["stress_drop"].to_numpy(dtype=np.float64),
         "corner_freq_hz": rows["corner_freq"].to_numpy(dtype=np.float64),
+        "sil_faulting_class": [b.faulting_class if b else None for b in blk],
     }
     if extras:
         mism = []
@@ -661,7 +953,7 @@ def mechanisms_from_fps(
                 "block_plane_mismatch_deg": mism,
             }
         )
-    return _finish_frame(data, len(rows), extras)
+    return _finish_frame(data, len(rows), extras, plane_tol_deg)
 
 
 def mechanisms_from_blocks(
@@ -670,13 +962,15 @@ def mechanisms_from_blocks(
     *,
     method: str = "sil_sp3",
     extras: bool = False,
+    plane_tol_deg: float = DEFAULT_PLANE_TOL_DEG,
 ) -> pd.DataFrame:
     """``mechanisms`` rows straight from blocks (days without ``events.fps``).
 
     ``events`` gives ``id`` and ``time`` (an :func:`read_events_lib` frame);
     one row per event whose id is in ``blocks`` and whose block has both
     planes, converted with :func:`sp3_to_aki_richards`. Counts, stress drop,
-    corner frequency, ``quality`` and ``misfit`` from the block.
+    corner frequency, ``quality``, ``misfit`` and ``sil_faulting_class`` from
+    the block.
     """
     if method not in MECHANISM_METHODS:
         raise ValueError(f"method {method!r} is not one of {MECHANISM_METHODS}")
@@ -711,6 +1005,7 @@ def mechanisms_from_blocks(
         "n_amplitudes": ints(b.n_amplitudes for b in use),
         "stress_drop_mpa": [_opt(b.stress_drop_mpa) for b in use],
         "corner_freq_hz": [_opt(b.corner_freq_hz) for b in use],
+        "sil_faulting_class": [b.faulting_class for b in use],
     }
     if extras:
         data.update(
@@ -732,16 +1027,19 @@ def mechanisms_from_blocks(
                 "block_plane_mismatch_deg": [0.0] * len(use),
             }
         )
-    return _finish_frame(data, len(use), extras)
+    return _finish_frame(data, len(use), extras, plane_tol_deg)
 
 
-def _finish_frame(data: dict[str, Any], n: int, extras: bool) -> pd.DataFrame:
+def _finish_frame(
+    data: dict[str, Any], n: int, extras: bool, plane_tol_deg: float
+) -> pd.DataFrame:
     index = data.pop(INDEX_NAME)
     cols = {k: (v if not np.isscalar(v) else [v] * n) for k, v in data.items()}
     df = pd.DataFrame(cols, index=index)
     df.index.name = INDEX_NAME
     df = coerce_mechanisms(df, source=SOURCE)
-    keep = list(column_names("mechanisms")) + (list(EXTRA_COLUMNS) if extras else [])
+    df = with_planes_inconsistent(df, plane_tol_deg=plane_tol_deg)
+    keep = list(output_columns()) + (list(EXTRA_COLUMNS) if extras else [])
     return df[keep]
 
 
@@ -831,7 +1129,9 @@ def read_sil_day_mechanisms(
     ``events.fps`` (1990 to late 1991): one ``sil_sp3`` row per
     ``events.lib`` id with an ``.sp3`` block. A day with neither file gives
     an empty frame. ``event_id`` is the SIL file id, as in the events frame
-    (T3). Never writes. Passes :func:`validate_mechanisms`.
+    (T3). Never writes. Rows whose planes are mutually inconsistent are kept
+    and marked (:data:`PLANES_INCONSISTENT`); the frame passes
+    :func:`validate_marked_mechanisms` (strict).
     """
     day = Path(day_dir)
     fps_path = day / "events.fps"
@@ -839,7 +1139,9 @@ def read_sil_day_mechanisms(
     if not fps_path.exists():
         lib_path = day / "events.lib"
         if not lib_path.exists():
-            frame = mechanisms_from_blocks(_no_events(), {}, extras=extras)
+            frame = mechanisms_from_blocks(
+                _no_events(), {}, extras=extras, plane_tol_deg=plane_tol_deg
+            )
             return DayMechanisms(frame, DayMechanismsReport(str(day), has_fps=False))
         lib = read_events_lib(lib_path).frame
         found: dict[str, Sp3Block] = {}
@@ -847,7 +1149,9 @@ def read_sil_day_mechanisms(
             b = _read_block(block_path(day, str(i), "sp3"), issues)
             if b is not None:
                 found[str(i)] = b
-        frame = mechanisms_from_blocks(lib, found, extras=extras)
+        frame = mechanisms_from_blocks(
+            lib, found, extras=extras, plane_tol_deg=plane_tol_deg
+        )
         report = DayMechanismsReport(
             str(day),
             has_fps=False,
@@ -892,7 +1196,9 @@ def read_sil_day_mechanisms(
         for kind in BLOCK_KINDS:
             if block_path(day, str(eid), kind).exists():
                 unused.append(f"{eid}.{kind}")
-    frame = mechanisms_from_fps(fps, blocks=attached, extras=extras)
+    frame = mechanisms_from_fps(
+        fps, blocks=attached, extras=extras, plane_tol_deg=plane_tol_deg
+    )
     by_method = {str(k): int(v) for k, v in frame["method"].value_counts().items() if v}
     kinds = {str(k): int(v) for k, v in sol["source_file"].value_counts().items()}
     report = DayMechanismsReport(
@@ -923,21 +1229,32 @@ def _no_events() -> pd.DataFrame:
 
 __all__ = [
     "BLOCK_KINDS",
+    "PLANES_INCONSISTENT",
+    "DEFAULT_FAULTING_RULE",
+    "FAULTING_RULES",
     "EXTRA_COLUMNS",
     "FAULTING_CLASSES",
     "FPS_BLOCK_METHOD",
     "SOURCE",
+    "PBTAxes",
     "DayMechanisms",
     "DayMechanismsReport",
     "ParsedSp3",
     "Sp3Block",
     "Sp3Report",
     "block_path",
+    "faulting_class",
+    "faulting_classes",
     "mechanisms_from_blocks",
     "mechanisms_from_fps",
     "normalize_plane",
+    "output_columns",
+    "planes_inconsistent",
+    "pt_axes",
     "read_sil_day_mechanisms",
     "read_sp3",
     "same_plane_deg",
+    "validate_marked_mechanisms",
+    "with_planes_inconsistent",
     "sp3_to_aki_richards",
 ]

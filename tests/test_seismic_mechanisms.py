@@ -355,9 +355,13 @@ def test_fixture_days_validate(day: str, extras: bool) -> None:
     res = mm.read_sil_day_mechanisms(SIL / day, extras=extras)
     report = validate_mechanisms(res.frame)
     assert report.ok, report.summary()
-    expect = list(column_names("mechanisms"))
+    # T12b: every frame carries the `planes_inconsistent` marker, an extra
+    # column until the schema takes it in
+    expect = list(mm.output_columns())
+    extra_cols = expect != list(column_names("mechanisms"))
     if extras:
         expect += list(mm.EXTRA_COLUMNS)
+    if extras or extra_cols:
         assert {i.kind for i in report.issues} == {"extra_column"}
     else:
         assert not report.issues

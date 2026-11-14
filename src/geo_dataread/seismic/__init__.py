@@ -27,6 +27,11 @@ from geo_dataread.seismic.mechanisms import (
     Sp3Block,
     Sp3Report,
     block_path,
+    PLANES_INCONSISTENT,
+    faulting_class,
+    faulting_classes,
+    pt_axes,
+    validate_marked_mechanisms,
     mechanisms_from_blocks,
     mechanisms_from_fps,
     normalize_plane,
@@ -135,6 +140,7 @@ from geo_dataread.seismic.skjalftalisa_api import (
     fetch_skjalftalisa_rows,
     read_skjalftalisa,
     read_skjalftalisa_detail,
+    read_skjalftalisa_mechanisms,
     resolve_solutions,
 )
 from geo_dataread.seismic.sil_alert import (
@@ -181,6 +187,12 @@ from geo_dataread.seismic.sil_files import (
 )
 
 __all__ = [
+    "PLANES_INCONSISTENT",
+    "faulting_class",
+    "faulting_classes",
+    "pt_axes",
+    "validate_marked_mechanisms",
+    "read_skjalftalisa_mechanisms",
     "FdsnCatalog",
     "FdsnError",
     "FdsnPolicy",
