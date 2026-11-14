@@ -539,7 +539,10 @@ def M_PGV(x: Any, mu: float = 0.000001) -> Any:  # noqa: N802 - legacy name
     """  # noqa: E501
     from numpy import log10
 
-    return 1 / 1.05 * (1.69 * log10(x[0]) + log10(mu * x[1]) + 4.96)
+    # ``x`` is a ``[dist, pgv]`` row from ``DataFrame.apply(axis=1)``; pandas 3
+    # dropped the positional fallback of ``Series[int]``, so index by position.
+    row = x.iloc if hasattr(x, "iloc") else x
+    return 1 / 1.05 * (1.69 * log10(row[0]) + log10(mu * row[1]) + 4.96)
 
 
 ##
