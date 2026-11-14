@@ -18,7 +18,8 @@ the provenance of a cut catalogue says how it was cut.
 
 Derived values are functions, not stored columns (§4): :func:`daily_counts`,
 :func:`moment_from_magnitude` (the inverse of
-:func:`~geo_dataread.seismic.schema.moment_magnitude`) and
+:func:`~geo_dataread.seismic.schema.moment_magnitude`), the SIL relation
+:func:`moment_from_mlw` / :func:`mlw_from_moment` (T5b) and
 :func:`with_derived_moment`, whose result feeds
 :func:`~geo_dataread.seismic.schema.cumulative_moment` unchanged.
 """
@@ -26,6 +27,7 @@ Derived values are functions, not stored columns (§4): :func:`daily_counts`,
 from __future__ import annotations
 
 import copy
+import dataclasses
 from collections.abc import Iterable, Mapping, Sequence
 from datetime import date, datetime
 from typing import Any, Final, TypeAlias
@@ -46,11 +48,16 @@ from geo_dataread.seismic.schema import (
 __all__ = [
     "POLYGON_EDGE_TOL_DEG",
     "DERIVED_MOMENT_FLAG",
+    "MLW_M0_FIT",
+    "NO_DERIVED_MOMENT_TYPES",
     "FilterError",
+    "MlwMomentRelation",
     "TimeLike",
     "daily_counts",
     "distance_km",
     "moment_from_magnitude",
+    "moment_from_mlw",
+    "mlw_from_moment",
     "points_in_polygon",
     "to_utc",
     "subset",
@@ -581,42 +588,206 @@ def moment_from_magnitude(mw: npt.ArrayLike) -> FloatArray:
     constant as :func:`~geo_dataread.seismic.schema.moment_magnitude`
     (``HK79_CONSTANT_NM``), so the two round-trip exactly. Note that the
     legacy ``sil_read.MW`` uses 6.03. Valid only for a magnitude that *is*
-    Hanks–Kanamori Mw; SIL's Mlw is not (see :func:`with_derived_moment`). NaN gives NaN. Scalar in, 0-d array out.
+    Hanks–Kanamori Mw; SIL's Mlw is not (use :func:`moment_from_mlw`). NaN
+    gives NaN. Scalar in, 0-d array out.
     """
     m = np.asarray(mw, dtype=np.float64)
     out: FloatArray = np.power(10.0, 1.5 * (m + HK79_CONSTANT_NM))
     return out
 
 
+@dataclasses.dataclass(frozen=True)
+class MlwMomentRelation:
+    """A continuous piecewise-linear ``log10(M0[N·m]) = f(Mlw)``, with its fit record.
+
+    ``f(m) = intercept + slopes[0]·m + Σᵢ (slopes[i+1] − slopes[i])·max(m − knots[i], 0)``:
+    straight segments of slope ``slopes[i]`` joined (C0) at the Mlw values
+    ``knots``. Slopes must be positive, so ``f`` is strictly increasing and
+    :meth:`mlw` is its exact inverse. Beyond the outer knots the end segments
+    continue unchanged; outside ``mlw_range`` (the Mlw span of the fitted
+    events) that is extrapolation.
+
+    The rest is the fit record (PLAN-seismicity R1): ``fit_start``/``fit_end``
+    (UTC dates of the events used, ``[start, end)``), ``n_events``, ``sigma``
+    (robust σ of ``log10(M0_measured / M0_relation)``, all events) and
+    ``sigma_by_bin`` (``(mlw_lo, mlw_hi, n, σ)`` per bin), and ``reference``
+    (where the fit is documented).
+    """
+
+    intercept: float
+    knots: tuple[float, ...]
+    slopes: tuple[float, ...]
+    fit_start: str
+    fit_end: str
+    n_events: int
+    mlw_range: tuple[float, float]
+    sigma: float
+    sigma_by_bin: tuple[tuple[float, float, int, float], ...]
+    reference: str
+
+    def __post_init__(self) -> None:
+        if len(self.slopes) != len(self.knots) + 1:
+            raise ValueError("MlwMomentRelation: need len(slopes) == len(knots) + 1")
+        if any(s <= 0.0 for s in self.slopes):
+            raise ValueError("MlwMomentRelation: slopes must be positive")
+        if any(b <= a for a, b in zip(self.knots, self.knots[1:], strict=False)):
+            raise ValueError("MlwMomentRelation: knots must increase strictly")
+
+    def log10_moment(self, mlw: npt.ArrayLike) -> FloatArray:
+        """``log10(M0 / N·m)`` at ``mlw``; NaN gives NaN."""
+        m = np.asarray(mlw, dtype=np.float64)
+        out: FloatArray = self.intercept + self.slopes[0] * m
+        for k, s0, s1 in zip(self.knots, self.slopes, self.slopes[1:], strict=False):
+            out = out + (s1 - s0) * np.maximum(m - k, 0.0)
+        return out
+
+    def mlw(self, log10_m0: npt.ArrayLike) -> FloatArray:
+        """Exact inverse of :meth:`log10_moment`; NaN gives NaN."""
+        y = np.asarray(log10_m0, dtype=np.float64)
+        ks = np.asarray(self.knots, dtype=np.float64)
+        yk = self.log10_moment(ks)  # log10 M0 at the knots, increasing
+        seg = np.searchsorted(yk, np.nan_to_num(y), side="right")
+        k0 = np.concatenate(([0.0], ks))[seg]
+        y0 = np.concatenate(([self.intercept], yk))[seg]
+        slope = np.asarray(self.slopes, dtype=np.float64)[seg]
+        out: FloatArray = np.where(np.isnan(y), np.nan, k0 + (y - y0) / slope)
+        return out
+
+    def as_dict(self) -> dict[str, Any]:
+        """JSON-ready record of the relation (for ``attrs`` provenance)."""
+        return dataclasses.asdict(self)
+
+
+#: SIL Mlw → M0 relation (T5b, PLAN-seismicity R1), fitted to the measured
+#: ``events.fps`` moments of the reviewed archive (797 559 events with Mlw < 6,
+#: 1991-01-17 … 2026-11-13). It is SIL's own magnitude definition, recovered
+#: exactly: ``Mlw = log10(M0) − 10`` up to Mlw 2, then Mlw grows by 0.9, 0.8,
+#: 0.7 and 0.5 per decade of moment, with knees at Mlw 2, 3, 4.6 and 5.4 (a
+#: free fit gives 2.0002 / 2.9993 / 4.6 / 5.4027 and 1/slope 0.9 / 0.8 /
+#: 0.6998 / 0.4974). Robust residual σ 0.004 in log10 M0 (the 0.01 rounding
+#: of Mlw) in every bin and every era 1991–2026. The slope stays below
+#: Hanks–Kanamori's 1.5 up to Mlw 4.6, is 1.43 to 5.4 and 2.0 above (fitted to
+#: Mlw 5.95). The two reviewed events at Mlw ≥ 6 (1998-06-04 Mlw 6.10,
+#: 2000-06-21 Mlw 6.57) do not follow it (measured M0 50–100× below); above
+#: Mlw 6 the relation is extrapolation. Derivation, residuals by bin and era,
+#: and the Hanks–Kanamori comparison: ``docs/seismic/mlw_m0_relation.md``
+#: (script ``docs/seismic/fit_mlw_m0.py``).
+MLW_M0_FIT: Final = MlwMomentRelation(
+    intercept=10.0,
+    knots=(2.0, 3.0, 4.6, 5.4),
+    slopes=(1.0, 1.0 / 0.9, 1.0 / 0.8, 1.0 / 0.7, 1.0 / 0.5),
+    fit_start="1991-01-17",
+    fit_end="2026-11-14",
+    n_events=797_559,
+    mlw_range=(-2.76, 5.95),
+    sigma=0.0039,
+    sigma_by_bin=(
+        (-3.0, 0.0, 51366, 0.0039),
+        (0.0, 1.0, 432364, 0.0038),
+        (1.0, 1.5, 160128, 0.0040),
+        (1.5, 2.0, 88114, 0.0037),
+        (2.0, 2.5, 41878, 0.0041),
+        (2.5, 3.0, 14212, 0.0041),
+        (3.0, 3.5, 5812, 0.0047),
+        (3.5, 4.0, 2349, 0.0048),
+        (4.0, 4.5, 888, 0.0045),
+        (4.5, 5.0, 305, 0.0049),
+        (5.0, 5.5, 114, 0.0065),
+        (5.5, 6.0, 29, 0.0079),
+    ),
+    reference="docs/seismic/mlw_m0_relation.md",
+)
+
+
+def moment_from_mlw(
+    mlw: npt.ArrayLike, *, relation: MlwMomentRelation = MLW_M0_FIT
+) -> FloatArray:
+    """Seismic moment (N·m) from SIL **Mlw**, by the archive relation :data:`MLW_M0_FIT`.
+
+    ``M0 = 10**relation.log10_moment(mlw)``: ``log10(M0) = Mlw + 10`` below
+    Mlw 2, then slopes 1/0.9, 1/0.8, 1/0.7 and 1/0.5 from knees at Mlw 2, 3,
+    4.6 and 5.4 (see :data:`MLW_M0_FIT` for the fit period and residuals). Use this, not :func:`moment_from_magnitude`, for
+    SIL Mlw: Hanks–Kanamori on Mlw is off by more than 3× for most events
+    (``docs/seismic/mlw_m0_relation.md``). Mlw outside
+    ``relation.mlw_range`` is extrapolated along the end segments. NaN gives
+    NaN; scalar in, 0-d array out.
+    """
+    out: FloatArray = np.power(10.0, relation.log10_moment(mlw))
+    return out
+
+
+def mlw_from_moment(
+    m0_nm: npt.ArrayLike, *, relation: MlwMomentRelation = MLW_M0_FIT
+) -> FloatArray:
+    """SIL Mlw from seismic moment (N·m): the exact inverse of :func:`moment_from_mlw`.
+
+    A moment that is not positive, or NaN, gives NaN.
+    """
+    m0 = np.asarray(m0_nm, dtype=np.float64)
+    ok = np.isfinite(m0) & (m0 > 0.0)
+    lg = np.full(m0.shape, np.nan, dtype=np.float64)
+    lg[ok] = np.log10(m0[ok])
+    return relation.mlw(lg)
+
+
 #: Name of the flag column :func:`with_derived_moment` adds.
 DERIVED_MOMENT_FLAG: Final = "moment_derived"
 
+#: Magnitude types that get no derived moment (PLAN-seismicity R1): their
+#: relation to Mlw is not yet known (``ML_SIL`` → Mlw is ticket T18; ``M`` is
+#: the Skjálftalísa API's unlabelled magnitude).
+NO_DERIVED_MOMENT_TYPES: Final = ("ML_SIL", "M")
+
+#: The relation names recorded in ``attrs["catalog"]["subsets"]``.
+_REL_SIL: Final = "sil_mlw_m0"
+_REL_HK: Final = "hanks_kanamori_1979"
+
 
 def with_derived_moment(
-    df: pd.DataFrame, *, magnitude_types: Iterable[str]
+    df: pd.DataFrame,
+    *,
+    magnitude_types: Iterable[str],
+    mlw_relation: MlwMomentRelation | None = MLW_M0_FIT,
 ) -> pd.DataFrame:
-    """Fill a missing ``moment_nm`` from ``magnitude`` as if it were Mw, flagged.
+    """Fill a missing ``moment_nm`` from ``magnitude``, flagged.
 
     For rows where ``moment_nm`` is NA, ``magnitude`` is finite and
-    ``magnitude_type`` is in ``magnitude_types``, sets
-    ``moment_nm = moment_from_magnitude(magnitude)`` (Hanks & Kanamori). An
-    existing moment is never overwritten. Adds the boolean column
-    ``moment_derived`` (True where filled); it is not a schema column, so
-    ``validate`` reports it as an ``extra_column`` warning. The choice of
-    types is recorded in ``attrs["catalog"]["subsets"]``.
+    ``magnitude_type`` is in ``magnitude_types``, sets ``moment_nm`` from the
+    magnitude:
 
-    ``magnitude_types`` is required, with no default, because no magnitude in
-    these catalogues is Hanks–Kanamori Mw: treating one as Mw is a magnitude
-    conversion, which the schema leaves to the caller (Q7). In particular SIL
-    **Mlw is not HK Mw**: on the T0 ``events.fps`` fixtures (22 events, Mlw
-    −0.5…3.1) ``Mlw ≈ log10(M0[N·m]) − 10`` (median residual 0.00 below
-    Mlw 2, −0.04 at 2.2, −0.12 at 3.1), so the HK inverse under-derives the
-    moment of an Mlw 1 event about 3× and of an Mlw 0.5 event about 5×. A
-    SIL-specific relation is an open question (PLAN-seismicity, for BGÓ).
-    The result feeds :func:`~geo_dataread.seismic.schema.cumulative_moment`
-    unchanged; label any figure that uses derived moments.
+    * ``Mlw`` rows by the SIL relation :func:`moment_from_mlw`
+      (``mlw_relation``, default :data:`MLW_M0_FIT`, fitted to the measured
+      ``events.fps`` moments; T5b);
+    * every other listed type by Hanks & Kanamori
+      (:func:`moment_from_magnitude`): listing a type other than ``Mlw``
+      declares that it *is* Mw — a magnitude conversion the schema leaves to
+      the caller (Q7). No magnitude in these catalogues is HK Mw as read.
+
+    ``mlw_relation=None`` applies Hanks & Kanamori to Mlw as well (the T5
+    behaviour, kept for comparison only: it under-derives the moment of an
+    Mlw 1 event about 3× and over-derives an Mlw 4 event about 5×, and
+    over-states the archive's total moment 5.6×, see
+    ``docs/seismic/mlw_m0_relation.md``). Types in
+    :data:`NO_DERIVED_MOMENT_TYPES` (``ML_SIL``, ``M``) raise
+    :class:`FilterError` until T18 gives an ``ML_SIL`` → Mlw relation.
+
+    ``magnitude_types`` is required, with no default, so the caller always
+    says which scales are filled. An existing moment is never overwritten.
+    Adds the boolean column ``moment_derived`` (True where filled); it is not
+    a schema column, so ``validate`` reports it as an ``extra_column``
+    warning. The record appended to ``attrs["catalog"]["subsets"]`` holds the
+    types, the relation used per type (``relations``), the SIL relation's fit
+    record (``mlw_relation``) and ``n_derived``. The result feeds
+    :func:`~geo_dataread.seismic.schema.cumulative_moment` unchanged; label
+    any figure that uses derived moments.
     """
     types = _check_allowed(magnitude_types, "magnitude_type")
+    refused = sorted(set(types) & set(NO_DERIVED_MOMENT_TYPES))
+    if refused:
+        raise FilterError(
+            f"with_derived_moment: no moment relation for {refused} yet "
+            "(PLAN-seismicity R1; ML_SIL → Mlw is T18)"
+        )
     _require(
         df,
         ("moment_nm", "magnitude", "magnitude_type"),
@@ -632,13 +803,22 @@ def with_derived_moment(
         & np.isfinite(mag)
         & np.asarray(mtype.isin(types) & mtype.notna(), dtype=bool)
     )
+    use_sil = mlw_relation is not None
+    sil = fill & np.asarray(mtype == "Mlw", dtype=bool) if use_sil else fill & False
+    hk = fill & ~sil
     m0 = m0.copy()
-    m0[fill] = moment_from_magnitude(mag[fill])
+    if mlw_relation is not None:
+        m0[sil] = moment_from_mlw(mag[sil], relation=mlw_relation)
+    m0[hk] = moment_from_magnitude(mag[hk])
     out["moment_nm"] = m0
     out[DERIVED_MOMENT_FLAG] = fill
-    record = {
+    relations = {t: (_REL_SIL if t == "Mlw" and use_sil else _REL_HK) for t in types}
+    record: dict[str, Any] = {
         "filter": "with_derived_moment",
         "magnitude_types": types,
+        "relations": relations,
         "n_derived": int(fill.sum()),
     }
+    if mlw_relation is not None and "Mlw" in types:
+        record["mlw_relation"] = mlw_relation.as_dict()
     return _append_subset(df, out, record)

@@ -15,6 +15,7 @@ from geo_dataread.seismic.filters import (
     daily_counts,
     distance_km,
     moment_from_magnitude,
+    moment_from_mlw,
     points_in_polygon,
     subset,
     to_utc,
@@ -510,7 +511,8 @@ def test_with_derived_moment_mlw_only(cat: pd.DataFrame) -> None:
     flag = out[DERIVED_MOMENT_FLAG].tolist()
     # only e1 (Mlw, no moment) is filled; e3 (no magnitude), e4 (aut.mag) not
     assert flag == [False, True, False, False, False, False]
-    assert out["moment_nm"].iloc[1] == pytest.approx(float(moment_from_magnitude(1.0)))
+    # Mlw is filled by the SIL relation (T5b, R1), not Hanks–Kanamori
+    assert out["moment_nm"].iloc[1] == pytest.approx(float(moment_from_mlw(1.0)))
     # existing moments are never overwritten
     assert out["moment_nm"].iloc[0] == 1e10
     assert np.isnan(out["moment_nm"].iloc[4])
@@ -538,7 +540,7 @@ def test_with_derived_moment_explicit_types(cat: pd.DataFrame) -> None:
 
 def test_cumulative_moment_reuse(cat: pd.DataFrame) -> None:
     cum = cumulative_moment(with_derived_moment(cat, magnitude_types=("Mlw",)))
-    m1 = float(moment_from_magnitude(1.0))
+    m1 = float(moment_from_mlw(1.0))  # T5b: SIL relation for Mlw
     expected = np.cumsum([1e10, m1, 3e10, 0.0, 0.0, 6e10])
     np.testing.assert_allclose(cum.to_numpy(), expected)
 

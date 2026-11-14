@@ -119,6 +119,11 @@ from geo_dataread.seismic.fdsn import (
 )
 from geo_dataread.seismic.filters import (
     DERIVED_MOMENT_FLAG,
+    MLW_M0_FIT,
+    NO_DERIVED_MOMENT_TYPES,
+    MlwMomentRelation,
+    mlw_from_moment,
+    moment_from_mlw,
     FilterError,
     daily_counts,
     distance_km,
@@ -187,6 +192,11 @@ from geo_dataread.seismic.sil_files import (
 )
 
 __all__ = [
+    "MLW_M0_FIT",
+    "NO_DERIVED_MOMENT_TYPES",
+    "MlwMomentRelation",
+    "mlw_from_moment",
+    "moment_from_mlw",
     "PLANES_INCONSISTENT",
     "faulting_class",
     "faulting_classes",
