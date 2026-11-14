@@ -25,6 +25,13 @@ from geo_dataread.seismic.mechanisms import (
     same_plane_deg,
     sp3_to_aki_richards,
 )
+from geo_dataread.seismic.quakes_api import (
+    FetchPolicy,
+    QuakesApiError,
+    QuakesApiUnreachable,
+    QuakesReadReport,
+    read_quakes,
+)
 from geo_dataread.seismic.schema import (
     ATTRS_KEY,
     DEFAULT_PLANE_TOL_DEG,
@@ -98,6 +105,11 @@ from geo_dataread.seismic.sil_files import (
 )
 
 __all__ = [
+    "FetchPolicy",
+    "QuakesApiError",
+    "QuakesApiUnreachable",
+    "QuakesReadReport",
+    "read_quakes",
     "BLOCK_KINDS",
     "EXTRA_COLUMNS",
     "FAULTING_CLASSES",
