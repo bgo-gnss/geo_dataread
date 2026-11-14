@@ -67,7 +67,7 @@ geo_dataread/
 │   ├── rtk_read.py       # RTK baselines (RTKLIB ROVER-BASE day files on rtk.vedur.is, mounted /mnt_data/rtgpsdata, $GPS_RTK_DIR): ENU columns (not rtk_gps's sdn/sde labels), UTC, day files overlap midnight (dedup), Q=5 + sigma screen, interval medians of σ and the pair correlations ρ (RTKLIB off-diagonals are signed √|cov|; `.cov` (N,3,3), PSD-projected); complete days cached (key v2) under $GPS_RTK_CACHE / XDG cache; days the live dir lacks (before Jan 2025) come from the older archive ananas:/gps/rtk-timeseries = /mnt_data/gps/rtk-timeseries ($GPS_RTK_ARCHIVE, `use_archive=False` off; 2018/2020→, same files); never writes under the data dir (typed)
 │   ├── gas_read.py       # GAS (strainmeter) data
 │   ├── sil_read.py       # deprecated shim over seismic/ (T6); alert/PGV block awaits T7
-│   ├── seismic/          # earthquake catalogues: schema, SIL files/catalog/mechanisms, cache (Parquet, XDG), filters, Quakes + Skjálftalísa API readers (PLAN-seismicity.md)
+│   ├── seismic/          # earthquake catalogues: schema, SIL files/catalog/mechanisms, cache (Parquet, XDG), filters, Quakes + Skjálftalísa API readers, compare (matching, T15) (PLAN-seismicity.md)
 │   └── hytro_read.py     # hydrology data
 ├── tests/test-gps_read.py      # legacy smoke script (not pytest-collected)
 ├── tests/test_gps_views.py     # view-toggle suite (raw parity, degrade, borrowing, provenance)

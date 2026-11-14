@@ -79,6 +79,18 @@ from geo_dataread.seismic.schema import (
     validate_mechanisms,
     with_provenance,
 )
+from geo_dataread.seismic.compare import (
+    DEFAULT_TOLERANCES,
+    EXACT_TOLERANCE,
+    CatalogMatch,
+    IdJoin,
+    MatchError,
+    Tolerance,
+    match_arrays,
+    match_catalogs,
+    sil_number,
+    sil_path_key,
+)
 from geo_dataread.seismic.filters import (
     DERIVED_MOMENT_FLAG,
     FilterError,
@@ -129,6 +141,16 @@ from geo_dataread.seismic.sil_files import (
 )
 
 __all__ = [
+    "DEFAULT_TOLERANCES",
+    "EXACT_TOLERANCE",
+    "CatalogMatch",
+    "IdJoin",
+    "MatchError",
+    "Tolerance",
+    "match_arrays",
+    "match_catalogs",
+    "sil_number",
+    "sil_path_key",
     "BuildSummary",
     "CacheStats",
     "DEFAULT_RECENT_DAYS",
