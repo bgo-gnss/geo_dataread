@@ -60,14 +60,13 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 # Lint/format scope: the maintained GPS lane (gps_read, gps_views,
-# gps_savetimes, tests). The legacy auxiliary readers (GAS/SIL/hydro) and the
+# gps_savetimes, tests). The legacy auxiliary readers (GAS/hydro) and the
 # legacy displacement CLI are older maintenance-only code with real lint debt
 # — excluded per the gps_plot ruff-scope precedent (BGÓ: ignore legacy code)
 # until they are deliberately modernized.
 [tool.ruff]
 extend-exclude = [
     "src/geo_dataread/gas_read.py",   # legacy GAS reader (maintenance only)
-    "src/geo_dataread/sil_read.py",   # legacy SIL reader (maintenance only)
     "src/geo_dataread/hytro_read.py", # legacy hydrology reader (maintenance only)
     "src/geo_dataread/gps_displ.py",  # legacy displacement CLI (maintenance only)
 ]
@@ -94,7 +93,6 @@ ignore_missing_imports = true
 module = [
     "geo_dataread.gps_read",
     "geo_dataread.gas_read",
-    "geo_dataread.sil_read",
     "geo_dataread.hytro_read",
     "geo_dataread.gps_displ",
     "geo_dataread.gps_savetimes",

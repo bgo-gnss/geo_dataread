@@ -9,27 +9,23 @@ Two groups of tests live here:
    pinned.  These values are the acceptance targets for the new parsers (T1),
    the day assembly (T3) and the fault-plane reader (T3b).
 
-2. **Broken legacy behaviour.**  ``geo_dataread.sil_read`` fails on every
-   fixture under pandas 3 / current gtimes (PLAN §2.4, fatal errors 1-3).  The
-   ``TestLegacySilReadIsBroken`` class records those failures.  It characterizes
-   broken behaviour on purpose: T6 replaces ``sil_read`` with a shim over the new
-   reader, and these tests are then deleted or inverted.
+2. **Broken legacy behaviour** (removed in T6).  ``geo_dataread.sil_read``
+   failed on every fixture under pandas 3 / current gtimes (PLAN §2.4, fatal
+   errors 1-3); the ``TestLegacySilReadIsBroken`` class that recorded this was
+   deleted when T6 replaced the module with a shim over the new reader.  The
+   shim is pinned by ``tests/test_sil_read_shim.py``.
 
 No network, no mount, no gps_parser config: only files under ``tests/fixtures/sil``.
 """
 
 from __future__ import annotations
 
-import importlib
 import math
 import re
-import warnings
 from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from types import ModuleType
-from typing import Any
 
 import numpy as np
 import numpy.typing as npt
@@ -833,85 +829,3 @@ def test_fixtures_hold_no_user_ids() -> None:
             text = p.read_text(encoding="latin-1").lower()
             assert "user" not in text, p
     assert not list(FIXTURES.rglob("*.meta_lokimp"))
-
-
-# --------------------------------------------------------------------------
-# Broken legacy behaviour of geo_dataread.sil_read
-# --------------------------------------------------------------------------
-# CHARACTERIZES BROKEN LEGACY BEHAVIOUR (PLAN-seismicity.md §2.4, fatal 1-3).
-# T6 replaces sil_read with a shim over the new reader; delete or invert then.
-
-
-@pytest.fixture(scope="module")
-def sil_read() -> ModuleType:
-    with warnings.catch_warnings():
-        # '\s+' invalid escape: emitted only when the .pyc is (re)compiled
-        warnings.simplefilter("ignore", SyntaxWarning)
-        return importlib.import_module("geo_dataread.sil_read")
-
-
-ALL_DAYS = tuple(EXPECTED_COUNTS)
-
-
-def _existing(kind: str) -> list[str]:
-    return [d for d in ALL_DAYS if (FIXTURES / d / kind).exists()]
-
-
-class TestLegacySilReadIsBroken:
-    """Each fixture fails in the legacy module with one of the three fatal errors."""
-
-    @pytest.mark.parametrize("day", ALL_DAYS)
-    def test_read_sil_data_rejects_gtimes_frequency(
-        self, sil_read: Any, day: str
-    ) -> None:
-        start = datetime.strptime(day, "%Y/%b/%d")
-        end = start.replace(hour=23, minute=59)
-        for fread in ("default", "events.fps", "lib.mag"):
-            with pytest.raises(ValueError, match=r"0\.8D"):
-                sil_read.read_sil_data(
-                    start=start.isoformat(),
-                    end=end.isoformat(),
-                    base_path=str(FIXTURES),
-                    fread=fread,
-                )
-
-    @pytest.mark.parametrize("day", _existing("events.fps"))
-    def test_read_sil_file_fps_uses_removed_pandas_argument(
-        self, sil_read: Any, day: str
-    ) -> None:
-        with pytest.raises(TypeError, match="infer_datetime_format"):
-            sil_read.read_sil_file(str(FIXTURES / day / "events.fps"))
-
-    @pytest.mark.parametrize(
-        ("day", "kind"),
-        [
-            (d, k)
-            for k in ("events.lib", "lib.mag", "aut.mag", "cleanaut.mag")
-            for d in _existing(k)
-        ],
-    )
-    def test_read_sil_file_fixed_width_uses_nested_parse_dates(
-        self, sil_read: Any, day: str, kind: str
-    ) -> None:
-        with pytest.raises(
-            TypeError, match="list indices must be integers or slices, not list"
-        ):
-            sil_read.read_sil_file(str(FIXTURES / day / kind))
-
-    @pytest.mark.parametrize("day", ALL_DAYS)
-    def test_read_automatic_hits_removed_empty_data_error(
-        self, sil_read: Any, day: str
-    ) -> None:
-        # The except clause naming pd.io.common.EmptyDataError is evaluated
-        # while the TypeError/IOError from read_sil_file propagates.
-        for aut in (True, False):
-            with pytest.raises(AttributeError, match="EmptyDataError"):
-                sil_read.read_automatic(str(FIXTURES / day), aut=aut)
-
-    def test_read_sil_file_rejects_unknown_kind(
-        self, sil_read: Any, tmp_path: Path
-    ) -> None:
-        p = tmp_path / "spqaut.lib"
-        p.write_text("")
-        with pytest.raises(OSError):
-            sil_read.read_sil_file(str(p))
