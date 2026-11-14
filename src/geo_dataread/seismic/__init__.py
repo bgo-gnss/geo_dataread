@@ -101,6 +101,17 @@ from geo_dataread.seismic.compare import (
     sil_number,
     sil_path_key,
 )
+from geo_dataread.seismic.fdsn import (
+    FdsnCatalog,
+    FdsnError,
+    FdsnPolicy,
+    FdsnUnreachable,
+    compare_with_quakes,
+    cross_check_quakes,
+    read_fdsn,
+    read_fdsn_catalog,
+    read_fdsn_event,
+)
 from geo_dataread.seismic.filters import (
     DERIVED_MOMENT_FLAG,
     FilterError,
@@ -170,6 +181,15 @@ from geo_dataread.seismic.sil_files import (
 )
 
 __all__ = [
+    "FdsnCatalog",
+    "FdsnError",
+    "FdsnPolicy",
+    "FdsnUnreachable",
+    "compare_with_quakes",
+    "cross_check_quakes",
+    "read_fdsn",
+    "read_fdsn_catalog",
+    "read_fdsn_event",
     "AlertEvent",
     "AlertFormatError",
     "EvbFile",

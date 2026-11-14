@@ -77,3 +77,18 @@ stays present. Machine authors (`SIL`, `<program>@seiscomp-p01`) are kept.
 - `quakeml_IMO2026rusibb_all.xml`: `creationInfo/author` (3 elements).
 
 No login appears in a `publicID` or a comment (checked with grep after redaction).
+
+## Added by T13 (2026-11-14)
+
+- `quakeml_IMO2026rusibb_arrivals.xml`: `eventid=IMO2026rusibb&includearrivals=true&includepicks=true`
+  (200, 45 403 bytes, 53 arrivals and 53 picks on the preferred origin). Trimmed by hand to
+  5 arrivals and their 5 picks (2 S, 2 weighted P, 1 P with `timeWeight` 0 from `scautopick`).
+  The station code is only in the pick (`waveformID`), so arrivals need `includepicks`.
+  Redaction: the pick and origin `creationInfo/author` login → `analyst-1` (the same analyst
+  as in `quakeml_IMO2026rusibb_all.xml`).
+- Probed, not saved: `offset` is 1-based (`offset=0` → 400 `parameter not in domain
+  [1,…]: offset`); `starttime` and `endtime` are both inclusive and take microseconds.
+- 2026-11-13 (live, not saved): 2 of 64 events (automatic SILCLEAN preferred origins) carry a
+  `preferredMagnitudeID` (`…/netMag/ML_SIL` on the SILCLEAN origin) that is not in the QuakeML,
+  the text list (empty MagType/Magnitude) or the Quakes detail; the Quakes list still gives an
+  `ML_SIL` value for them. `test_dangling_preferred_magnitude_is_na_not_replaced` is synthetic.
