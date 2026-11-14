@@ -19,6 +19,8 @@ this directory: the `.evb` rows are fixed-width and keep their trailing blanks.
 | `sil/2026/nov/12/cleanaut.mag` | archive `cleanaut.mag`, line 35 only | the golden origin (21:53:40.5, 64.653, −17.481, Q 90.05), the one the page used |
 | `sil/2024/aug/22/21:55:00/59:59:641.evb` | archive | minute and hour rollover (`21 59 59.64` → `22 00  0.02`), p and s rows |
 | `sil/2020/jun/25/00:05:00/09:33:883.evb` | archive | the legacy docstring example id |
+| `2016/jun/15/index.html`, `2016/jun/15/057.event` | `http://sil.vedur.is/alert/2016/jun/15/…` (T7c, 2026-11-14) | a 2016 day index (66 `NNN.html` links, no `.event` links) and one 2016 `.event` (same 11/13-field layout); the HTTP source lists days from this index |
+| `fdsn/station_channels_Z.txt` | `seiscomp-p01:8080/fdsnws/station/1/query?level=channel&format=text` (T7c, 2026-11-14) | Z-channel epochs of the stations in `2026/nov/12/076.event` and `2026/nov/10/050.event`, for the B4 sensor report (`hei` LE-3D 1 Hz, `gha` LE-3D5s → Guralp 40T in 2023, `ada` no description) |
 | `mpgv/2026-11.html` | `http://hraun.vedur.is/ja/Mpgv/2026/2026-11.html` | only the page's data table, 10 rows. The page header and footer were cut: the footer names people |
 
 The HTTP files were fetched once, about a dozen small requests with a generic
@@ -52,3 +54,24 @@ NaN below 3 values).
   `test_code22_rule_deviations` pins these numbers.
 - **Some `.event` files have grown since the page ran.** 11-01 #050 now has 27 rows
   and fits 23/27. The page shows 24 rows and `20/24`.
+
+## T7c notes (sources, association, sensor report)
+
+- **Day index times can be stale.** In 40 random 2021–2026 days on the hellir
+  mount the index ids always equal the `NNN.event` files, but 5 of ~120 sampled
+  row times differ from the `.event` header (up to 2 h 40 min; 2025-01-16 #054:
+  index 19:24:15, header/`.html`/mtime 22:04). The sources use the index for the
+  id list only; association reads the `.event` headers.
+- **Late rewrites.** Sep–Oct 2026 `.event` files: mtime − header time median 2 min,
+  99.9 % < 46 min, max 1.9 h. The HTTP cache keeps days ≥ 2 days old.
+- **Sensor report (B4) on 11-12 #076 / 11-10 #050:** `hei` code 22 + LE-3D 1 Hz
+  (consistent); `gha` code 22 but Guralp 40T (not 1 Hz); `ada` code 22, no FDSN
+  description; 11-10 `hei` LE-3D 1 Hz **without** code 22. The code-22 rule stays
+  provisional.
+- **`.event` header time is not the detection time near the origin.** On 34 M ≥ 3,
+  Q ≥ 50 SIL events 2016–2023 the nearest detection's header is mostly 5–70 s
+  *before* the origin (golden: 4.5 s after), once −140 s, and still fits 72–95 %.
+  The legacy window (evb arrival span ± eps on the header time) therefore misses
+  some real detections (2016-08-29 01:47 M3.6: header −36.8 s, fit 22/41).
+  Association keeps the header-time window and chooses by |header − origin|; the
+  page method's fit requirement does the real discrimination. Open for T7d.

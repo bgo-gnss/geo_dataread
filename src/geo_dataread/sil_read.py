@@ -42,16 +42,22 @@ only the horizontal error ``h_err_km``.
 
 The alert-map / PGV magnitude tools at the end of this module (``pgverror``,
 ``M_PGV``, ``read_evb``, ``read_alert``, ``downl_PGV_hraun``, ``find_alert``,
-``read_station_loc``, ``check_event_fit``, ``find_alertevent``) are unchanged
-here; their modernisation is ticket T7.
+``read_station_loc``, ``check_event_fit``, ``find_alertevent``) are thin
+shims over :mod:`geo_dataread.seismic.sil_alert` and
+:mod:`geo_dataread.seismic.alert_source` (ticket T7c, decision B1): legacy
+names, parameters and return shapes, a :class:`DeprecationWarning` each, no
+``locale`` change, no bare ``except``, no printing. ``read_station_loc``
+stays here only (B6).
 """
 
 from __future__ import annotations
 
 import logging
+import os
 import warnings
 from collections.abc import Mapping
 from datetime import UTC, date, datetime, timedelta
+from pathlib import Path
 from typing import Any, Final
 
 import numpy as np
@@ -505,118 +511,169 @@ def read_pd_file(fn: str, filetype: str | None = None) -> Any:
 
 
 # ==========================================================================
-# Alert-map / PGV magnitude tools (ticket T7 modernises these; unchanged
-# here apart from typing and lint: see the T6 report).
+# Alert-map / PGV magnitude tools: thin shims over seismic.sil_alert and
+# seismic.alert_source (T7c, B1). Names, parameters and return shapes are the
+# legacy ones (``UR/shiver`` calls ``find_alert``; tests/test_shiver_compat.py).
 # ==========================================================================
+
+#: Legacy defaults that meant "the hard-coded host paths"; they now mean
+#: "resolve from configuration" (``$GPS_SIL_DIR`` / ``$GPS_ALERTMAP_DIR`` / HTTP).
+_LEGACY_TMP: Final = "/tmp"  # noqa: S108 - the legacy default value, never written
+_LEGACY_GRANIT: Final = "/net/granit/mnt/sdc1/sk2/"
+_LEGACY_HELLIR: Final = "/net/hellir/mnt/sdc1/alert'"
+_LEGACY_SILDATA: Final = "/mnt_data/sildata"
+
+
+def _alert_deprecated(old: str, new: str) -> None:
+    warnings.warn(
+        f"geo_dataread.sil_read.{old} is deprecated; use {new} (PLAN-seismicity.md T7c)",
+        DeprecationWarning,
+        stacklevel=3,
+    )
+
+
+def _scalar_or_like(out: Any, *inputs: Any) -> Any:
+    """Give back a scalar for scalar input and a Series for Series input."""
+    arr = np.asarray(out)
+    for x in inputs:
+        if isinstance(x, pd.Series):
+            return pd.Series(arr, index=x.index)
+    return arr[()] if arr.ndim == 0 else arr
 
 
 def pgverror(r: Any, M: Any) -> Any:  # noqa: N803 - legacy name
+    """Legacy: relative change of the distance term of VÍ 2009-012 eq. (C).
+
+    ``(log10(r + 0.00299·10^(0.621·M)) - log10 r) / log10 r``: **not** a
+    magnitude error. Use :func:`geo_dataread.seismic.sil_alert.nearfield_bias`.
     """
-    calculate relative difference if skipping nonlinear term in PGV model for calulating MW
-    See:
+    from geo_dataread.seismic import sil_alert
 
-    Attenuation relations for near- and far-field peak ground motion (PGV, PGA)
-    and new magnitude estimatesforlargeearthquakesin SW-IcelandforlargeearthquakesinSW-Iceland
-    VÍ 2009-012, ISSN 1670-8261: page: 25 eq C:
-    derive
-    """  # noqa: E501
-    from numpy import log10
-
-    return (log10(r + 0.00299 * 10 ** (0.621 * M)) - log10(r)) / log10(r)
+    _alert_deprecated("pgverror", "geo_dataread.seismic.sil_alert.nearfield_bias")
+    return _scalar_or_like(sil_alert.pgverror(r, M), r, M)
 
 
-def M_PGV(x: Any, mu: float = 0.000001) -> Any:  # noqa: N802 - legacy name
-    """
-    Return Moment magnitude estimation based on PGV model derived in
-
-    Attenuation relations for near- and far-field peak ground motion (PGV, PGA)
-    and new magnitude estimatesforlargeearthquakesin SW-IcelandforlargeearthquakesinSW-Iceland
-    VÍ 2009-012, ISSN 1670-8261: page: 25 eq C:
-
-    expect pgv in m/s
-    and    r in km
-
-    """  # noqa: E501
-    from numpy import log10
+def _m_pgv(x: Any, mu: float) -> Any:
+    from geo_dataread.seismic.sil_alert import pgv_magnitude_farfield
 
     # ``x`` is a ``[dist, pgv]`` row from ``DataFrame.apply(axis=1)``; pandas 3
     # dropped the positional fallback of ``Series[int]``, so index by position.
     row = x.iloc if hasattr(x, "iloc") else x
-    return 1 / 1.05 * (1.69 * log10(row[0]) + log10(mu * row[1]) + 4.96)
+    # pgv * mu is m/s; the far-field inverse takes µm/s.
+    m = pgv_magnitude_farfield(np.asarray(row[1], dtype=np.float64) * mu * 1e6, row[0])
+    return _scalar_or_like(m)
 
 
-##
-# modules to extract PGV from Alert and distance in order to estimate Mw from PGV equation
-##
+def M_PGV(x: Any, mu: float = 0.000001) -> Any:  # noqa: N802 - legacy name
+    """Legacy far-field PGV magnitude of a ``[dist_km, pgv]`` row (VÍ 2009-012 C).
+
+    ``(1.69·log10 r + log10(mu·pgv) + 4.96) / 1.05``, ``pgv·mu`` in m/s
+    (``mu = 1e-6`` for the alertMap µm/s). NaN where r or pgv <= 0. Use
+    :func:`geo_dataread.seismic.sil_alert.pgv_magnitude` (exact inverse).
+    """
+    _alert_deprecated("M_PGV", "geo_dataread.seismic.sil_alert.pgv_magnitude")
+    return _m_pgv(x, mu)
+
+
+#: Legacy ``read_evb`` columns, in order.
+_EVB_LEGACY: Final = (
+    ("arr.", "phase"),
+    ("time", None),
+    ("res.", "residual_s"),
+    ("weight", "weight"),
+    ("dist", "distance_km"),
+    ("azi", "azimuth_deg"),
+    ("az.obs", "azimuth_obs_deg"),
+    ("err", "azimuth_res_deg"),
+    ("number", "used"),
+)
+
+
+def _evb_legacy_frame(evb: Any) -> pd.DataFrame:
+    ph = evb.phases
+    cols: dict[str, Any] = {}
+    for old, new in _EVB_LEGACY:
+        if new is None:
+            cols[old] = [t.time() for t in pd.DatetimeIndex(ph["arrival_time"])]
+        elif new == "phase":
+            cols[old] = ph[new].astype(object).to_numpy()
+        else:
+            cols[old] = ph[new].to_numpy(dtype=np.float64)
+    return pd.DataFrame(cols, index=pd.Index(ph["station"].astype(object), name="sta"))
+
+
 def read_evb(filename: str, logger: str = "__name__") -> Any:
-    """ """
+    """Legacy: a SIL ``.evb`` as a frame indexed by ``sta`` (p and s rows share it).
 
-    from datetime import datetime as dt
+    Columns ``arr.`` (p/s), ``time`` (:class:`datetime.time`, UTC time of
+    day), ``res.``, ``weight``, ``dist`` (km), ``azi``, ``az.obs``, ``err``,
+    ``number``. Use :func:`geo_dataread.seismic.sil_alert.read_evb` (full
+    datetimes, phase as a column).
+    """
+    from geo_dataread.seismic import sil_alert
 
-    columns = [
-        "sta",
-        "arr.",
-        "time",
-        "res.",
-        "weight",
-        "dist",
-        "azi",
-        "az.obs",
-        "err",
-        "number",
-    ]
+    _alert_deprecated("read_evb", "geo_dataread.seismic.sil_alert.read_evb")
+    return _evb_legacy_frame(sil_alert.read_evb(filename))
 
-    col_with = [
-        (0, 4),
-        (4, 6),
-        (6, 18),
-        (18, 24),
-        (24, 30),
-        (30, 36),
-        (36, 42),
-        (42, 49),
-        (49, 55),
-        (55, 62),
-    ]
 
-    def parser(time: str) -> datetime:
-        return dt.strptime(time, "%H %M %S.%f")
-
-    # parse_dates={"time": ['hour', 'minute', 'sec']},
-    data = pd.read_fwf(
-        filename,
-        skiprows=5,
-        skipfooter=1,
-        colspecs=col_with,
-        names=columns,
-        parse_dates=["time"],
-        date_parser=parser,
-        index_col="sta",
+def _alert_legacy_frame(event: Any) -> pd.DataFrame:
+    f = event.frame
+    return pd.DataFrame(
+        {
+            "lon": f["lon"].to_numpy(dtype=np.float64),
+            "lat": f["lat"].to_numpy(dtype=np.float64),
+            "time": f["offset_s"].to_numpy(dtype=np.float64),
+            "pgv": f["pgv_um_s"].to_numpy(dtype=np.float64),
+            "fb": f["fb"].to_numpy(dtype=np.float64),
+        },
+        index=pd.Index(f["station"].astype(object), name="sta"),
     )
-    data["time"] = pd.to_datetime(data.time).dt.time
-
-    return data
 
 
 def read_alert(filename: str, logger: str = "__name__") -> Any:
-    """ """
+    """Legacy: an alertMap ``NNN.event`` as a frame indexed by ``sta``.
 
-    rcolumns = ["lon", "lat", "time", "pgv", "sta", "fb"]
-    col_dtypel = ["float64", "float64", "float64", "float64", "str", "float64"]
+    Columns ``lon``, ``lat``, ``time`` (s after the header time), ``pgv``
+    (µm/s), ``fb``. Use
+    :func:`geo_dataread.seismic.sil_alert.read_alert_event`.
+    """
+    from geo_dataread.seismic import sil_alert
 
-    col_dtype = dict(zip(rcolumns, col_dtypel, strict=True))
+    _alert_deprecated("read_alert", "geo_dataread.seismic.sil_alert.read_alert_event")
+    return _alert_legacy_frame(sil_alert.read_alert_event(filename, strict=False))
 
-    data = pd.read_csv(
-        filename,
-        skiprows=1,
-        sep=r"\s+",
-        usecols=[0, 1, 2, 3, 4, 5],
-        names=rcolumns,
-        dtype=col_dtype,
-        index_col="sta",
-    )
-    data["time"] = data["time"].div(100)  # change from samples to seconds
-    return data
+
+def _legacy_day(inpdate: Any, dstr: str) -> date:
+    if inpdate is None:
+        return datetime.now(UTC).date()
+    if isinstance(inpdate, datetime):
+        return inpdate.date()
+    if isinstance(inpdate, date):
+        return inpdate
+    if isinstance(inpdate, str):
+        from geo_dataread.seismic.alert_source import sil_event_day
+
+        text = inpdate.strip()
+        m = text.lstrip("/").split("/")
+        if len(m) >= 3 and m[1].lower() in _MONTHS3:
+            return date(int(m[0]), _MONTHS3.index(m[1].lower()) + 1, int(m[2]))
+        try:
+            return sil_event_day(text)
+        except ValueError:
+            pass
+        try:
+            return datetime.strptime(text, dstr).date()
+        except ValueError as exc:
+            raise ValueError(
+                f"downl_PGV_hraun: cannot read the date {inpdate!r}"
+            ) from exc
+    raise TypeError(f"downl_PGV_hraun: bad inpdate {inpdate!r}")
+
+
+_MONTHS3: Final = (
+    "jan", "feb", "mar", "apr", "may", "jun",
+    "jul", "aug", "sep", "oct", "nov", "dec",
+)  # fmt: skip
 
 
 def downl_PGV_hraun(  # noqa: N802 - legacy name
@@ -626,289 +683,244 @@ def downl_PGV_hraun(  # noqa: N802 - legacy name
     logger: str = __name__,
     rm_files: bool = False,
 ) -> str:
-    """ """
+    """Legacy: a local directory holding one day's ``NNN.event`` files.
 
-    import glob
-    import locale
-    import os
-    import urllib.request as ur
+    The day comes from ``inpdate`` (a date, ``"/2026/nov/12"``, a SIL id, or
+    a string in ``dstr``; default today, UTC). Without ``tmp_path`` the
+    configured source serves it (:func:`~geo_dataread.seismic.alert_source.
+    resolve_alert_source`): the mount's own day directory, or the HTTP cache
+    after the download. With ``tmp_path`` the files are copied there (the
+    only case this shim writes into a caller-named directory; ``rm_files``
+    first removes the ``*.event`` files already there). Returns the path
+    with one trailing ``/``. The day is listed from ``index.html`` (or the
+    directory), never by probing numbers; no ``locale`` is touched.
+    """
+    import shutil
 
-    import gtimes.timefunc as gt
+    from geo_dataread.seismic.alert_source import resolve_alert_source
 
-    # Handling logging
-    module_logger = logging.getLogger(logger)
-
-    # changing locals so the system will recoginse month folders correctly (i.e des -> dec)
-    loc = locale.getlocale()
-    locale.setlocale(locale.LC_TIME, ("en_US", "UTF-8"))
-
-    # defing default period to extract
-    # dstr='%Y-%m-%d %H:%M:%S'
-    if inpdate is None:
-        inpdate = date.today()
-
-    elif type(inpdate) is str:
-        inpdate = gt.toDatetime(inpdate, dstr)
-
-    alert_url = "http://hraun.vedur.is/ja/alert/"
-    dpath = inpdate.strftime("%Y/%b/%d/").lower()
-
+    _alert_deprecated(
+        "downl_PGV_hraun", "geo_dataread.seismic.alert_source.resolve_alert_source"
+    )
+    log = logging.getLogger(logger)
+    day = _legacy_day(inpdate, dstr)
+    src = resolve_alert_source()
+    ddir = src.local_day_dir(day)
     if tmp_path is None:
-        tmp_path = "/tmp/alert/"  # noqa: S108 - legacy hard-coded path (T7)
+        return os.path.join(str(ddir), "")
+    out = _refuse_data_dir(tmp_path, None, "downl_PGV_hraun: tmp_path")
+    out.mkdir(parents=True, exist_ok=True)
+    if rm_files:
+        for old in out.glob("*.event"):
+            old.unlink()
+    n = 0
+    for f in sorted(ddir.glob("*.event")):
+        shutil.copyfile(f, out / f.name)
+        n += 1
+    log.info("copied %d alertMap files of %s from %s to %s", n, day, src.name, out)
+    return os.path.join(str(out), "")
 
-        # making sure download directoty exists and is empty
+
+def _legacy_sil_path(sil_path: str | None) -> str | None:
+    """The legacy SIL defaults mean "resolve" ($GPS_SIL_DIR / postprocess.cfg),
+    falling back to the old default when nothing is configured."""
+    from geo_dataread.seismic.sil_catalog import sil_dir
+
+    if sil_path in (None, "", _LEGACY_GRANIT, _LEGACY_SILDATA):
         try:
-            os.makedirs(tmp_path)
+            return str(sil_dir())
+        except FileNotFoundError:
+            return _LEGACY_SILDATA if sil_path == _LEGACY_SILDATA else sil_path or None
+    return sil_path
 
-        except FileExistsError as e:
-            module_logger.info(
-                f"directory {tmp_path} exists:  " + str(e), exc_info=True
+
+def _refuse_data_dir(path: str, sil_path: str | None, what: str) -> Path:
+    """``path`` resolved, refused when it may be a data directory.
+
+    Refused: inside a configured alertMap root or the SIL archive, or a
+    directory that already holds ``<yyyy>/`` trees but no cache marker (an
+    unconfigured alertMap mount passed by hand).
+    """
+    from geo_dataread.seismic.alert_source import CACHE_MARKER, alertmap_dirs
+    from geo_dataread.seismic.sil_catalog import sil_dir
+
+    target = Path(path).expanduser().resolve()
+    roots = [Path(p) for p in alertmap_dirs()]
+    if sil_path:
+        roots.append(Path(sil_path))
+    try:
+        roots.append(sil_dir())
+    except FileNotFoundError:
+        pass
+    for root in roots:
+        if target.is_relative_to(Path(os.path.abspath(root)).resolve()):
+            raise ValueError(
+                f"{what} {path} is inside the data directory {root}; this shim "
+                "never writes under a data mount"
             )
-
-            if rm_files:
-                files = glob.glob(tmp_path + "*")
-                for f in files:
-                    os.remove(f)
-            else:
-                raise
-
-        except FileNotFoundError as e:
-            module_logger.info(
-                f"Can not create directory   {tmp_path}:  " + str(e), exc_info=True
+    if target.is_dir() and not (target / CACHE_MARKER).exists():
+        years = [p.name for p in target.iterdir() if p.name[:4].isdigit()]
+        if years:
+            raise ValueError(
+                f"{what} {path} holds {sorted(years)[:3]}… but is not an alertMap "
+                f"cache (no {CACHE_MARKER}); it looks like a data tree, refused"
             )
+    return target
 
-    i = 0
-    while True:
-        i += 1
-        filename = f"{i:03d}.event"
-        try:
-            ur.urlretrieve(
-                alert_url + dpath + filename, os.path.join(tmp_path, filename)
-            )
-        except:  # noqa: E722 - legacy loop end on any failure (T7)
-            break
 
-    # restoring locale settings
-    locale.setlocale(locale.LC_TIME, loc)
+def _legacy_cache_source(pre_path: str, sil_path: str | None) -> Any:
+    """``find_alert``'s ``pre_path`` as the HTTP cache root, never in a data dir."""
+    from geo_dataread.seismic.alert_source import HttpAlertSource
 
-    return tmp_path + "/"
+    cache = _refuse_data_dir(pre_path, sil_path, "find_alert: pre_path")
+    return HttpAlertSource(cache_dir=cache)
 
 
 def find_alert(
     event_id: str,
     sil_path: str = "/mnt_data/sildata",
-    pre_path: str = "/tmp",  # noqa: S108 - legacy hard-coded path (T7)
+    pre_path: str = "/tmp",  # noqa: S108 - legacy default; maps to the XDG cache
     eps: float = 30,
     logger: str = __name__,
+    *,
+    source: Any = None,
 ) -> Any:
+    """Legacy ``find_alert``: per-station PGV magnitudes of one SIL event.
+
+    BGÓ's original method (``method="legacy"`` of
+    :func:`geo_dataread.seismic.alert_source.read_alert_pgv`): the evb at
+    ``sil_path + event_id + ".evb"``, the alertMap detection whose header
+    time lies in the evb arrival span ± ``eps`` s (full datetimes, the
+    closest to the origin; the old code took the first file in a time-of-day
+    window), every station common to evb and ``.event``.
+
+    Returns a frame indexed by station (``sta``) with ``dist`` (evb, km),
+    ``pgv`` (µm/s) and ``MW_pgv`` (:func:`M_PGV`), sorted by ``dist``, or
+    ``None`` when no detection is found. Changes from the old code: **one
+    row per station** (the old join repeated stations that have an S pick),
+    no ``locale`` change. ``pre_path``: the default ``"/tmp"`` means the
+    configured source (``$GPS_ALERTMAP_DIR``, else HTTP with the XDG
+    cache); another path is used as the HTTP cache root (layout
+    ``yyyy/mon/dd/``), refused inside a data directory. ``source`` (keyword,
+    new) overrides both. A missing evb raises (as before); a source that
+    cannot be read raises
+    :class:`~geo_dataread.seismic.alert_source.AlertSourceUnavailable`
+    (never a silent ``None``).
     """
-    Get one SIL event evb, download alertMap events, return matching data.
+    from geo_dataread.seismic.alert_source import read_alert_pgv, resolve_alert_source
+    from geo_dataread.seismic.sil_alert import read_evb as _read_evb
 
-    Parameters
-    ----------
-    event_id : str
-        SIL event id = path to evb|eve|ana files.
-        Example: "/2020/jun/25/00:05:00/09:33:883"
-    sil_path : str, optional
-        Path to SIL top dir which contains the year dirs. The default is
-        "/mnt_data/sildata".
-    pre_path : str, optional
-        Path to local alertMap output dirs. The default is "/tmp".
-        Will download XXX.event files to here and then parse them from there.
-        Original location: "hellir:/var/www/sil.vedur.is/alert"
-    eps : int, optional
-        Time tolerance in seconds for associating events from SIL and
-        alertMap. The default is 30.
-    logger : str, optional
-        Name of logger object. The default is __name__ (current method name).
-
-    Returns
-    -------
-    dist_pgv : pandas.DataFrame
-        Has index = station code, columns = dist, pgv, MW_pgv; for stations
-        common in SIL *.evb and alertMap *.event files.
-    """
-    import csv
-    import glob
-    import locale
-    import os
-    from datetime import datetime as dt
-
-    loc = locale.getlocale()
-    locale.setlocale(locale.LC_TIME, ("en_US", "UTF-8"))
-
-    # Handling logging
-    module_logger = logging.getLogger(logger)
-
-    # inpdate=dt.strptime(event_id[:12],"/%Y/%m/%d")
-    # dpath=inpdate.strftime("%Y/%b/%d/").lower()
-
-    tmp_path = os.path.join(pre_path, event_id[:12])
-
-    # making sure download directoty exists and is empty
-    try:
-        os.makedirs(tmp_path)
-
-    except FileExistsError as e:
-        module_logger.info(f"directory {tmp_path} exists:  " + str(e), exc_info=True)
-
-    except FileNotFoundError as e:
-        module_logger.info(
-            f"Can not create directory   {tmp_path}:  " + str(e), exc_info=True
+    _alert_deprecated("find_alert", "geo_dataread.seismic.alert_source.read_alert_pgv")
+    log = logging.getLogger(logger)
+    sil_root = _legacy_sil_path(sil_path) or ""
+    if source is None:
+        source = (
+            resolve_alert_source()
+            if pre_path in (None, "", _LEGACY_TMP)
+            else _legacy_cache_source(pre_path, sil_root)
         )
-        raise
-
-    locale.setlocale(locale.LC_TIME, loc)
-
-    tmp_dir = sil_path + event_id
-    filename = os.path.join(tmp_dir + ".evb")
-
-    EVB = read_evb(filename, logger="__name__")  # noqa: N806 - legacy name
-    # Download all alert files from the day of event_id and return the download path
-    tmp_path = downl_PGV_hraun(
-        inpdate=event_id[:12], tmp_path=tmp_path, logger=__name__, rm_files=True
+    # As before, a missing or unreadable evb raises; a source that cannot be
+    # read (missing mount, unreachable year, permission, network) raises too.
+    evb = _read_evb(os.path.join(sil_root, event_id.lstrip("/")) + ".evb")
+    res = read_alert_pgv(
+        event_id, method="legacy", source=source, evb=evb, window_s=float(eps)
     )
-
-    files = glob.glob(tmp_path + "*")
-    fields = {}
-    for f in files:
-        with open(f) as infile:
-            reader = csv.DictReader(infile)
-            assert reader.fieldnames is not None
-            fields[reader.fieldnames[0].split()[0]] = reader.fieldnames[0].split()[4:8]
-
-    eps_td = timedelta(seconds=eps)
-    window_min = (dt.combine(dt.today(), EVB.time.min()) - eps_td).time()
-    window_max = (dt.combine(dt.today(), EVB.time.max()) + eps_td).time()
-    for key, value in fields.items():
-        event_found = (
-            window_min < dt.strptime(value[-1], "%H:%M:%S").time() < window_max
-        )
-
-        module_logger.debug(
-            f"Searching for event in {key}.event -> {value}, Found: {event_found}"
-        )
-
-        if event_found:
-            use_file = tmp_path + key + ".event"
-            module_logger.info(f"Found event in  -> {use_file}")
-
-            break
-
-    try:
-        module_logger.warning(f"Attempting to fecth PGV values from -> {use_file}")
-        PGV = read_alert(use_file)  # noqa: N806 - legacy name
-        common_sta = list(set(PGV.index) & set(EVB.index))
-
-        module_logger.warning(f"List of stations: {common_sta}")
-
-        PGV = PGV.loc[common_sta]  # noqa: N806 - legacy name
-        EVB = EVB.loc[common_sta]  # noqa: N806 - legacy name
-
-        dist_pgv = EVB["dist"].to_frame().join(PGV["pgv"].to_frame())
-        dist_pgv["MW_pgv"] = dist_pgv.apply(M_PGV, axis=1)
-        dist_pgv.sort_values("dist", inplace=True)
-
-    except:  # noqa: E722 - legacy catch-all, also covers an unbound use_file (T7)
-        module_logger.warning(
-            f"No alert file found for event -> {event_id}", exc_info=True
-        )
-        dist_pgv = None
-
-    return dist_pgv
-
-
-##
-# functions used for real time fixes of magnitude on bigger quakes
-##
+    if res.result is None:
+        log.warning("No alert file found for event -> %s", event_id)
+        return None
+    st = res.result.stations
+    st = st[st["kept"]]
+    out = pd.DataFrame(
+        {
+            "dist": st["distance_km"].to_numpy(dtype=np.float64),
+            "pgv": st["pgv_um_s"].to_numpy(dtype=np.float64),
+        },
+        index=pd.Index(st["station"].astype(object).to_numpy(), name="sta"),
+    )
+    out["MW_pgv"] = out.apply(lambda r: _m_pgv(r, 1e-6), axis=1)
+    out = out.sort_values("dist", kind="stable")
+    log.info(
+        "alert detection %s #%03d, %d stations",
+        res.association.chosen_day,
+        res.result.alert_id,
+        len(out),
+    )
+    return out
 
 
 def read_station_loc(fileloc: str) -> Any:
-    """
-    Read a net.dat and put into dataframe.
+    """Legacy (shim only, B6): read a SIL ``net.dat`` station table.
 
-    Parameters
-    ----------
-    fileloc : str
-        system location of file ex: /home/liljajo/Documents/net.dat
-
-    Returns
-    -------
-    pandas dataframe
+    Fixed columns ``sta`` (0–4), ``latitude`` (4–13), ``longitude``
+    (13–23), ``height`` (23–29); rows with a missing field are dropped. New
+    code takes station coordinates from the ``.event`` rows or FDSN
+    (:mod:`geo_dataread.seismic.alert_sensors`).
     """
+    _alert_deprecated("read_station_loc", "the .event station coordinates or FDSN")
     columns = ["sta", "latitude", "longitude", "height"]
-    col_dtypel = ["object", "float64", "float64", "float64"]
-    col_with = [(0, 4), (4, 13), (13, 23), (23, 29)]
-    col_dtype = dict(zip(columns, col_dtypel, strict=True))
+    col_dtype = dict(
+        zip(columns, ["object", "float64", "float64", "float64"], strict=True)
+    )
     tmp = pd.read_fwf(
         fileloc,
         header=None,
-        colspecs=col_with,
+        colspecs=[(0, 4), (4, 13), (13, 23), (23, 29)],
         dtype=col_dtype,
-        infer_datetime_format=True,
         names=columns,
     )
-    tmp = tmp.dropna()
-    return tmp
+    return tmp.dropna()
+
+
+def _check_event_fit(
+    location: Any, sil_time: Any, pgv_time: Any, pgv: pd.DataFrame
+) -> tuple[bool, pd.DataFrame]:
+    from geo_dataread.seismic.sil_alert import (
+        Origin,
+        station_distances_km,
+        travel_time_fit,
+    )
+
+    lat, lon = float(location[0]), float(location[1])
+    dist = station_distances_km(
+        lat,
+        lon,
+        pgv["lat"].to_numpy(dtype=np.float64),
+        pgv["lon"].to_numpy(dtype=np.float64),
+    )
+    # Legacy side effect: the input frame gains the ``distance`` column.
+    pgv["distance"] = dist
+    out = pgv.copy()
+    t_hdr = pd.Timestamp(pgv_time)
+    out["time"] = [
+        t_hdr + pd.Timedelta(seconds=float(s))
+        for s in out["time"].to_numpy(dtype=float)
+    ]
+    res = travel_time_fit(Origin(pd.Timestamp(sil_time), lat, lon), out["time"], dist)
+    logger.info("alert fit %d/%d (accepted: %s)", res.n_fit, res.n_total, res.accepted)
+    if res.accepted:
+        out["fit"] = res.label + " "
+    return res.accepted, out
 
 
 def check_event_fit(
     location: Any, SIL_time: Any, PGV_time: Any, PGV: Any  # noqa: N803
 ) -> tuple[bool, Any]:
+    """Legacy: do the PGV arrival times fit the SIL origin?
+
+    ``location`` = (lat, lon), ``SIL_time`` the origin, ``PGV_time`` the
+    ``.event`` header time (naive = UTC), ``PGV`` a :func:`read_alert`
+    frame. Returns ``(accepted, frame)``: the frame is a copy with
+    ``distance`` (geodesic km), ``time`` as datetimes and, when accepted,
+    ``fit`` (``"61/66 (92%) "``). As before, ``PGV`` itself gains the
+    ``distance`` column. The rule is
+    :func:`geo_dataread.seismic.sil_alert.travel_time_fit` (vp 7.3, vs 1.9,
+    −2/+12 s, 25 s in the Bárðarbunga box, ≥ 10 stations and ≥ 68 %); no
+    printing.
     """
-    Find and compare arrival times of PGV to given criteria.
-
-    Also filters for stations further than 230 km away, LE1 and ada.
-
-    Parameters
-    ----------
-    location : list
-        list of latitude and longitude of origin from SIL
-    SIL_time: datetime
-        datetime object of SIL origin time
-    PGV_time: datetime
-        datetime object from header of event file
-    PGV: dataframe
-        with index: "sta", columns: "fb", "lon", "lat", "time", "pgv"
-
-    Returns
-    -------
-    True: boolean and PGV_fit: dataframe if enough sta fit within
-
-    False: boolean and PGV_fit: dataframe if not enough sta fit
-    """
-    from geopy import distance  # type: ignore[import-not-found, unused-ignore]
-
-    # add distances from SIL origin to PGV dataframe
-    latitudes = PGV["lat"].tolist()
-    longitudes = PGV["lon"].tolist()
-    coordinates = list(map(lambda x, y: (x, y), latitudes, longitudes))
-    PGV["distance"] = [distance.distance(location, x).km for x in coordinates]
-    PGV_fit = PGV.copy()  # noqa: N806 - legacy name
-    # compare PGV['time'] to SIL origin time
-    PGV_fit["time"] = [PGV_time + timedelta(0, x) for x in PGV_fit["time"]]
-    i = 0
-    j = 12
-    fit = 0.68
-    for _index, row in PGV_fit.iterrows():
-        if 64.55 <= location[0] <= 64.7 and -17.65 <= location[1] <= -17.1:
-            j = 25
-        t1 = SIL_time + timedelta(0, row.distance / 7.3 - 2)
-        t2 = SIL_time + timedelta(0, row.distance / 1.9 + j)
-        check = t1 < row.time < t2
-        if check:
-            i += 1
-
-    if len(PGV_fit.index) != 0 and i >= 10 and i / len(PGV_fit.index) >= fit:
-        PGV_fit["fit"] = "{}/{} ({:.0f}%) ".format(
-            i, len(PGV_fit.index), (i / len(PGV_fit.index)) * 100
-        )
-        print(str(i) + "/" + str(len(PGV_fit.index)), end=" -> ")
-        return True, PGV_fit
-    else:
-        print(str(i) + "/" + str(len(PGV_fit.index)), end=" -> ")
-        print("not enough PGV within limits", end=" -> ")
-        return False, PGV_fit
+    _alert_deprecated(
+        "check_event_fit", "geo_dataread.seismic.sil_alert.travel_time_fit"
+    )
+    return _check_event_fit(location, SIL_time, PGV_time, PGV)
 
 
 def find_alertevent(
@@ -920,90 +932,75 @@ def find_alertevent(
     location: Any = None,
     logger: str = __name__,
 ) -> Any:
+    """Legacy: the alertMap detection of a SIL event, with the fit check.
+
+    The evb is ``<sil_path>/<event_id>.evb`` (the legacy defaults now mean
+    ``$GPS_SIL_DIR`` / postprocess.cfg); the alertMap tree is ``pre_path``
+    (the legacy hellir default now means the configured source). Detections
+    whose header time lies in the evb arrival span ± ``eps`` s (full
+    datetimes) are tried closest to the origin first. With ``location`` and
+    ``time``: the first that passes :func:`check_event_fit` is returned (its
+    frame plus ``event`` = the 3-digit id), else an empty frame. Without
+    them: the closest detection's :func:`read_alert` frame.
     """
-    Find alerts that fit evb, check their fit.
+    from geo_dataread.seismic.alert_source import (
+        AlertDayNotFound,
+        DirectoryAlertSource,
+        read_alert_day,
+        resolve_alert_source,
+    )
+    from geo_dataread.seismic.sil_alert import (
+        associate_alert,
+        association_window,
+    )
+    from geo_dataread.seismic.sil_alert import read_evb as _read_evb
 
-    Additionally checks the event file pgv times against distance to origin if
-    location, origin time and station list with coodinates are provided.
-
-    Parameters
-    ----------
-    event_id : str
-        SIL event id = path to evb|eve|ana files.
-        Example: "/2020/jun/25/00:05:00/09:33:883"
-    sil_path : str, optional
-        Path to SIL top dir which contains the year dirs. The default is
-        "/net/granit/mnt/sdc1/sk2/"
-    pre_path : str, optional
-        Path to local alertMap output dirs. The default is
-        "/net/hellir/mnt/sdc1/alert"
-    eps : int, optional
-        Time tolerance in seconds for associating events from SIL and
-        alertMap. The default is 30.
-    time: datetime
-        time of origin gotten from cleanaut.mag
-        if not provided will result in no check of PGV times.
-    location: list, optional
-        should be a list of latitude and longitude of origin from evb file.
-        if not provided will result in no check of PGV times.
-    logger : str, optional
-        Name of logger object. The default is __name__ (current method name).
-
-    Returns
-    -------
-    PGV : pandas.DataFrame
-        Has index = station code, columns = lon, lat, time, pgv, fb, distance,
-        fit, event; for stations in AlertMap *.event file. if returned from
-        check_event_fit otherwise is an empty dataframe.
-    """
-    import csv
-    import glob
-    import os
-    from datetime import datetime as dt
-
-    # read EVB file
-    filename = os.path.join(sil_path, event_id + ".evb")
-    EVB = read_evb(filename, logger="__name__")  # noqa: N806 - legacy name
-
-    # read time in header of all event files from the day
-    tmp_path = os.path.join(pre_path, event_id[:12])
-    # (event_id[:4] + '.old') til að komast í .old möppur
-
-    files = glob.glob(tmp_path + "*.event")
-    fields = {}
-    for f in files:
-        with open(f) as infile:
-            reader = csv.DictReader(infile)
-            assert reader.fieldnames is not None
-            fields[reader.fieldnames[0].split()[0]] = reader.fieldnames[0].split()[5:9]
-
-    # set time window to look fo events within
-    eps_td = timedelta(seconds=eps)
-    window_min = (dt.combine(dt.today(), EVB.time.min()) - eps_td).time()
-    window_max = (dt.combine(dt.today(), EVB.time.max()) + eps_td).time()
-
-    # search if the event fits into the time
-    # if location and time are given check the PGV time fits  time from origin.
-    for key, value in fields.items():
-        t = f"{value[0]}/{value[1]}/{value[3]} {value[2]}"
-        PGV_time = dt.strptime(t, "%b/%d/%Y %H:%M:%S")  # noqa: N806 - legacy name
-        event_found = window_min < PGV_time.time() < window_max
-        if event_found:
-            file = os.path.join(tmp_path, key + ".event")
-            PGV = read_alert(file)  # noqa: N806 - legacy name
-            if location and time is not None:
-                check, PGV_checked = check_event_fit(  # noqa: N806 - legacy name
-                    location, time, PGV_time, PGV
-                )
-                if check:
-                    print(f"event found for {event_id} - event file {key}")
-                    PGV_checked["event"] = key
-                    return PGV_checked
-            else:
-                return PGV  # without location and time takes first event found
-
-    print(f"no event found for {event_id}")
-    return pd.DataFrame()  # return empty dataframe if no event found
+    _alert_deprecated(
+        "find_alertevent", "geo_dataread.seismic.alert_source.read_alert_pgv"
+    )
+    log = logging.getLogger(logger)
+    sil_root = _legacy_sil_path(sil_path) or ""
+    evb = _read_evb(os.path.join(sil_root, event_id.lstrip("/")) + ".evb")
+    src = (
+        resolve_alert_source()
+        if pre_path in (None, "", _LEGACY_HELLIR)
+        else DirectoryAlertSource(pre_path)
+    )
+    window = association_window(evb.origin, evb, float(eps))
+    pairs = []
+    d = window[0].date()
+    while d <= window[1].date():
+        try:
+            evs, problems = read_alert_day(src, d)
+        except AlertDayNotFound as exc:  # no directory: nothing to glob, as before
+            log.info("%s", exc)
+            d += timedelta(days=1)
+            continue
+        pairs.extend(evs)
+        for p in problems:
+            log.warning("%s", p)
+        d += timedelta(days=1)
+    assoc = associate_alert(
+        evb.origin, pairs, window=window, require_fit=False, method="legacy"
+    )
+    cand = assoc.candidates[assoc.candidates["in_window"]]
+    order = cand.assign(adt=cand["dt_origin_s"].abs()).sort_values(
+        ["adt", "dt_origin_s", "alert_day", "alert_id"], kind="stable"
+    )
+    by_key = {(day.isoformat(), ev.header.alert_id): ev for day, ev in pairs}
+    for _, row in order.iterrows():
+        ev = by_key[(str(row["alert_day"]), int(row["alert_id"]))]
+        frame = _alert_legacy_frame(ev)
+        if not (location and time is not None):
+            return frame
+        hdr = ev.header.time.tz_convert("UTC").tz_localize(None)
+        ok, checked = _check_event_fit(location, time, hdr, frame)
+        if ok:
+            log.info("event found for %s - event file %03d", event_id, row["alert_id"])
+            checked["event"] = f"{int(row['alert_id']):03d}"
+            return checked
+    log.info("no event found for %s", event_id)
+    return pd.DataFrame()
 
 
 __all__ = [

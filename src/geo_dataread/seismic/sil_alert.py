@@ -2,8 +2,9 @@
 
 PLAN-seismicity.md §7 (T7b) and §9c (B3, B4); the discovery is
 ``docs/seismic/sil_alert_discovery.md``. This module has no I/O beyond
-reading a local file and no network: the sources (HTTP, mounted directory),
-the association over a day's detections and the ``sil_read`` shim are T7c.
+reading a local file and no network: the sources (HTTP, mounted directory)
+and the orchestration are :mod:`geo_dataread.seismic.alert_source` (T7c),
+the ``sil_read`` shim is in :mod:`geo_dataread.sil_read`.
 
 **The relation.** IMO report VÍ 2009-012 (Pétursson & Vogfjörð, SAFER D5.2),
 equation (C), p. 25, standard error 0.223 (log10)::
@@ -37,7 +38,15 @@ Station magnitudes come from the **exact** inverse by default (it reproduces
 the page's median and mean; the far field does not). The event value is the
 **median** of the station magnitudes (``magnitude_type="Mpgv_alert"``),
 reported with the mid-third mean. :func:`travel_time_fit` is the legacy
-``check_event_fit`` rule on full datetimes, pure, for T7c to wire.
+``check_event_fit`` rule on full datetimes, pure.
+
+**Association** (T7c, pure): :func:`association_window` and
+:func:`associate_alert` pick the alertMap detection of a SIL event among a
+day's detections by **full UTC datetimes** (the legacy code compared times
+of day and broke at midnight), the closest header time to the origin
+winning, never the first file found. Two named methods
+(:data:`METHODS`): ``"page"`` (:data:`PAGE_METHOD`, the Mpgv page, B3) and
+``"legacy"`` (:data:`LEGACY_METHOD`, the original ``find_alert``).
 """
 
 from __future__ import annotations
@@ -65,17 +74,24 @@ from geo_dataread.seismic.schema import (
 __all__ = [
     "ALERT_EVENT_COLUMNS",
     "ALERT_MAG_COLUMNS",
+    "CANDIDATE_COLUMNS",
     "DAY_INDEX_COLUMNS",
     "DEFAULT_FIT",
     "DEFAULT_PGV",
+    "LEGACY_METHOD",
+    "LEGACY_PGV",
+    "METHODS",
+    "PAGE_METHOD",
     "EVB_PHASE_COLUMNS",
     "MAGNITUDE_TYPE",
     "MODEL_C",
     "PGV_SOURCE",
     "PGV_STATION_COLUMNS",
     "AlertEvent",
+    "AlertAssociation",
     "AlertFormatError",
     "AlertHeader",
+    "AlertMethod",
     "DistanceSource",
     "EventFit",
     "EvbFile",
@@ -86,7 +102,10 @@ __all__ = [
     "PgvResult",
     "PgvSettings",
     "SpecialRegion",
+    "associate_alert",
+    "association_window",
     "estimate_pgv_magnitude",
+    "resolve_method",
     "mid_third_mean",
     "nearfield_bias",
     "nearfield_min_km",
@@ -1301,7 +1320,7 @@ def estimate_pgv_magnitude(
     Builds :func:`pgv_stations`, then the median and mid-third mean of the
     kept stations' magnitudes (``settings.inverse``). The fit verdict is
     reported, not enforced: choosing the detection (and rejecting a
-    non-fitting one) is the association step of T7c.
+    non-fitting one) is :func:`associate_alert`.
     """
     st = pgv_stations(
         event, origin, evb=evb, settings=settings, fit=fit, event_id=event_id
@@ -1322,4 +1341,257 @@ def estimate_pgv_magnitude(
         stations=st,
         alert_id=event.header.alert_id,
         alert_time=event.header.time,
+    )
+
+
+# --------------------------------------------------------------------------
+# Methods and association (T7c)
+# --------------------------------------------------------------------------
+
+#: BGÓ's original method (the pre-alert-system ``find_alert``): every
+#: station common to the ``.evb`` and the ``.event`` (stations without an evb
+#: distance drop out as ``no_distance``), the evb ``dist``, the far-field
+#: inverse (``M_PGV``), no station, code or distance filter, the median.
+LEGACY_PGV: Final = PgvSettings(
+    max_km=math.inf,
+    min_km=0.0,
+    exclude_stations=(),
+    exclude_class_codes=(),
+    distance="evb",
+    inverse="farfield",
+)
+
+
+@dataclasses.dataclass(frozen=True)
+class AlertMethod:
+    """A named way to get from a SIL event to a PGV magnitude.
+
+    * ``settings``: station filters and estimator (:class:`PgvSettings`).
+    * ``window_s``: association tolerance. The window is the evb arrival
+      span widened by ``window_s`` each side (origin ± ``window_s`` when no
+      evb phases are known), see :func:`association_window`.
+    * ``fit``: the travel-time rule, always evaluated for the candidates.
+    * ``require_fit``: only detections the ``fit`` rule accepts can be
+      chosen (the page). Without it the fit is reported only (legacy).
+    """
+
+    name: str
+    settings: PgvSettings
+    window_s: float
+    require_fit: bool
+    fit: FitSettings = DEFAULT_FIT
+
+    def __post_init__(self) -> None:
+        if not (math.isfinite(self.window_s) and self.window_s >= 0.0):
+            raise ValueError(f"AlertMethod: window_s must be >= 0, got {self.window_s}")
+
+
+#: The Mpgv page method (B3/B4): geodesic distances from the alert
+#: coordinates, 15 < r <= 230 km (near-field table), no ``ada``, field 6 ≠ 22
+#: (**provisional**: the real hraun rule is unknown, see the T7b notes), the
+#: exact inverse, the median; association as ``find_alertevent`` (150 s,
+#: travel-time fit required).
+PAGE_METHOD: Final = AlertMethod("page", DEFAULT_PGV, window_s=150.0, require_fit=True)
+#: The legacy ``find_alert`` method (:data:`LEGACY_PGV`, eps 30 s, no fit
+#: requirement).
+LEGACY_METHOD: Final = AlertMethod(
+    "legacy", LEGACY_PGV, window_s=30.0, require_fit=False
+)
+#: Methods by name.
+METHODS: Final[Mapping[str, AlertMethod]] = {
+    PAGE_METHOD.name: PAGE_METHOD,
+    LEGACY_METHOD.name: LEGACY_METHOD,
+}
+
+
+def resolve_method(
+    method: str | AlertMethod,
+    *,
+    window_s: float | None = None,
+    settings: PgvSettings | None = None,
+    fit: FitSettings | None = None,
+    require_fit: bool | None = None,
+) -> AlertMethod:
+    """A method by name (``"page"``, ``"legacy"``) or as given, with overrides."""
+    if isinstance(method, AlertMethod):
+        m = method
+    else:
+        try:
+            m = METHODS[method]
+        except KeyError:
+            raise ValueError(
+                f"unknown PGV method {method!r}; expected one of {sorted(METHODS)}"
+            ) from None
+    changes: dict[str, Any] = {}
+    if window_s is not None:
+        changes["window_s"] = float(window_s)
+    if settings is not None:
+        changes["settings"] = settings
+    if fit is not None:
+        changes["fit"] = fit
+    if require_fit is not None:
+        changes["require_fit"] = bool(require_fit)
+    return dataclasses.replace(m, **changes) if changes else m
+
+
+def association_window(
+    origin: Origin, evb: EvbFile | None, window_s: float
+) -> tuple[pd.Timestamp, pd.Timestamp]:
+    """``[first evb arrival - window_s, last evb arrival + window_s]`` (UTC).
+
+    The legacy rule (``find_alert``, ``find_alertevent``) on full datetimes,
+    so it may cross midnight. Without an evb (or with no phase rows) it is
+    ``origin ± window_s``.
+    """
+    w = pd.Timedelta(seconds=float(window_s))
+    if evb is not None and len(evb.phases):
+        arr = pd.DatetimeIndex(evb.phases["arrival_time"]).dropna()
+        if len(arr):
+            return arr.min() - w, arr.max() + w
+    return origin.time - w, origin.time + w
+
+
+#: Columns of :attr:`AlertAssociation.candidates`.
+CANDIDATE_COLUMNS: Final = (
+    "alert_day",
+    "alert_id",
+    "header_time",
+    "dt_origin_s",
+    "n_stations",
+    "in_window",
+    "n_fit",
+    "n_total",
+    "alertfit",
+    "accepted",
+    "eligible",
+    "chosen",
+)
+
+
+@dataclasses.dataclass(frozen=True)
+class AlertAssociation:
+    """Which alertMap detection belongs to a SIL event (:func:`associate_alert`).
+
+    ``candidates`` (:data:`CANDIDATE_COLUMNS`) has one row per detection
+    looked at: ``dt_origin_s`` = header time − origin time, the fit numbers
+    (in-window detections only; NA outside), ``eligible`` (in the window
+    and, when the method requires it, fit-accepted) and ``chosen``.
+    ``chosen`` / ``chosen_day`` / ``fit`` describe the pick (``None`` when
+    nothing is eligible). ``missing_days`` and ``errors`` are filled by the
+    I/O layer (a day the source does not have; a file that did not parse).
+    """
+
+    origin: Origin
+    window: tuple[pd.Timestamp, pd.Timestamp]
+    method: str
+    candidates: pd.DataFrame
+    chosen: AlertEvent | None
+    chosen_day: date | None
+    fit: EventFit | None
+    missing_days: tuple[str, ...] = ()
+    errors: tuple[str, ...] = ()
+
+    @property
+    def found(self) -> bool:
+        """``True`` when a detection was chosen."""
+        return self.chosen is not None
+
+
+def associate_alert(
+    origin: Origin,
+    events: Iterable[tuple[date, AlertEvent]],
+    *,
+    window: tuple[pd.Timestamp, pd.Timestamp],
+    fit: FitSettings = DEFAULT_FIT,
+    require_fit: bool = True,
+    method: str = "page",
+    ellps: str = "GRS80",
+) -> AlertAssociation:
+    """Choose the detection of ``origin`` among ``(day, event)`` pairs. Pure.
+
+    A detection is in the window when its header time lies in ``window``
+    (inclusive, full UTC datetimes). Each in-window detection gets
+    :func:`travel_time_fit` with geodesic distances from its station
+    coordinates (the legacy ``check_event_fit``). Eligible: in the window
+    and, with ``require_fit``, fit-accepted. The choice is deterministic:
+    smallest ``|header - origin|``, then the earlier header, then day and
+    ``alert_id`` (never the order the files came in).
+    """
+    lo, hi = (pd.Timestamp(t) for t in window)
+    lo = lo.tz_localize("UTC") if lo.tzinfo is None else lo.tz_convert("UTC")
+    hi = hi.tz_localize("UTC") if hi.tzinfo is None else hi.tz_convert("UTC")
+    if hi < lo:
+        raise ValueError(f"associate_alert: window end {hi} before start {lo}")
+    recs: list[dict[str, Any]] = []
+    fits: list[EventFit | None] = []
+    pairs = list(events)
+    for day, ev in pairs:
+        t = ev.header.time
+        inside = bool(lo <= t <= hi)
+        res: EventFit | None = None
+        if inside:
+            f = ev.frame
+            dist = station_distances_km(
+                origin.latitude,
+                origin.longitude,
+                f["lat"].to_numpy(dtype=np.float64),
+                f["lon"].to_numpy(dtype=np.float64),
+                ellps=ellps,
+            )
+            res = travel_time_fit(origin, f["arrival_time"], dist, settings=fit)
+        fits.append(res)
+        recs.append(
+            {
+                "alert_day": day.isoformat(),
+                "alert_id": ev.header.alert_id,
+                "header_time": t,
+                "dt_origin_s": (t - origin.time).total_seconds(),
+                "n_stations": len(ev.frame),
+                "in_window": inside,
+                "n_fit": res.n_fit if res else None,
+                "n_total": res.n_total if res else None,
+                "alertfit": res.label if res else None,
+                "accepted": res.accepted if res else None,
+                "eligible": inside
+                and (not require_fit or (res is not None and res.accepted)),
+            }
+        )
+    order = sorted(
+        (i for i, r in enumerate(recs) if r["eligible"]),
+        key=lambda i: (
+            abs(recs[i]["dt_origin_s"]),
+            recs[i]["dt_origin_s"],
+            recs[i]["alert_day"],
+            recs[i]["alert_id"],
+        ),
+    )
+    pick = order[0] if order else None
+    cand = pd.DataFrame(
+        {
+            "alert_day": pd.Series([r["alert_day"] for r in recs], dtype=STRING_DTYPE),
+            "alert_id": pd.Series([r["alert_id"] for r in recs], dtype="int64"),
+            "header_time": pd.Series(
+                [r["header_time"] for r in recs], dtype=TIME_DTYPE
+            ),
+            "dt_origin_s": pd.Series([r["dt_origin_s"] for r in recs], dtype="float64"),
+            "n_stations": pd.Series([r["n_stations"] for r in recs], dtype="int64"),
+            "in_window": pd.Series([r["in_window"] for r in recs], dtype=bool),
+            "n_fit": pd.Series([r["n_fit"] for r in recs], dtype="Int64"),
+            "n_total": pd.Series([r["n_total"] for r in recs], dtype="Int64"),
+            "alertfit": pd.Series([r["alertfit"] for r in recs], dtype=STRING_DTYPE),
+            "accepted": pd.Series([r["accepted"] for r in recs], dtype="boolean"),
+            "eligible": pd.Series([r["eligible"] for r in recs], dtype=bool),
+            "chosen": pd.Series([i == pick for i in range(len(recs))], dtype=bool),
+        }
+    )
+    cand = cand.sort_values(["header_time", "alert_day", "alert_id"], kind="stable")
+    cand = cand.reset_index(drop=True)[list(CANDIDATE_COLUMNS)]
+    return AlertAssociation(
+        origin=origin,
+        window=(lo, hi),
+        method=method,
+        candidates=cand,
+        chosen=pairs[pick][1] if pick is not None else None,
+        chosen_day=pairs[pick][0] if pick is not None else None,
+        fit=fits[pick] if pick is not None else None,
     )
