@@ -1387,6 +1387,9 @@ class AlertMethod:
       ``"time"`` = smallest ``|header - origin|`` first (``find_alert``,
       ``find_alertevent``); ``"fit"`` = fit-accepted first, then the
       highest fit fraction, the most fitting stations, then time.
+    * ``min_fit_fraction``: a floor on ``n_fit / n_total`` for a detection
+      to be eligible (0 = none). It keeps the wide legacy window from
+      picking unrelated detections (fit 14–18 % in the 2016–2025 check).
     """
 
     name: str
@@ -1395,6 +1398,7 @@ class AlertMethod:
     require_fit: bool
     fit: FitSettings = DEFAULT_FIT
     rank: Rank = "time"
+    min_fit_fraction: float = 0.0
 
     def __post_init__(self) -> None:
         if not (math.isfinite(self.window_s) and self.window_s >= 0.0):
@@ -1402,6 +1406,11 @@ class AlertMethod:
         if self.rank not in RANKS:
             raise ValueError(
                 f"AlertMethod: rank must be one of {RANKS}, got {self.rank!r}"
+            )
+        if not 0.0 <= self.min_fit_fraction <= 1.0:
+            raise ValueError(
+                "AlertMethod: min_fit_fraction must be in [0, 1], "
+                f"got {self.min_fit_fraction}"
             )
 
 
@@ -1415,9 +1424,17 @@ PAGE_METHOD: Final = AlertMethod("page", DEFAULT_PGV, window_s=150.0, require_fi
 #: (BGÓ 2026-11-15): the ``.event`` header time is mostly 5–70 s *before*
 #: the SIL origin, so the original ±30 s window missed real detections. A
 #: 150 s window (as the page) and the candidates ranked by travel-time fit,
-#: not by header time; the fit is still not required.
+#: not by header time. The full fit rule is not required, but at least 30 %
+#: of the stations must fit (BGÓ 2026-11-15): the wide window otherwise
+#: picked unrelated detections (fit 14–18 %), while real ones the page's
+#: rule rejects (fit 60–64 %) are kept.
 LEGACY_METHOD: Final = AlertMethod(
-    "legacy", LEGACY_PGV, window_s=150.0, require_fit=False, rank="fit"
+    "legacy",
+    LEGACY_PGV,
+    window_s=150.0,
+    require_fit=False,
+    rank="fit",
+    min_fit_fraction=0.3,
 )
 #: The original ``find_alert`` exactly (eps 30 s, closest header time, no
 #: fit requirement); the ``sil_read.find_alert`` shim uses it.
@@ -1440,6 +1457,7 @@ def resolve_method(
     fit: FitSettings | None = None,
     require_fit: bool | None = None,
     rank: Rank | None = None,
+    min_fit_fraction: float | None = None,
 ) -> AlertMethod:
     """A method by name (:data:`METHODS`) or as given, with overrides."""
     if isinstance(method, AlertMethod):
@@ -1462,6 +1480,8 @@ def resolve_method(
         changes["require_fit"] = bool(require_fit)
     if rank is not None:
         changes["rank"] = rank
+    if min_fit_fraction is not None:
+        changes["min_fit_fraction"] = float(min_fit_fraction)
     return dataclasses.replace(m, **changes) if changes else m
 
 
@@ -1536,6 +1556,7 @@ def associate_alert(
     fit: FitSettings = DEFAULT_FIT,
     require_fit: bool = True,
     rank: Rank = "time",
+    min_fit_fraction: float = 0.0,
     method: str = "page",
     ellps: str = "GRS80",
 ) -> AlertAssociation:
@@ -1545,7 +1566,8 @@ def associate_alert(
     (inclusive, full UTC datetimes). Each in-window detection gets
     :func:`travel_time_fit` with geodesic distances from its station
     coordinates (the legacy ``check_event_fit``). Eligible: in the window
-    and, with ``require_fit``, fit-accepted. The choice is deterministic
+    and, with ``require_fit``, fit-accepted, and with ``n_fit / n_total >=
+    min_fit_fraction`` (when that is above 0). The choice is deterministic
     (never the order the files came in). ``rank="time"``: smallest
     ``|header - origin|``, then the earlier header, then day and
     ``alert_id``. ``rank="fit"``: fit-accepted first, then the highest
@@ -1589,7 +1611,15 @@ def associate_alert(
                 "alertfit": res.label if res else None,
                 "accepted": res.accepted if res else None,
                 "eligible": inside
-                and (not require_fit or (res is not None and res.accepted)),
+                and (not require_fit or (res is not None and res.accepted))
+                and (
+                    min_fit_fraction <= 0.0
+                    or (
+                        res is not None
+                        and res.n_total > 0
+                        and res.n_fit / res.n_total >= min_fit_fraction
+                    )
+                ),
             }
         )
 

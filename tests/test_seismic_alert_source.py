@@ -430,6 +430,11 @@ def test_methods() -> None:
     assert orig is sa.FIND_ALERT_METHOD and orig.settings == leg.settings
     assert orig.window_s == 30.0 and orig.rank == "time" and not orig.require_fit
     assert sa.PAGE_METHOD.rank == "time"
+    assert leg.min_fit_fraction == 0.3 and orig.min_fit_fraction == 0.0
+    assert sa.PAGE_METHOD.min_fit_fraction == 0.0
+    assert sa.resolve_method("legacy", min_fit_fraction=0).min_fit_fraction == 0.0
+    with pytest.raises(ValueError, match="min_fit_fraction"):
+        sa.AlertMethod("x", sa.DEFAULT_PGV, 1, False, min_fit_fraction=1.5)
     assert sa.resolve_method("page", rank="fit").rank == "fit"
     with pytest.raises(ValueError, match="rank"):
         sa.AlertMethod("x", sa.DEFAULT_PGV, window_s=1, require_fit=False, rank="n")  # type: ignore[arg-type]
@@ -505,6 +510,20 @@ def test_associate_rank_by_fit() -> None:
     assert by_fit.fit.label == "61/66 (92%)"
     c = by_fit.candidates.set_index("alert_id")
     assert not bool(c.at[70, "accepted"]) and bool(c.at[76, "chosen"])
+    # The fit floor: the 0/2 detection alone is not eligible at 30 %.
+    only = [(GOLDEN_DAY, near)]
+    assert sa.associate_alert(CLEANAUT, only, window=window, require_fit=False).found
+    floored = sa.associate_alert(
+        CLEANAUT, only, window=window, require_fit=False, min_fit_fraction=0.3
+    )
+    assert not floored.found and not floored.candidates["eligible"].any()
+    assert floored.candidates["in_window"].all()
+    assert (
+        sa.associate_alert(
+            CLEANAUT, pairs, window=window, require_fit=False, min_fit_fraction=0.3
+        ).chosen
+        is right
+    )
     with pytest.raises(ValueError, match="rank"):
         sa.associate_alert(CLEANAUT, pairs, window=window, rank="x")  # type: ignore[arg-type]
 
