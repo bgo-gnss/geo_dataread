@@ -43,10 +43,12 @@ reported with the mid-third mean. :func:`travel_time_fit` is the legacy
 **Association** (T7c, pure): :func:`association_window` and
 :func:`associate_alert` pick the alertMap detection of a SIL event among a
 day's detections by **full UTC datetimes** (the legacy code compared times
-of day and broke at midnight), the closest header time to the origin
-winning, never the first file found. Two named methods
-(:data:`METHODS`): ``"page"`` (:data:`PAGE_METHOD`, the Mpgv page, B3) and
-``"legacy"`` (:data:`LEGACY_METHOD`, the original ``find_alert``).
+of day and broke at midnight), never the first file found. Named methods
+(:data:`METHODS`): ``"page"`` (:data:`PAGE_METHOD`, the Mpgv page, B3;
+closest header time among fit-accepted), ``"legacy"`` (:data:`LEGACY_METHOD`,
+the ``find_alert`` estimator with a 150 s window and candidates ranked by
+travel-time fit) and ``"find_alert"`` (:data:`FIND_ALERT_METHOD`, the
+original exactly: 30 s, closest header time).
 """
 
 from __future__ import annotations
@@ -78,6 +80,7 @@ __all__ = [
     "DAY_INDEX_COLUMNS",
     "DEFAULT_FIT",
     "DEFAULT_PGV",
+    "FIND_ALERT_METHOD",
     "LEGACY_METHOD",
     "LEGACY_PGV",
     "METHODS",
@@ -92,6 +95,8 @@ __all__ = [
     "AlertFormatError",
     "AlertHeader",
     "AlertMethod",
+    "RANKS",
+    "Rank",
     "DistanceSource",
     "EventFit",
     "EvbFile",
@@ -1362,6 +1367,11 @@ LEGACY_PGV: Final = PgvSettings(
 )
 
 
+#: Candidate orderings of :func:`associate_alert` (see :class:`AlertMethod`).
+Rank: TypeAlias = Literal["time", "fit"]
+RANKS: Final[tuple[str, ...]] = ("time", "fit")
+
+
 @dataclasses.dataclass(frozen=True)
 class AlertMethod:
     """A named way to get from a SIL event to a PGV magnitude.
@@ -1373,6 +1383,10 @@ class AlertMethod:
     * ``fit``: the travel-time rule, always evaluated for the candidates.
     * ``require_fit``: only detections the ``fit`` rule accepts can be
       chosen (the page). Without it the fit is reported only (legacy).
+    * ``rank``: how eligible detections are ordered (:data:`RANKS`):
+      ``"time"`` = smallest ``|header - origin|`` first (``find_alert``,
+      ``find_alertevent``); ``"fit"`` = fit-accepted first, then the
+      highest fit fraction, the most fitting stations, then time.
     """
 
     name: str
@@ -1380,10 +1394,15 @@ class AlertMethod:
     window_s: float
     require_fit: bool
     fit: FitSettings = DEFAULT_FIT
+    rank: Rank = "time"
 
     def __post_init__(self) -> None:
         if not (math.isfinite(self.window_s) and self.window_s >= 0.0):
             raise ValueError(f"AlertMethod: window_s must be >= 0, got {self.window_s}")
+        if self.rank not in RANKS:
+            raise ValueError(
+                f"AlertMethod: rank must be one of {RANKS}, got {self.rank!r}"
+            )
 
 
 #: The Mpgv page method (B3/B4): geodesic distances from the alert
@@ -1392,15 +1411,24 @@ class AlertMethod:
 #: exact inverse, the median; association as ``find_alertevent`` (150 s,
 #: travel-time fit required).
 PAGE_METHOD: Final = AlertMethod("page", DEFAULT_PGV, window_s=150.0, require_fit=True)
-#: The legacy ``find_alert`` method (:data:`LEGACY_PGV`, eps 30 s, no fit
-#: requirement).
+#: The legacy estimator (:data:`LEGACY_PGV`) with the association fixed
+#: (BGÓ 2026-11-15): the ``.event`` header time is mostly 5–70 s *before*
+#: the SIL origin, so the original ±30 s window missed real detections. A
+#: 150 s window (as the page) and the candidates ranked by travel-time fit,
+#: not by header time; the fit is still not required.
 LEGACY_METHOD: Final = AlertMethod(
-    "legacy", LEGACY_PGV, window_s=30.0, require_fit=False
+    "legacy", LEGACY_PGV, window_s=150.0, require_fit=False, rank="fit"
+)
+#: The original ``find_alert`` exactly (eps 30 s, closest header time, no
+#: fit requirement); the ``sil_read.find_alert`` shim uses it.
+FIND_ALERT_METHOD: Final = AlertMethod(
+    "find_alert", LEGACY_PGV, window_s=30.0, require_fit=False, rank="time"
 )
 #: Methods by name.
 METHODS: Final[Mapping[str, AlertMethod]] = {
     PAGE_METHOD.name: PAGE_METHOD,
     LEGACY_METHOD.name: LEGACY_METHOD,
+    FIND_ALERT_METHOD.name: FIND_ALERT_METHOD,
 }
 
 
@@ -1411,8 +1439,9 @@ def resolve_method(
     settings: PgvSettings | None = None,
     fit: FitSettings | None = None,
     require_fit: bool | None = None,
+    rank: Rank | None = None,
 ) -> AlertMethod:
-    """A method by name (``"page"``, ``"legacy"``) or as given, with overrides."""
+    """A method by name (:data:`METHODS`) or as given, with overrides."""
     if isinstance(method, AlertMethod):
         m = method
     else:
@@ -1431,6 +1460,8 @@ def resolve_method(
         changes["fit"] = fit
     if require_fit is not None:
         changes["require_fit"] = bool(require_fit)
+    if rank is not None:
+        changes["rank"] = rank
     return dataclasses.replace(m, **changes) if changes else m
 
 
@@ -1504,6 +1535,7 @@ def associate_alert(
     window: tuple[pd.Timestamp, pd.Timestamp],
     fit: FitSettings = DEFAULT_FIT,
     require_fit: bool = True,
+    rank: Rank = "time",
     method: str = "page",
     ellps: str = "GRS80",
 ) -> AlertAssociation:
@@ -1513,10 +1545,14 @@ def associate_alert(
     (inclusive, full UTC datetimes). Each in-window detection gets
     :func:`travel_time_fit` with geodesic distances from its station
     coordinates (the legacy ``check_event_fit``). Eligible: in the window
-    and, with ``require_fit``, fit-accepted. The choice is deterministic:
-    smallest ``|header - origin|``, then the earlier header, then day and
-    ``alert_id`` (never the order the files came in).
+    and, with ``require_fit``, fit-accepted. The choice is deterministic
+    (never the order the files came in). ``rank="time"``: smallest
+    ``|header - origin|``, then the earlier header, then day and
+    ``alert_id``. ``rank="fit"``: fit-accepted first, then the highest
+    ``n_fit / n_total``, the larger ``n_fit``, then as ``"time"``.
     """
+    if rank not in RANKS:
+        raise ValueError(f"associate_alert: rank must be one of {RANKS}, got {rank!r}")
     lo, hi = (pd.Timestamp(t) for t in window)
     lo = lo.tz_localize("UTC") if lo.tzinfo is None else lo.tz_convert("UTC")
     hi = hi.tz_localize("UTC") if hi.tzinfo is None else hi.tz_convert("UTC")
@@ -1556,15 +1592,23 @@ def associate_alert(
                 and (not require_fit or (res is not None and res.accepted)),
             }
         )
-    order = sorted(
-        (i for i, r in enumerate(recs) if r["eligible"]),
-        key=lambda i: (
-            abs(recs[i]["dt_origin_s"]),
-            recs[i]["dt_origin_s"],
-            recs[i]["alert_day"],
-            recs[i]["alert_id"],
-        ),
-    )
+
+    def _key(i: int) -> tuple[Any, ...]:
+        r = recs[i]
+        by_time = (
+            abs(r["dt_origin_s"]),
+            r["dt_origin_s"],
+            r["alert_day"],
+            r["alert_id"],
+        )
+        if rank == "time":
+            return by_time
+        f = fits[i]
+        frac = f.n_fit / f.n_total if f is not None and f.n_total else 0.0
+        n_fit = f.n_fit if f is not None else 0
+        return (not bool(r["accepted"]), -frac, -n_fit, *by_time)
+
+    order = sorted((i for i, r in enumerate(recs) if r["eligible"]), key=_key)
     pick = order[0] if order else None
     cand = pd.DataFrame(
         {

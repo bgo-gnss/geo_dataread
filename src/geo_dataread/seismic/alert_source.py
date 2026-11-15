@@ -90,6 +90,7 @@ from geo_dataread.seismic.sil_alert import (
     parse_alert_day_index,
     parse_alert_event,
     read_evb,
+    Rank,
     resolve_method,
 )
 from geo_dataread.seismic.sil_catalog import MONTHS, sil_dir
@@ -779,6 +780,7 @@ def read_alert_pgv(
     window_s: float | None = None,
     settings: PgvSettings | None = None,
     fit: FitSettings | None = None,
+    rank: Rank | None = None,
 ) -> AlertPgv:
     """PGV magnitude (``Mpgv_alert``) of a SIL event from the alertMap files.
 
@@ -794,15 +796,17 @@ def read_alert_pgv(
     no ``ada``, field 6 ≠ 22 (provisional), exact inverse, median; 150 s
     window, travel-time fit required) or ``"legacy"`` (``find_alert``:
     stations common to evb and ``.event``, evb ``dist``, far-field inverse,
-    median; 30 s window, fit reported only), or an :class:`AlertMethod`.
-    ``window_s``, ``settings`` and ``fit`` override the method's.
+    median; 150 s window, candidates ranked by travel-time fit, fit not
+    required), ``"find_alert"`` (the legacy one exactly: 30 s window,
+    closest header time) or an :class:`AlertMethod`. ``window_s``,
+    ``settings``, ``fit`` and ``rank`` override the method's.
 
     ``source``: see :func:`resolve_alert_source`. The days the window
     touches are read (the previous or next one too near midnight); a day the
     source lacks is listed in ``association.missing_days``; a year that a
     directory source cannot read raises :class:`AlertYearUnavailable`.
     """
-    m = resolve_method(method, window_s=window_s, settings=settings, fit=fit)
+    m = resolve_method(method, window_s=window_s, settings=settings, fit=fit, rank=rank)
     event_id: str | None = None
     if isinstance(event, str):
         event_id = event.strip()
@@ -838,6 +842,7 @@ def read_alert_pgv(
         window=window,
         fit=m.fit,
         require_fit=m.require_fit,
+        rank=m.rank,
         method=m.name,
         ellps=m.settings.ellps,
     )

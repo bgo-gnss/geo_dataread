@@ -425,7 +425,14 @@ def test_methods() -> None:
     assert sa.resolve_method("page") is sa.PAGE_METHOD
     assert sa.PAGE_METHOD.settings == sa.DEFAULT_PGV and sa.PAGE_METHOD.require_fit
     leg = sa.resolve_method("legacy")
-    assert leg.window_s == 30.0 and not leg.require_fit
+    assert leg.window_s == 150.0 and not leg.require_fit and leg.rank == "fit"
+    orig = sa.resolve_method("find_alert")
+    assert orig is sa.FIND_ALERT_METHOD and orig.settings == leg.settings
+    assert orig.window_s == 30.0 and orig.rank == "time" and not orig.require_fit
+    assert sa.PAGE_METHOD.rank == "time"
+    assert sa.resolve_method("page", rank="fit").rank == "fit"
+    with pytest.raises(ValueError, match="rank"):
+        sa.AlertMethod("x", sa.DEFAULT_PGV, window_s=1, require_fit=False, rank="n")  # type: ignore[arg-type]
     assert leg.settings.distance == "evb" and leg.settings.inverse == "farfield"
     assert (
         leg.settings.exclude_class_codes == () and leg.settings.exclude_stations == ()
@@ -475,6 +482,31 @@ def test_associate_chooses_closest_not_first() -> None:
     )
     assert a2.chosen is right and a2.fit is not None and a2.fit.label == "61/66 (92%)"
     assert not bool(a2.candidates.set_index("alert_id").at[70, "accepted"])
+
+
+def test_associate_rank_by_fit() -> None:
+    """A badly fitting detection closer in header time loses to the fitting one."""
+    right = _ev(_event_text("2026-11-12 21:53:45", 76))
+    # Another detection (001, 2 stations far off) with its header 0.5 s after
+    # the origin: closest in time, but none of its arrivals fit.
+    lines = (ALERT / "2026/nov/12/001.event").read_text(encoding="latin-1")
+    lines_ = lines.splitlines()
+    tok = lines_[0].split()
+    tok[0], tok[7] = "070", "21:53:41"
+    near = _ev("\n".join([" ".join(tok), *lines_[1:]]) + "\n")
+    window = sa.association_window(CLEANAUT, None, 150)
+    pairs = [(GOLDEN_DAY, near), (GOLDEN_DAY, right)]
+    by_time = sa.associate_alert(CLEANAUT, pairs, window=window, require_fit=False)
+    assert by_time.chosen is near
+    by_fit = sa.associate_alert(
+        CLEANAUT, pairs, window=window, require_fit=False, rank="fit"
+    )
+    assert by_fit.chosen is right and by_fit.fit is not None
+    assert by_fit.fit.label == "61/66 (92%)"
+    c = by_fit.candidates.set_index("alert_id")
+    assert not bool(c.at[70, "accepted"]) and bool(c.at[76, "chosen"])
+    with pytest.raises(ValueError, match="rank"):
+        sa.associate_alert(CLEANAUT, pairs, window=window, rank="x")  # type: ignore[arg-type]
 
 
 def test_associate_tie_is_deterministic() -> None:

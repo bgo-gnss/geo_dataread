@@ -823,7 +823,7 @@ def find_alert(
     # read (missing mount, unreachable year, permission, network) raises too.
     evb = _read_evb(os.path.join(sil_root, event_id.lstrip("/")) + ".evb")
     res = read_alert_pgv(
-        event_id, method="legacy", source=source, evb=evb, window_s=float(eps)
+        event_id, method="find_alert", source=source, evb=evb, window_s=float(eps)
     )
     if res.result is None:
         log.warning("No alert file found for event -> %s", event_id)
@@ -903,7 +903,10 @@ def _check_event_fit(
 
 
 def check_event_fit(
-    location: Any, SIL_time: Any, PGV_time: Any, PGV: Any  # noqa: N803
+    location: Any,
+    SIL_time: Any,
+    PGV_time: Any,
+    PGV: Any,  # noqa: N803
 ) -> tuple[bool, Any]:
     """Legacy: do the PGV arrival times fit the SIL origin?
 
@@ -981,7 +984,7 @@ def find_alertevent(
             log.warning("%s", p)
         d += timedelta(days=1)
     assoc = associate_alert(
-        evb.origin, pairs, window=window, require_fit=False, method="legacy"
+        evb.origin, pairs, window=window, require_fit=False, method="find_alert"
     )
     cand = assoc.candidates[assoc.candidates["in_window"]]
     order = cand.assign(adt=cand["dt_origin_s"].abs()).sort_values(
