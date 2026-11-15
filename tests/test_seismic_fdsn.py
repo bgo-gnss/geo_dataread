@@ -822,3 +822,21 @@ def test_read_fdsn_catalog_window() -> None:
     assert set(cat.magnitudes["event_id"]) == kept
     assert cat.origins["preferred"].all()
     assert cat.events.attrs["catalog"]["filters"]["include_all_origins"] is True
+
+
+def test_detail_owugfe_missing_mode_is_inferred() -> None:
+    # an analyst-typed origin: no evaluationMode, status reviewed (2026-07-30);
+    # a window holding it failed schema validation before the fix
+    s = FakeFdsn(details={"IMO2026owugfe": _b("quakeml_IMO2026owugfe_nomode.xml")})
+    cat = fdsn.read_fdsn_event("IMO2026owugfe", session=s, policy=NO_PAUSE)
+    ev = cat.events.iloc[0]
+    assert ev["evaluation_mode"] == "manual" and ev["evaluation_status"] == "reviewed"
+    assert cat.report.counts["evaluation_mode_inferred"] == 1
+    assert cat.origins["evaluation_mode"].isna().all()  # the detail stays raw
+
+
+def test_infer_mode_rule() -> None:
+    f = fdsn._infer_mode
+    assert f({"evaluation_status": "confirmed", "author": "scanloc@x"}) == "manual"
+    assert f({"evaluation_status": None, "author": "scanloc@seiscomp"}) == "automatic"
+    assert f({"evaluation_status": "preliminary", "author": "someone"}) == "manual"

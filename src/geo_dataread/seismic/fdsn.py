@@ -103,7 +103,11 @@ Schema column          From
                        ``include_all_magnitudes=True`` (the default list
                        carries the preferred magnitude only); one on the
                        preferred origin wins, else the newest.
-``evaluation_mode``    preferred origin ``evaluationMode``
+``evaluation_mode``    preferred origin ``evaluationMode``; when absent
+                       (optional in QuakeML; an analyst-typed origin) a
+                       review status → ``manual``, else a machine author →
+                       ``automatic``, else ``manual``
+                       (``evaluation_mode_inferred`` in the report)
 ``evaluation_status``  preferred origin ``evaluationStatus``
 ``event_type``         ``event/type`` if in the schema vocabulary; QuakeML
                        ``other event`` (and anything else) → ``other``;
@@ -329,7 +333,8 @@ class FdsnReadReport:
     ``magnitude_missing`` (of which ``preferred_magnitude_dangling``: a
     ``preferredMagnitudeID`` that is not in the response), ``dropped_bad_position``, ``out_of_range:<col>``,
     ``h_err_not_sil_model`` (errors left NA), ``focal_mechanisms``,
-    ``mode_inferred`` (text), ``events``, ``events_manual``,
+    ``mode_inferred`` (text), ``evaluation_mode_inferred`` (QuakeML: the
+    preferred origin had no ``evaluationMode``), ``events``, ``events_manual``,
     ``events_automatic``."""
 
     endpoint: str
@@ -565,6 +570,20 @@ def _event_type(code: Any) -> str | None:
 
 def _is_machine(author: Any) -> bool:
     return isinstance(author, str) and "@" in author
+
+
+#: evaluation statuses that only a review gives (QuakeML 1.2 EvaluationStatus)
+REVIEW_STATUSES = frozenset({"reviewed", "confirmed", "final"})
+
+
+def _infer_mode(origin: Mapping[str, Any]) -> str:
+    """``evaluationMode`` of an origin that has none (QuakeML makes it
+    optional; SeisComP leaves it out of an origin an analyst typed in, e.g.
+    IMO2026owugfe, 2026-07-30): ``manual`` for a review status, else
+    ``automatic`` for a machine author (``…@host``), else ``manual``."""
+    if origin.get("evaluation_status") in REVIEW_STATUSES:
+        return "manual"
+    return "automatic" if _is_machine(origin.get("author")) else "manual"
 
 
 def parse_text(body: bytes) -> pd.DataFrame:
@@ -876,6 +895,10 @@ def _parse_event(ev: ET.Element, tally: Counter[str], *, extras: bool) -> _QmlEv
         tally["dropped_no_origin"] += 1
         return _QmlEvent(event_id, None, None, origins, mags, arrivals, mechs)
 
+    mode = po["evaluation_mode"]
+    if mode is None:
+        mode = _infer_mode(po)
+        tally["evaluation_mode_inferred"] += 1
     pm = next((m for m in mags if m["preferred"]), None)
     if pm is None:
         tally["magnitude_missing"] += 1
@@ -900,7 +923,7 @@ def _parse_event(ev: ET.Element, tally: Counter[str], *, extras: bool) -> _QmlEv
         "depth_err_km": d_err,
         "magnitude": pm["magnitude"] if pm else math.nan,
         "magnitude_type": pm["magnitude_type"] if pm else None,
-        "evaluation_mode": po["evaluation_mode"],
+        "evaluation_mode": mode,
         "evaluation_status": po["evaluation_status"],
         "event_type": _event_type(code),
         "event_type_code": code,
