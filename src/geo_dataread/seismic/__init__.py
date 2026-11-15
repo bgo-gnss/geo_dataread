@@ -223,6 +223,9 @@ from geo_dataread.seismic.sil_alert import (
     travel_time_fit,
 )
 from geo_dataread.seismic.sil_catalog import (
+    AutomaticFile,
+    Solutions,
+    read_sil_automatic,
     DEFAULT_MATCH_TOL,
     DEFAULT_MATCH_TOL_NO_ID,
     MatchTolerance,
@@ -240,6 +243,7 @@ from geo_dataread.seismic.sil_files import (
     ParseReport,
     read_aut_mag,
     read_cleanaut_mag,
+    read_events_ref,
     read_events_fps,
     read_events_lib,
     read_lib_mag,
@@ -403,6 +407,10 @@ __all__ = [
     "day_dir",
     "horizontal_error_km",
     "read_sil_catalog",
+    "read_sil_automatic",
+    "AutomaticFile",
+    "Solutions",
+    "read_events_ref",
     "read_sil_day",
     "sil_dir",
     "DERIVED_MOMENT_FLAG",

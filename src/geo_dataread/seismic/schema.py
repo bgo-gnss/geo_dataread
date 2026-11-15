@@ -77,12 +77,15 @@ SOURCES: Final = (
 #: labels it; ``ML_SIL`` SeisComP's recomputed local magnitude; ``Mpgv_w``
 #: SeisComP's PGV magnitude; ``M`` an unlabelled magnitude as the Quakes API
 #: gives it (14 events in 2024-25, T9). Whether ``aut.mag`` and ``Msil_auto``
-#: are the same number is not verified, so they are kept apart.
+#: are the same number is not verified, so they are kept apart. ``events.ref``
+#: the magnitude of SIL's ``events.ref`` solutions (differs from aut.mag's ML
+#: for the same detection; see :func:`~geo_dataread.seismic.sil_catalog.read_sil_automatic`).
 MAGNITUDE_TYPES: Final = (
     "Mlw",
     "ML",
     "Msil_auto",
     "aut.mag",
+    "events.ref",
     "ML_SIL",
     "Mpgv_w",
     "M",

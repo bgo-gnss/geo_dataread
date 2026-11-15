@@ -15,6 +15,8 @@ File                      Content                                     Parser
 ``lib.mag``               reviewed magnitudes, phases, errors, gap    :func:`read_lib_mag`
 ``aut.mag``               automatic events, all                       :func:`read_aut_mag`
 ``cleanaut.mag``          automatic events, cleaned (own row numbers) :func:`read_cleanaut_mag`
+``events.ref``            every automatic solution (all Q, several    :func:`read_events_ref`
+                          per event; ``aut.mag`` is its Q ≥ 10 part)
 ========================  ==========================================  =====================
 
 Rules every parser follows:
@@ -58,7 +60,9 @@ import pandas as pd
 
 from geo_dataread.seismic.schema import STRING_DTYPE, TIME_DTYPE
 
-FileKind = Literal["events.fps", "events.lib", "lib.mag", "aut.mag", "cleanaut.mag"]
+FileKind = Literal[
+    "events.fps", "events.lib", "lib.mag", "aut.mag", "cleanaut.mag", "events.ref"
+]
 
 #: Field kinds of the raw columns.
 _FieldKind = Literal["int", "float", "str"]
@@ -307,6 +311,30 @@ AUT_MAG_117: Final = Layout(
     note="unidentified columns aux1-aux10; ml, q and id absent",
 )
 
+_REF_HEAD: Final[tuple[_Slice, ...]] = (
+    ("date", 4, 10),
+    ("time", 11, 21),
+    ("latitude", 21, 28),
+    ("longitude", 28, 35),
+    ("q", 35, 43),
+    ("depth", 43, 50),
+    ("ml", 50, 56),
+    ("dir", 56, 87),
+    ("file", 87, 99),
+    ("ref_id", 99, 110),
+)
+
+#: events.ref, 114 characters (1995 onwards): ``YYMMDD HH:MM:SS.s``, lat,
+#: lon to 0.01, Q, depth, the automatic magnitude, the event's 5-minute
+#: directory and file (together the ``aut.mag`` id), the solution's event
+#: reference (shared by every solution of one event) and a 0/1 flag whose
+#: meaning is not verified. Several lines (solutions) per event.
+EVENTS_REF_114: Final = Layout("events.ref-114", 114, (*_REF_HEAD, ("flag", 110, 114)))
+
+#: events.ref, 108 characters (1992-94): as 114 without the flag; seconds
+#: below 10 are space-padded (``06:41: 8.2``).
+EVENTS_REF_108: Final = Layout("events.ref-108", 108, _REF_HEAD, note="no flag column")
+
 #: Recognized layouts per file kind, keyed by line width.
 LAYOUTS: Final[Mapping[FileKind, Mapping[int, Layout]]] = {
     "events.lib": {EVENTS_LIB_136.width: EVENTS_LIB_136},
@@ -315,6 +343,7 @@ LAYOUTS: Final[Mapping[FileKind, Mapping[int, Layout]]] = {
         lay.width: lay for lay in (AUT_MAG_89, AUT_MAG_57, AUT_MAG_61, AUT_MAG_117)
     },
     "cleanaut.mag": {AUT_MAG_89.width: AUT_MAG_89},
+    "events.ref": {lay.width: lay for lay in (EVENTS_REF_114, EVENTS_REF_108)},
 }
 
 #: events.fps fields, in order (whitespace delimited, 33 per line). Names as
@@ -450,12 +479,25 @@ _AUT_KINDS: Final[Mapping[str, _FieldKind]] = {
     **{name: _F for name in AUX_COLUMNS},
 }
 
+_REF_KINDS: Final[Mapping[str, _FieldKind]] = {
+    "num": _I,
+    "latitude": _F,
+    "longitude": _F,
+    "depth": _F,
+    "ml": _F,
+    "q": _F,
+    "id": _S,
+    "ref_id": _S,
+    "flag": _I,
+}
+
 _KINDS: Final[Mapping[FileKind, Mapping[str, _FieldKind]]] = {
     "events.fps": _FPS_KINDS,
     "events.lib": _LIB_KINDS,
     "lib.mag": _LIB_MAG_KINDS,
     "aut.mag": _AUT_KINDS,
     "cleanaut.mag": _AUT_KINDS,
+    "events.ref": _REF_KINDS,
 }
 
 
@@ -512,6 +554,8 @@ SENTINELS: Final[Mapping[FileKind, Mapping[str, tuple[float, ...]]]] = {
     },
     "aut.mag": {"ml": (-9.0,), **{name: (-9.99,) for name in AUX_COLUMNS}},
     "cleanaut.mag": {"ml": (-9.0,)},
+    # -8.0 = no magnitude; 1995 files write -9.x instead (see read_events_ref)
+    "events.ref": {"ml": (-8.0,)},
 }
 
 #: String sentinels, per kind and column: events.fps writes ``XX`` where
@@ -594,7 +638,7 @@ def _apply_sentinels(df: pd.DataFrame, kind: FileKind) -> dict[str, int]:
 # --------------------------------------------------------------------------
 
 #: A numeric field written as text "NaN" (aut.mag ML, 1994-97) is NA.
-_NAN_TEXT: Final = r"(?i)nan"
+_NAN_TEXT: Final = r"(?i)[+-]?nan"  # 2000 events.ref writes -NaN
 
 _TIME_RE: Final = r"^(\d{1,6})(?:\.(\d*))?$"
 _NS_PER_S: Final = 1_000_000_000
@@ -719,6 +763,27 @@ def _read_lines(path: Path) -> list[str]:
     return [ln[:-1] if ln.endswith("\r") else ln for ln in lines]
 
 
+#: events.ref years: YY at or above this are 19YY (SIL starts in 1990)
+_REF_CENTURY_PIVOT: Final = 90
+
+
+def _ref_raw(raw: dict[str, Any]) -> dict[str, Any]:
+    """events.ref fields into the shapes :func:`_convert` reads: ``YYMMDD`` →
+    ``YYYYMMDD``, ``HH:MM:SS.s`` → ``HHMMSS.s``, and ``id`` = directory +
+    file (the ``aut.mag`` id of the same detection)."""
+    out = dict(raw)
+    yy = pd.to_numeric(raw["date"].str.slice(0, 2), errors="coerce")
+    century = np.where(
+        yy.to_numpy(dtype="float64", na_value=np.nan) >= _REF_CENTURY_PIVOT, "19", "20"
+    )
+    out["date"] = (pd.Series(century, index=raw["date"].index) + raw["date"]).astype(
+        STRING_DTYPE
+    )
+    out["time"] = raw["time"].str.replace(":", "", regex=False)
+    out["id"] = (raw["dir"] + raw["file"]).where(raw["dir"] != "")
+    return out
+
+
 def _parse(path: str | os.PathLike[str], kind: FileKind) -> ParsedFile:
     p = Path(path)
     lines = _read_lines(p)
@@ -772,6 +837,8 @@ def _parse(path: str | os.PathLike[str], kind: FileKind) -> ParsedFile:
                 field: s.str.slice(a, b).str.strip()
                 for field, a, b in by_name[name].fields
             }
+            if kind == "events.ref":
+                raw = _ref_raw(raw)
         block, n_roll = _convert(raw, kind, name, issues)
         keep = ~issues.drop
         blocks.append(block.loc[keep])
@@ -884,12 +951,43 @@ def read_cleanaut_mag(path: str | os.PathLike[str]) -> ParsedFile:
     return _parse(path, "cleanaut.mag")
 
 
+#: events.ref magnitudes at or below this are "none" too (1995 writes -9.3,
+#: -9.4 where later files write -8.0)
+REF_NO_MAGNITUDE_BELOW: Final = -9.0
+
+
+def read_events_ref(path: str | os.PathLike[str]) -> ParsedFile:
+    """Read one ``events.ref``: every automatic solution SIL made that day.
+
+    Several lines per event (one per solution; ``ref_id`` is shared by the
+    solutions of one event), every quality: ``aut.mag`` holds only the Q ≥ 10
+    part (2026-06-13: 794 events here, 227 in aut.mag). Columns: ``ml`` the
+    automatic magnitude (-8.0 → NA; 1995's -9.x → NA too), ``q`` the
+    quality (outside 0-100 in 1991-98 files, negative in early 1995:
+    kept as written here, NA in the catalogue; that scale is not verified),
+    ``id`` the 5-minute directory + file, i.e. the ``aut.mag`` id of the
+    same detection, ``ref_id`` and ``flag`` (0/1, meaning not verified;
+    NA in the 1992-94 layout). ``num`` is NA (the file has no row numbers).
+    """
+    parsed = _parse(path, "events.ref")
+    frame = parsed.frame
+    low = (frame["ml"] <= REF_NO_MAGNITUDE_BELOW).to_numpy(dtype=bool, na_value=False)
+    if not low.any():
+        return parsed
+    frame = frame.copy()
+    frame.loc[low, "ml"] = np.nan
+    sentinels = dict(parsed.report.sentinels)
+    sentinels["ml"] = sentinels.get("ml", 0) + int(low.sum())
+    return ParsedFile(frame, dataclasses.replace(parsed.report, sentinels=sentinels))
+
+
 _READERS: Final[Mapping[str, Callable[[str | os.PathLike[str]], ParsedFile]]] = {
     "events.fps": read_events_fps,
     "events.lib": read_events_lib,
     "lib.mag": read_lib_mag,
     "aut.mag": read_aut_mag,
     "cleanaut.mag": read_cleanaut_mag,
+    "events.ref": read_events_ref,
 }
 
 #: File names this module can read.
@@ -899,6 +997,7 @@ FILE_KINDS: Final[tuple[FileKind, ...]] = (
     "lib.mag",
     "aut.mag",
     "cleanaut.mag",
+    "events.ref",
 )
 
 

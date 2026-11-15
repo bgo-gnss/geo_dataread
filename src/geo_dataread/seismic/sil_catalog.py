@@ -81,7 +81,7 @@ from collections import Counter
 from collections.abc import Iterator, Mapping
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import Any, Final
+from typing import Any, Final, Literal
 
 import numpy as np
 import pandas as pd
@@ -954,7 +954,164 @@ def read_sil_catalog(
     return out, report
 
 
+#: :func:`read_sil_automatic` sources
+AutomaticFile = Literal["events.ref", "aut.mag", "cleanaut.mag"]
+#: :func:`read_sil_automatic` ``solutions``
+Solutions = Literal["best", "all"]
+
+
+def _automatic_raw(
+    frame: pd.DataFrame, file: AutomaticFile, solutions: Solutions, tally: _Tally
+) -> pd.DataFrame:
+    """Raw automatic rows of one file's frame, before coercion."""
+    if file == "events.ref":
+        key = frame["ref_id"].astype(object).where(frame["ref_id"].notna(), frame["id"])
+        if solutions == "best":
+            # the highest-Q solution of each event (ties: the last written)
+            q = frame["q"].to_numpy(dtype="float64", na_value=-np.inf)
+            order = np.lexsort((frame["line_no"].to_numpy(), q))
+            pick = (
+                pd.Series(order, index=key.iloc[order].to_numpy())
+                .groupby(level=0, sort=False)
+                .last()
+                .to_numpy()
+            )
+            tally.add("solutions_collapsed", len(frame) - len(pick))
+            # a best solution without a magnitude takes the highest-Q one of
+            # the same event that has one (2026-06-13 20:14 M4.8: Q 90 had none)
+            has = frame["ml"].notna().to_numpy()
+            mag_by_key = (
+                pd.Series(
+                    frame["ml"].to_numpy(dtype="float64", na_value=np.nan)[order],
+                    index=key.iloc[order].to_numpy(),
+                )[has[order]]
+                .groupby(level=0, sort=False)
+                .last()
+            )
+            frame = frame.iloc[np.sort(pick)].copy()
+            key = key.iloc[np.sort(pick)]
+            fill = frame["ml"].isna().to_numpy() & key.isin(mag_by_key.index).to_numpy()
+            if fill.any():
+                frame.loc[fill, "ml"] = mag_by_key.reindex(key[fill]).to_numpy()
+                tally.add("magnitude_from_other_solution", int(fill.sum()))
+        mag_type = "events.ref"
+        event_id = key.to_numpy(dtype=object)
+    else:
+        mag_type = "aut.mag"
+        ids = frame["id"].astype(object)
+        event_id = ids.where(ids.notna(), None).to_numpy(dtype=object)
+    n = len(frame)
+    ml = frame["ml"].to_numpy(dtype="float64", na_value=np.nan)
+    ids = frame["id"].astype(object).where(frame["id"].notna(), None).to_numpy()
+    return pd.DataFrame(
+        {
+            "time": frame["time"].to_numpy(),
+            "event_id": event_id,
+            "sil_path": np.full(n, None, dtype=object),
+            "sil_aut_path": ids,
+            "latitude": frame["latitude"].to_numpy(dtype="float64"),
+            "longitude": frame["longitude"].to_numpy(dtype="float64"),
+            "depth_km": frame["depth"].to_numpy(dtype="float64", na_value=np.nan),
+            "h_err_km": np.full(n, np.nan),
+            "depth_err_km": np.full(n, np.nan),
+            "magnitude": ml,
+            "magnitude_type": [None if np.isnan(v) else mag_type for v in ml],
+            "mag_mlw": np.full(n, np.nan),
+            "mag_ml": np.full(n, np.nan),
+            "mag_auto": ml,
+            "moment_nm": np.full(n, np.nan),
+            "evaluation_mode": "automatic",
+            "event_type": "earthquake",
+            "event_type_code": np.full(n, None, dtype=object),
+            "quality": frame["q"].to_numpy(dtype="float64", na_value=np.nan),
+            "n_phases": np.full(n, None, dtype=object),
+            "azimuthal_gap": np.full(n, np.nan),
+        }
+    )
+
+
+def read_sil_automatic(
+    start: date | datetime | str | pd.Timestamp,
+    end: date | datetime | str | pd.Timestamp,
+    *,
+    base: str | os.PathLike[str] | None = None,
+    file: AutomaticFile = "events.ref",
+    solutions: Solutions = "best",
+) -> tuple[pd.DataFrame, SilReadReport]:
+    """Every automatic SIL detection of ``[start, end)``, reviewed or not.
+
+    :func:`read_sil_catalog` keeps an automatic row only when no reviewed
+    event matches it, and reads ``cleanaut.mag``: right for a catalogue, wrong
+    for judging the automatic system itself (a reviewed event's automatic
+    location disappears, and cleanaut.mag rows replaced by alert2sil carry
+    Q 50.50 and a PGV magnitude). This reads one automatic file as written:
+
+    * ``file="events.ref"`` (default): every solution SIL made, every Q —
+      ``aut.mag`` is only its Q ≥ 10 part. ``solutions="best"`` keeps the
+      highest-Q solution of each event (``event_id`` = its ``ref_id``; a
+      best solution without a magnitude takes the magnitude of the highest-Q
+      solution that has one, ``magnitude_from_other_solution``);
+      ``"all"`` keeps every solution (``event_id`` repeats).
+    * ``file="aut.mag"`` / ``"cleanaut.mag"``: those files' rows
+      (``event_id`` = their id path).
+
+    Every row is ``evaluation_mode="automatic"``; ``magnitude_type`` names
+    the file's scale (``events.ref`` or ``aut.mag``). One extra day directory
+    is read on each side (a day file holds events of the day before) and an
+    event seen in two day files is kept once (``duplicates:<file>``).
+    Values outside the schema ranges become NA (early-1995 negative Q).
+    """
+    t0 = _time.perf_counter()
+    root = sil_dir(base)
+    lo, hi = _utc(start), _utc(end)
+    if hi < lo:
+        raise ValueError(f"end {hi} is before start {lo}")
+    if file not in ("events.ref", "aut.mag", "cleanaut.mag"):
+        raise ValueError(f"file {file!r}: events.ref, aut.mag or cleanaut.mag")
+    if solutions not in ("best", "all"):
+        raise ValueError(f"solutions {solutions!r}: best or all")
+    first = (lo - pd.Timedelta(days=1)).date()
+    last = (max(hi - pd.Timedelta(1, "ns"), lo) + pd.Timedelta(days=1)).date()
+    tally = _Tally()
+    frames: list[pd.DataFrame] = []
+    for day in _days(first, last):
+        ddir = day_dir(root, day)
+        if not ddir.is_dir():
+            tally.add("days_missing")
+            continue
+        tally.add("days_read")
+        frame = _read(ddir, file, tally)
+        if frame is not None and len(frame):
+            frames.append(frame.assign(_day=str(day)))
+    if frames:
+        allf = pd.concat(frames, ignore_index=True)
+        allf["line_no"] = np.arange(len(allf))  # global order for tie-breaks
+        if file == "events.ref" and solutions == "all":
+            allf = _dedupe(allf, ["ref_id", "id", "time", "q"], file, tally)
+        elif file != "events.ref":
+            allf = _dedupe(allf, ["id", "time"], file, tally)
+        raw = _automatic_raw(allf.drop(columns="_day"), file, solutions, tally)
+        t = pd.DatetimeIndex(raw["time"])
+        raw = raw.loc[np.asarray((t >= lo) & (t < hi), dtype=bool)]
+        raw = _range_guard(raw, tally)
+        tally.add("window_automatic", len(raw))
+        parts = [raw]
+    else:
+        parts = []
+    report = tally.report(_time.perf_counter() - t0)
+    out = _finish(
+        parts,
+        location=str(root),
+        start=lo.to_pydatetime(),
+        end=hi.to_pydatetime(),
+        filters={"automatic_file": file, "solutions": solutions, "reviewed": False},
+        report=report,
+    )
+    return out, report
+
+
 __all__ = [
+    "AutomaticFile",
     "CONFIG_KEY",
     "DEFAULT_MATCH_TOL",
     "DEFAULT_MATCH_TOL_NO_ID",
@@ -964,8 +1121,10 @@ __all__ = [
     "SOURCE",
     "MatchTolerance",
     "SilReadReport",
+    "Solutions",
     "day_dir",
     "horizontal_error_km",
+    "read_sil_automatic",
     "read_sil_catalog",
     "read_sil_day",
     "sil_dir",

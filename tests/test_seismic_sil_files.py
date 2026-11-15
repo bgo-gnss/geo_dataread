@@ -22,15 +22,16 @@ FIXTURES = Path(__file__).parent / "fixtures" / "sil"
 
 KINDS: tuple[sf.FileKind, ...] = sf.FILE_KINDS
 
-#: Rows per file (None = absent), from the T0 README / characterization tests.
+#: Rows per file (None = absent), from the T0 README / characterization tests;
+#: the fixtures have no events.ref (its tests: test_seismic_sil_events_ref.py).
 EXPECTED_COUNTS: dict[str, tuple[int | None, ...]] = {
-    "1993/jan/29": (0, 0, 0, 5, None),
-    "1995/jun/15": (4, 4, 4, 5, None),
-    "2022/dec/12": (4, 4, 4, 3, 3),
-    "2024/aug/22": (8, 8, 8, 10, 8),
-    "2025/may/03": (6, 6, 6, 7, 7),
-    "2026/sep/10": (None, 0, None, 6, 6),
-    "2026/sep/11": (None, 0, None, 0, 0),
+    "1993/jan/29": (0, 0, 0, 5, None, None),
+    "1995/jun/15": (4, 4, 4, 5, None, None),
+    "2022/dec/12": (4, 4, 4, 3, 3, None),
+    "2024/aug/22": (8, 8, 8, 10, 8, None),
+    "2025/may/03": (6, 6, 6, 7, 7, None),
+    "2026/sep/10": (None, 0, None, 6, 6, None),
+    "2026/sep/11": (None, 0, None, 0, 0, None),
 }
 
 #: The layout each fixture file must be detected as.
