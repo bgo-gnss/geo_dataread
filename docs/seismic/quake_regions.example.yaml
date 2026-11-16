@@ -1,0 +1,29 @@
+# quake_regions.yaml — named quake selections (PLAN-ts-quakes Q3/Q7).
+# Deployed to the gpsconfig dir (like events.yaml), or [FILES] quake_regions
+# in postprocess.cfg. Read by geo_dataread.seismic.read_quake_regions and
+# `gpsquake regions` / `gpsquake fetch NAME`.
+#
+# Per region: one of
+#   bbox:    [min_lon, min_lat, max_lon, max_lat]
+#   polygon: [[lon, lat], [lon, lat], ...]
+#   radius:  [lat, lon, km]
+# optional: title, area (station area), default (the area's region for ts
+# plots; one per area), min_mag/max_mag/min_depth/max_depth,
+# event_types (list, or "all"; default earthquake), note.
+regions:
+  bardarbunga-caldera:
+    title: Bárðarbunga, askja
+    area: bardarbunga
+    default: true
+    bbox: [-17.65, 64.59, -17.25, 64.72]
+    note: the bulletin box of the old gps_data_analyses VONC figure (BGÓ Q7, 2026-11-15)
+  bardarbunga-caldera-2026proto:
+    title: Bárðarbunga, askja (frumgerð 2026-11-15)
+    area: bardarbunga
+    bbox: [-17.75, 64.56, -17.30, 64.71]
+    note: CALDERA_BOX of the scratch bb_quakes.py figure (PLAN-ts-quakes §7 acceptance)
+  bardarbunga-map:
+    title: Bárðarbunga, kortakassi
+    area: bardarbunga
+    bbox: [-18.65, 64.18, -16.80, 65.16]
+    note: extent of the bardarbunga-bakgrunnur map (SIL/SeisComP comparison 2026-11-15)

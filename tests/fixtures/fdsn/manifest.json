@@ -167,5 +167,21 @@
     "events": 1,
     "redactions": 1,
     "note": "T13: trimmed to 5 arrivals and their picks; analyst login replaced with analyst-1"
+  },
+  {
+    "file": "quakeml_IMO2026owugfe_nomode.xml",
+    "url": "http://seiscomp-p01.vedur.is:8080/fdsnws/event/1/query?eventid=IMO2026owugfe&includeallorigins=true&includeallmagnitudes=true",
+    "kind": "detail",
+    "format": "xml",
+    "recorded": "2026-11-15",
+    "status": 200,
+    "headers": {
+      "content-type": "application/xml; charset=utf-8",
+      "server": "SeisComP-FDSNWS/1.2.5"
+    },
+    "bytes": 1836,
+    "events": 1,
+    "redactions": 1,
+    "note": "091e96e: an event whose preferred origin has no evaluationMode (2026-07-30 16:58:10); analyst login replaced with analyst-1"
   }
 ]

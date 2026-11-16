@@ -222,6 +222,25 @@ from geo_dataread.seismic.sil_alert import (
     pgv_stations,
     travel_time_fit,
 )
+from geo_dataread.seismic.moment import (
+    DEFAULT_RELATIONS,
+    SEISCOMP_ML_SIL,
+    SEISCOMP_MPGV_W,
+    MomentRelation,
+    moment_estimate,
+)
+from geo_dataread.seismic.selection import (
+    SEAM,
+    CatalogueReport,
+    QuakeRegion,
+    QuakeSelection,
+    SelectionError,
+    catalogue_for,
+    parse_quake_regions,
+    parse_region_spec,
+    read_quake_regions,
+    region_for_area,
+)
 from geo_dataread.seismic.sil_catalog import (
     AutomaticFile,
     CatalogAutomaticFile,
@@ -256,6 +275,21 @@ from geo_dataread.seismic.sil_files import (
 )
 
 __all__ = [
+    "DEFAULT_RELATIONS",
+    "SEISCOMP_ML_SIL",
+    "SEISCOMP_MPGV_W",
+    "MomentRelation",
+    "moment_estimate",
+    "SEAM",
+    "CatalogueReport",
+    "QuakeRegion",
+    "QuakeSelection",
+    "SelectionError",
+    "catalogue_for",
+    "parse_quake_regions",
+    "parse_region_spec",
+    "read_quake_regions",
+    "region_for_area",
     "ALERT_RECENT_DAYS",
     "CACHE_MARKER",
     "CONFIG_KEY_ALERTMAP_DIR",
