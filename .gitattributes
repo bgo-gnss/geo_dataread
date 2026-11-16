@@ -1,0 +1,2 @@
+# SIL fixed-width fixtures: trailing blanks are part of the format
+tests/fixtures/sil/** -whitespace -text

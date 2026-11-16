@@ -1,0 +1,3 @@
+#EventID|Time|Latitude|Longitude|Depth/km|Author|Catalog|Contributor|ContributorID|MagType|Magnitude|MagAuthor|EventLocationName|EventType
+IMO2024qnogqh|2024-08-22T00:10:04.454|63.888|-22.375|2.1|SIL||VI|IMO2024qnogqh|ML_SIL|-0.5881404930458574|scmag@seiscomp-p01|Reykjanes|
+IMO2024qnohcr|2024-08-22T00:10:37.669|64.045|-21.164|3.0|SIL||VI|IMO2024qnohcr|ML_SIL|-0.122719793510153|scmag@seiscomp-p01|Hengill|

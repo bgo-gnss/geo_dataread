@@ -1,0 +1,51 @@
+  file: /sk2/2022/dec/12/20:10:00/62:40:000.sp3                          
+      221212 211340    0  
+      lib 0.46   -0.782  0.997   -8.4
+      DYNAMIC SOURCE PARAMETERS
+      Size measures
+      seismic moment:  0.289E+11 Nm
+      local magnitude: 0.5
+      Shear wave corner frequency range at close distances (900km)
+       6.5Hz - 6.9Hz     (  6.5Hz)
+      Fault radius range  115m - 122m     ( 122m)
+      Stress drop range  0.007Mpa - 0.008Mpa     ( 0.007Mpa)
+      Range of the peak slip at the fault 0.03mm - 0.03mm ( 0.03mm)
+      The orientation of the relaxed stress
+              azimuth   dip
+      P-axis    171.    28. degrees
+      T-axis     82.    -3.
+      The horizontal deviatoric stress as given by the P- and T-axes
+      the azimuth of compression  -8 degrees 
+      the relative size 0.89
+      The two possible fault planes
+                strike   dip   slip
+      plane a   130.    69.    18. degrees
+      plane b   213.   107.   202.
+      The normal directions of the fault planes
+               azimuth   dip
+      plane a   220.    21. degrees
+      plane b   123.    17.
+      Strike slip faulting dominates 
+      STATISTICAL INFORMATION
+      Of  1 first motion polarity observations
+      at least  1 are required to fit
+      The optimum mechanism has  0 polarity misfits
+       15 amplitudes for P and S at  5 stations are used
+      Only mechanisms giving an estimated standard 
+      deviation of the amplitude error factor of less
+      than 2.72 for single p-wave observations are
+      taken as acceptable and included in the figures
+      23.89 % of all mechanisms are acceptable
+       50.0 % acceptable due to first motion observations
+       46.8 % of these fitted also the amplitudes
+      The part of well fitting planes is 87.1%
+      The amplitude fit of the optimal mechanism
+      gives a mean error factor of 1.61
+      This corresponds to a standard deviation factor of 1.75
+      for single P-wave observations
+      The double couple solution is significant
+      at better than  1 % level
+      (f-value: f(14,11) =  5.39)
+      The measure of the misfit to an earthquake spectrum
+      P-waves  0.61
+      S-waves  0.54

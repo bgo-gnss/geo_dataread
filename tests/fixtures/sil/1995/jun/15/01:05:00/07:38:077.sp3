@@ -1,0 +1,47 @@
+  file: /eq1/1995/jun/15/01:05:00/07:38:077.sp3                          
+      95 615  1 730    0  
+      lib-0.39   -0.996  0.937    2.0  6.00 Hz
+      DYNAMIC SOURCE PARAMETERS
+      Size measures
+      seismic moment:  0.409E+10 Nm
+      local magnitude:-0.4
+      Shear wave corner frequency range at close distances (900km)
+       9.4Hz - 9.9Hz     (  6.6Hz)
+      Fault radius range   69m -  73m     ( 104m)
+      Stress drop range  0.005Mpa - 0.005Mpa     ( 0.002Mpa)
+      Range of the peak slip at the fault 0.01mm - 0.01mm ( 0.00mm)
+      The orientation of the relaxed stress
+              azimuth   dip
+      P-axis      3.     4. degrees
+      T-axis     92.   -14.
+      The horizontal deviatoric stress as given by the P- and T-axes
+      the azimuth of compression   1 degrees 
+      the relative size 0.97
+      The two possible fault planes        0
+                strike   dip   slip
+      plane a   228.    77.   188. degrees
+      plane b   136.    82.   -13.
+      The normal directions of the fault planes
+               azimuth   dip
+      plane a   318.    13. degrees
+      plane b   226.     8.
+      Strike slip faulting dominates 
+      STATISTICAL INFORMATION
+      Of  0 first motion polarity observations
+      at least  0 are required to fit
+      The optimum mechanism has  0 polarity misfits
+        3 amplitudes for P and S at  1 stations are used
+      Only mechanisms giving an estimated standard 
+      deviation of the amplitude error factor of less
+      than 2.72 for single p-wave observations are
+      taken as acceptable and included in the figures
+      44.04 % of all mechanisms are acceptable
+      100.0 % acceptable due to first motion observations
+       44.0 % of these fitted also the amplitudes
+      The part of well fitting planes is 95.4%
+      The amplitude fit of the optimal mechanism
+      gives a mean error factor of 1.45
+      The measure of the misfit to an earthquake spectrum
+      P-waves  0.10
+      S-waves  0.02
+      Low frequency limit   6.000 Hz
