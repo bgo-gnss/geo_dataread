@@ -31,8 +31,10 @@ Rules:
   no events is in the manifest and has no rows. A missing day directory is
   never cached (it is one ``stat``, and a not-yet-mounted archive must not
   freeze a year as empty).
-* **Default parameters only.** Events are cached for ``automatic=True`` and the
-  default match tolerances, mechanisms with ``extras=True`` (columns chosen on
+* **Default parameters only.** Events are cached for ``mode="catalog"``,
+  ``automatic_file="aut.mag"`` and the default match tolerances, before the
+  Q floor and the duplicate flags (applied per call, so any ``min_quality``
+  and ``duplicate_tol`` use the cache), mechanisms with ``extras=True`` (columns chosen on
   read) and the default plane tolerance. Any other call reads the archive.
 * **Same semantics as** :func:`read_sil_catalog`: half-open ``[start, end)``,
   one padding day directory each side, the cut by origin time, one final
@@ -91,11 +93,18 @@ from geo_dataread.seismic.schema import (
     with_provenance,
 )
 from geo_dataread.seismic.sil_catalog import (
+    DEFAULT_DUPLICATE_TOL,
     DEFAULT_MATCH_TOL,
     DEFAULT_MATCH_TOL_NO_ID,
+    DEFAULT_MIN_QUALITY,
     SOURCE,
+    CatalogAutomaticFile,
     MatchTolerance,
+    Mode,
     SilReadReport,
+    _filters,
+    _resolve_mode,
+    _select,
     day_dir,
     read_sil_catalog,
     read_sil_day,
@@ -220,7 +229,8 @@ def _day_int(d: date) -> int:
 
 
 def _read_events_day(path: Path) -> tuple[pd.DataFrame, dict[str, Any]]:
-    df, rep = read_sil_day(path)
+    # cached unfiltered: the Q floor and duplicate flags are per call
+    df, rep = read_sil_day(path, min_quality=None, duplicate_tol=None)
     df.attrs = {}
     meta = {
         "rows": len(df),
@@ -560,14 +570,6 @@ def _cut(df: pd.DataFrame, lo: pd.Timestamp, hi: pd.Timestamp) -> pd.DataFrame:
     return df.loc[keep]
 
 
-def _event_filters() -> dict[str, Any]:
-    return {
-        "automatic": True,
-        "match_tol": dataclasses.asdict(DEFAULT_MATCH_TOL),
-        "match_tol_no_id": dataclasses.asdict(DEFAULT_MATCH_TOL_NO_ID),
-    }
-
-
 def _cache_root(
     use_cache: bool, cache_dir: str | os.PathLike[str] | None, root: Path
 ) -> Path | None:
@@ -589,7 +591,11 @@ def read_sil_catalog_cached(
     end: date | datetime | str | pd.Timestamp,
     *,
     base: str | os.PathLike[str] | None = None,
-    automatic: bool = True,
+    mode: Mode = "catalog",
+    automatic: bool | None = None,
+    automatic_file: CatalogAutomaticFile = "aut.mag",
+    min_quality: float | None = DEFAULT_MIN_QUALITY,
+    duplicate_tol: MatchTolerance | None = DEFAULT_DUPLICATE_TOL,
     match_tol: MatchTolerance = DEFAULT_MATCH_TOL,
     match_tol_no_id: MatchTolerance = DEFAULT_MATCH_TOL_NO_ID,
     cache_dir: str | os.PathLike[str] | None = None,
@@ -611,13 +617,17 @@ def read_sil_catalog_cached(
     ``attrs["catalog"]["fetched_at"]`` are this call's. The cache figures
     are in ``attrs["catalog"]["cache"]`` (:class:`CacheStats`).
 
-    ``automatic=False`` or non-default tolerances, and ``use_cache=False``,
-    read the archive through :func:`read_sil_catalog` (``cache.used`` false).
+    ``mode`` other than ``"catalog"``, ``automatic_file="cleanaut.mag"``,
+    non-default match tolerances, and ``use_cache=False`` read the archive
+    through :func:`read_sil_catalog` (``cache.used`` false); ``min_quality``
+    and ``duplicate_tol`` are applied after the cache.
     """
     _check_recent(recent_days)
+    mode = _resolve_mode(mode, automatic)
     if (
         not use_cache
-        or not automatic
+        or mode != "catalog"
+        or automatic_file != "aut.mag"
         or match_tol != DEFAULT_MATCH_TOL
         or match_tol_no_id != DEFAULT_MATCH_TOL_NO_ID
     ):
@@ -625,7 +635,10 @@ def read_sil_catalog_cached(
             start,
             end,
             base=base,
-            automatic=automatic,
+            mode=mode,
+            automatic_file=automatic_file,
+            min_quality=min_quality,
+            duplicate_tol=duplicate_tol,
             match_tol=match_tol,
             match_tol_no_id=match_tol_no_id,
         )
@@ -650,7 +663,6 @@ def read_sil_catalog_cached(
     )
     report = SilReadReport()
     frames: list[pd.DataFrame] = []
-    win_rev = win_aut = 0
     for g in got:
         if g.frame is None:
             continue
@@ -661,27 +673,27 @@ def read_sil_catalog_cached(
         )
         if not len(g.frame):
             continue
-        cut = _cut(g.frame, lo, hi)
-        is_aut = (cut["evaluation_mode"] == "automatic").to_numpy()
-        win_rev += int((~is_aut).sum())
-        win_aut += int(is_aut.sum())
-        frames.append(cut)
-    extra: dict[str, int] = {
-        "days_missing": stats.days_missing,
-        "window_reviewed": win_rev,
-        "window_automatic": win_aut,
-    }
-    stats.seconds = _time.perf_counter() - t0
-    report = report + SilReadReport(
-        {k: v for k, v in extra.items() if v}, seconds=stats.seconds
-    )
+        frames.append(_cut(g.frame, lo, hi))
     nonempty = [f for f in frames if len(f)]
+    extra: dict[str, int] = {"days_missing": stats.days_missing}
     if nonempty:
-        df = pd.concat(nonempty)
+        df, sel = _select(
+            pd.concat(nonempty),
+            min_quality=min_quality,
+            duplicate_tol=duplicate_tol,
+        )
+        extra.update(sel)
+        is_aut = (df["evaluation_mode"] == "automatic").to_numpy()
+        extra["window_reviewed"] = int((~is_aut).sum())
+        extra["window_automatic"] = int(is_aut.sum())
     else:
         df = pd.DataFrame({INDEX_NAME: pd.DatetimeIndex([], tz="UTC")}).set_index(
             INDEX_NAME
         )
+    stats.seconds = _time.perf_counter() - t0
+    report = report + SilReadReport(
+        {k: v for k, v in extra.items() if v}, seconds=stats.seconds
+    )
     df.attrs = {}
     out = coerce_catalog(df, source=SOURCE)
     prov = catalog_provenance(
@@ -689,7 +701,14 @@ def read_sil_catalog_cached(
         location=str(root),
         start=lo.to_pydatetime(),
         end=hi.to_pydatetime(),
-        filters=_event_filters(),
+        filters=_filters(
+            mode,
+            automatic_file,
+            min_quality,
+            duplicate_tol,
+            match_tol,
+            match_tol_no_id,
+        ),
         extra={
             "report": report.as_dict(),
             "cache": {"used": True, **stats.as_dict()},

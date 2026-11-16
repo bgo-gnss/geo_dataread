@@ -25,7 +25,7 @@ FIXTURES = Path(__file__).parent / "fixtures" / "sil"
 
 #: day → (total, manual, automatic), from the README Joins table.
 EXPECTED: dict[str, tuple[int, int, int]] = {
-    "2024/aug/22": (10, 8, 2),
+    "2024/aug/22": (11, 8, 3),
     "2025/may/03": (7, 6, 1),
     "2022/dec/12": (5, 4, 1),
     "1995/jun/15": (5, 4, 1),
@@ -121,38 +121,53 @@ def test_lib_mag_no_ml_sentinel_keeps_mlw() -> None:
 def test_automatic_events_labelled() -> None:
     df, rep = day("2024/aug/22")
     aut = df[df["evaluation_mode"].astype(str) == "automatic"]
+    # aut.mag (default): the 00:04 row cleanaut.mag dropped is an event here
     assert set(aut["event_id"]) == {
+        "/2024/aug/22/00:00:00/04:14:727",
         "/2024/aug/22/00:45:00/50:30:280",
         "/2024/aug/22/03:25:00/31:59:429",
     }
-    r = at(df, "/2024/aug/22/00:45:00/50:30:280")  # cleanaut #7, SIL1352541
+    r = at(df, "/2024/aug/22/00:45:00/50:30:280")  # aut.mag #8, SIL1352541
     assert df.index[df["event_id"] == r["event_id"]][0] == pd.Timestamp(
         "2024-08-22 00:50:29.1", tz="UTC"
     )
     assert r["magnitude"] == -1.9 and r["magnitude_type"] == "aut.mag"
     assert r["mag_auto"] == -1.9 and pd.isna(r["mag_mlw"]) and pd.isna(r["mag_ml"])
-    assert r["quality"] == 10.0
+    assert r["quality"] == 10.0 and pd.isna(r["mag_pgv"])
     assert r["event_type"] == "earthquake" and pd.isna(r["event_type_code"])
     assert r["sil_path"] == r["sil_aut_path"] == r["event_id"]
     assert pd.isna(r["moment_nm"]) and pd.isna(r["n_phases"])
+    assert not r["possible_duplicate"]
+    assert rep.get("automatic_from:aut.mag") == 10
+    assert "automatic_from:cleanaut.mag" not in rep.counts
+
+
+def test_cleanaut_file_keeps_the_api_rows() -> None:
+    df, rep = day("2024/aug/22", automatic_file="cleanaut.mag")
+    aut = df[df["evaluation_mode"].astype(str) == "automatic"]
+    assert set(aut["event_id"]) == {
+        "/2024/aug/22/00:45:00/50:30:280",
+        "/2024/aug/22/03:25:00/31:59:429",
+    }
     assert rep.get("automatic_from:cleanaut.mag") == 8
-
-
-def test_aut_mag_only_rows_are_counted_not_added() -> None:
-    df, rep = day("2024/aug/22")
-    # 00:04:11.7 is in aut.mag only and in no API: not an event here
-    assert "/2024/aug/22/00:00:00/04:14:727" not in set(df["event_id"])
+    # 00:04:11.7 is in aut.mag only and in no API: counted, not added
     assert rep.get("aut_mag_only") == 1
     # 14:40 reviewed: its automatic row is in aut.mag only, matched by id there
     r = at(df, "/2024/aug/22/14:40:00/42:55:609")
     assert r["sil_aut_path"] == "/2024/aug/22/14:40:00/42:55:609"
     assert r["mag_auto"] == 0.6
     assert rep.get("match_id_aut_mag") == 1
+
+
+def test_reviewed_event_matches_its_aut_mag_row_by_id() -> None:
+    df, rep = day("2024/aug/22")
+    r = at(df, "/2024/aug/22/14:40:00/42:55:609")
+    assert r["sil_aut_path"] == "/2024/aug/22/14:40:00/42:55:609"
+    assert r["mag_auto"] == 0.6
+    assert rep.get("match_id") == 7 and rep.get("reviewed_unmatched") == 1
     # 21:20 reviewed: no automatic row anywhere
     r = at(df, "/2024/aug/22/21:20:00/26:39:991")
     assert pd.isna(r["sil_aut_path"]) and pd.isna(r["mag_auto"])
-    assert rep.get("match_id") == 6
-    assert rep.get("reviewed_unmatched") == 1
 
 
 def test_one_ms_id_mismatch_2025_05_03() -> None:

@@ -45,7 +45,8 @@ import pandas as pd
 #: Version of the column tables below. Bump on any change to a column's name,
 #: dtype, nullability, allowed values or meaning; cache keys carry it (T4).
 #: v2 (T3): + ``sil_aut_path``, + magnitude type ``M``.
-SCHEMA_VERSION: Final = 3
+#: v4: + ``mag_pgv`` (alert2sil PGV magnitude), + ``possible_duplicate``.
+SCHEMA_VERSION: Final = 4
 
 #: Name of the time index of both frames.
 INDEX_NAME: Final = "time"
@@ -278,6 +279,11 @@ EVENT_COLUMNS: Final[tuple[ColumnSpec, ...]] = (
     _mag("mag_mlw", "SIL Mlw where known"),
     _mag("mag_ml", "SIL ML where known"),
     _mag("mag_auto", "SIL automatic ML where known"),
+    _mag(
+        "mag_pgv",
+        "SIL alert2sil PGV magnitude where known (the cleanaut.mag rows that "
+        "replace an automatic solution; large events only)",
+    ),
     ColumnSpec("moment_nm", "float64", True, "seismic moment M0", "N·m", (), 0.0, None),
     ColumnSpec(
         "evaluation_mode",
@@ -315,6 +321,14 @@ EVENT_COLUMNS: Final[tuple[ColumnSpec, ...]] = (
         "azimuthal_gap", "float64", True, "azimuthal gap", "deg", (), 0.0, 360.0
     ),
     ColumnSpec("updated_time", "datetime", True, "last change of the event (UTC)"),
+    ColumnSpec(
+        "possible_duplicate",
+        "boolean",
+        True,
+        "automatic row with a better solution (a reviewed event, or an "
+        "automatic one of higher Q) within the duplicate tolerance; NA where "
+        "not assessed (reviewed rows, other sources)",
+    ),
 )
 
 

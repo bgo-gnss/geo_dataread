@@ -702,7 +702,7 @@ def test_resolve_base(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_provenance() -> None:
     df = fdsn.read_fdsn(*A, session=_xml_a(), policy=NO_PAUSE)
     prov = df.attrs["catalog"]
-    assert prov["source"] == "fdsn-seiscomp" and prov["schema_version"] == 3
+    assert prov["source"] == "fdsn-seiscomp" and prov["schema_version"] == 4
     assert prov["window"] == {
         "start": "2024-08-22T00:00:00Z",
         "end": "2024-08-22T01:00:00Z",

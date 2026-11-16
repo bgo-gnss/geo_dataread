@@ -418,7 +418,16 @@ def read_sil_data(
         data = _subset(data, start=lo, end=hi, dna=dna, **kwargs)
     else:
         automatic = fread == "default" and bool(aut)
-        cat, report = read_sil_catalog(lo, hi, base=base_path, automatic=automatic)
+        # the legacy reader's rows: cleanaut.mag as written, every Q
+        cat, report = read_sil_catalog(
+            lo,
+            hi,
+            base=base_path,
+            mode="catalog" if automatic else "reviewed",
+            automatic_file="cleanaut.mag",
+            min_quality=None,
+            duplicate_tol=None,
+        )
         logger_ = logging.getLogger(__name__)
         logger_.info(report.summary())
         if automatic and aut_per != "all":

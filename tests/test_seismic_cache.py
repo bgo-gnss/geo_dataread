@@ -149,6 +149,28 @@ def _same_report(a: sc.SilReadReport, b: sc.SilReadReport) -> None:
     assert a.fallback_dt_s == pytest.approx(b.fallback_dt_s)
 
 
+@pytest.mark.parametrize("min_quality", [None, 40.0])
+def test_q_floor_and_flags_apply_after_the_cache(
+    tree: Path, cdir: Path, min_quality: float | None
+) -> None:
+    start, end = "1990-01-01", "2027-01-01"
+    ref, ref_rep = sc.read_sil_catalog(start, end, base=tree, min_quality=min_quality)
+    cold, cold_rep = cached(tree, cdir, start, end, min_quality=min_quality)
+    warm, warm_rep = cached(tree, cdir, start, end, min_quality=min_quality)
+    for got, rep in ((cold, cold_rep), (warm, warm_rep)):
+        pd.testing.assert_frame_equal(got, ref)
+        _same_report(rep, ref_rep)
+    assert stats(warm)["used"] and stats(warm)["days_read"] == 0
+
+
+def test_other_modes_read_the_archive(tree: Path, cdir: Path) -> None:
+    for kw in ({"mode": "automatic"}, {"automatic_file": "cleanaut.mag"}):
+        got, _ = cached(tree, cdir, "2024-08-22", "2024-08-23", **kw)
+        ref, _ = sc.read_sil_catalog("2024-08-22", "2024-08-23", base=tree, **kw)
+        pd.testing.assert_frame_equal(got, ref)
+        assert stats(got) == {"used": False}
+
+
 @pytest.mark.parametrize(("start", "end"), WINDOWS)
 def test_events_equal_archive_read_cold_and_warm(
     tree: Path, cdir: Path, start: str, end: str
@@ -277,7 +299,7 @@ def test_archive_from_env(
     got, _ = c.read_sil_catalog_cached(
         "2024-08-22", "2024-08-23", cache_dir=cdir, today=TODAY
     )
-    assert len(got) == 10
+    assert len(got) == 11
     assert got.attrs[ATTRS_KEY]["location"] == str(tree)
 
 
@@ -397,7 +419,7 @@ def test_missing_pyarrow_is_a_clear_error(
     with pytest.raises(ImportError, match="pyarrow"):
         cached(tree, cdir, "2024-08-22", "2024-08-23")
     got, _ = cached(tree, cdir, "2024-08-22", "2024-08-23", use_cache=False)
-    assert len(got) == 10
+    assert len(got) == 11
 
 
 def test_write_false_reads_without_writing(tree: Path, cdir: Path) -> None:
@@ -427,7 +449,7 @@ def test_year_file_merges_days(tree: Path, cdir: Path) -> None:
     got, _ = cached(tree, cdir, "2024-08-01", "2024-09-01")
     assert stats(got)["days_read"] == 0
     assert stats(got)["days_cached"] == 2
-    assert len(got) == 10
+    assert len(got) == 11
 
 
 def test_failed_write_leaves_old_file_and_no_temp(

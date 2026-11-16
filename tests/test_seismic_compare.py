@@ -604,8 +604,11 @@ DAY_B = ("2026-09-10T00:00:00Z", "2026-09-11T00:00:00Z")
 def test_real_window_a() -> None:
     """2024-08-22 00–01 h. The SIL fixture day is trimmed (8 of 250 reviewed
     events kept), so sil-files has 4 events in the hour against 7 in the
-    APIs: the 3 unmatched API events are a trimming artefact."""
-    files, _ = read_sil_day(FIX / "sil" / "2024" / "aug" / "22")
+    APIs: the 3 unmatched API events are a trimming artefact. cleanaut.mag,
+    as the APIs ingest it."""
+    files, _ = read_sil_day(
+        FIX / "sil" / "2024" / "aug" / "22", automatic_file="cleanaut.mag"
+    )
     files = _cut(files, *WIN_A)
     qsil = _cut(_quakes("internal_sil_20240822T00.json", "sil"), *WIN_A)
     qsc = _cut(_quakes("internal_seiscomp_20240822T00.json", "seiscomp"), *WIN_A)

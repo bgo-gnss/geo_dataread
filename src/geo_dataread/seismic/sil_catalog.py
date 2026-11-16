@@ -48,15 +48,21 @@ lat, lon, depth        events.fps → events.lib → lib.mag
 ``sil_aut_path``       the matched automatic id (cleanaut, else aut.mag)
 =====================  ===================================================
 
-Automatic events (``evaluation_mode="automatic"``) are the ``cleanaut.mag``
-rows (``aut.mag`` when there is no cleanaut, i.e. before 1996) that match no
-reviewed event: ``magnitude`` = ``mag_auto`` = their ML labelled ``aut.mag``
-(as the Quakes API ``system=sil`` labels it), ``quality`` = Q, ``event_type``
-``earthquake`` (as the Quakes API types them; no code in the file). The
-Quakes API's SIL ingest appears to read ``cleanaut.mag`` (T9: an aut.mag-only
-event is in no API), so ``cleanaut.mag`` is preferred and the aut.mag rows it
-drops are only counted (``aut_mag_only``). Layouts without an id (pre-1996)
-get ``event_id`` ``/<yyyy>/<mon>/<dd>/aut.mag#<num>`` and ``sil_path`` NA.
+Automatic events (``evaluation_mode="automatic"``) are, by default, the
+``aut.mag`` rows that match no reviewed event (``mode="catalog"``: an
+automatic row stands until its event is reviewed): ``magnitude`` =
+``mag_auto`` = their ML labelled ``aut.mag``, ``quality`` = Q,
+``event_type`` ``earthquake`` (as the Quakes API types them; no code in the
+file). ``cleanaut.mag`` is aut.mag with some rows replaced by alert2sil rows
+(PGV magnitude, Q 50.50 as a marker, position rounded, id ``/2000/aaa/…``);
+their PGV magnitude goes to ``mag_pgv`` of the aut.mag row they replaced
+(same origin time). ``automatic_file="cleanaut.mag"`` reads that file as
+written instead — the Quakes API's SIL ingest appears to read it (T9).
+``mode="automatic"`` returns every automatic row, reviewed or not;
+``mode="reviewed"`` none. Automatic rows below ``min_quality`` (default
+Q 10) are dropped and the rest get ``possible_duplicate``
+(:func:`duplicate_flags`). Layouts without an id (pre-1996) get
+``event_id`` ``/<yyyy>/<mon>/<dd>/aut.mag#<num>`` and ``sil_path`` NA.
 
 Reviewed ↔ automatic matching: first by id; then, among the rows left on both
 sides, greedily one-to-one by time and distance (best score first), within
@@ -145,6 +151,41 @@ DEFAULT_MATCH_TOL: Final = MatchTolerance(2.0, 10.0)
 #: Fallback window when the automatic row has no id (before 1996), where it
 #: is the only match: Q6's second tolerance (1995-06-15 pairs: ≤ 4.3 s, 15 km).
 DEFAULT_MATCH_TOL_NO_ID: Final = MatchTolerance(5.0, 25.0)
+
+#: What a catalogue read returns (PLAN-seismicity §9e):
+#: ``"catalog"`` — reviewed events, plus the automatic solutions of events
+#: not (yet) reviewed: an automatic row stands until its event is reviewed,
+#: then the reviewed row replaces it; ``"automatic"`` — every automatic
+#: solution, reviewed or not, the same kind of row in every period (a
+#: series that does not change character at the February 2026 seam);
+#: ``"reviewed"`` — reviewed events only.
+Mode = Literal["catalog", "automatic", "reviewed"]
+MODES: Final[tuple[Mode, ...]] = ("catalog", "automatic", "reviewed")
+
+#: Automatic file of a catalogue read. ``aut.mag`` (default) is SIL's own
+#: automatic solutions; ``cleanaut.mag`` is aut.mag with some rows replaced
+#: by alert2sil rows (PGV magnitude, Q 50.50 as a marker, position rounded
+#: to 0.01°, fake id ``/2000/aaa/…``), the file the Quakes API ingests.
+CatalogAutomaticFile = Literal["aut.mag", "cleanaut.mag"]
+
+#: Default lower bound on automatic Q (inclusive). aut.mag holds Q ≥ 10 only
+#: from about 2012 (1996: 79 % of its rows are below 10), so the default
+#: applies one cut to every period. 2026 waveform check: Q ≤ 10 ~90 % junk,
+#: Q 10–40 ~78 % real, Q > 40 ~81 %. Raise it in swarms (PLAN §9e).
+DEFAULT_MIN_QUALITY: Final = 10.0
+
+#: Window in which an automatic row counts as a possible duplicate of a
+#: better solution (Q6's first tolerance). aut.mag Q > 40, Feb–Nov 2026:
+#: 35 neighbours within 2 s / 10 km of 10,846 rows; events.ref best
+#: solutions 264 of 11,368.
+DEFAULT_DUPLICATE_TOL: Final = MatchTolerance(2.0, 10.0)
+
+#: Id prefix of the alert2sil rows in cleanaut.mag.
+ALERT2SIL_PREFIX: Final = "/2000/aaa/"
+
+#: alert2sil row ↔ aut.mag row: same origin time (to 0.1 s), position
+#: rounded to 0.01° (2026-06-13: dt 0.0 s, ≤ 0.6 km).
+ALERT2SIL_TOL: Final = MatchTolerance(0.5, 5.0)
 
 
 # --------------------------------------------------------------------------
@@ -556,18 +597,71 @@ def _reviewed(ddir: Path, tally: _Tally) -> pd.DataFrame | None:
 # --------------------------------------------------------------------------
 
 
-def _automatic(ddir: Path, tally: _Tally) -> tuple[Any, Any]:
-    """``(primary, aut_mag)``: cleanaut.mag (else aut.mag) and aut.mag."""
+def _is_alert2sil(ids: Any) -> Any:
+    return np.array(
+        [isinstance(v, str) and v.startswith(ALERT2SIL_PREFIX) for v in ids],
+        dtype=bool,
+    )
+
+
+def _alert_pgv(aut: pd.DataFrame, clean: pd.DataFrame | None, tally: _Tally) -> Any:
+    """``mag_pgv`` for the aut.mag rows that cleanaut.mag replaced by an
+    alert2sil row (nearest within :data:`ALERT2SIL_TOL`)."""
+    out = np.full(len(aut), np.nan)
+    if clean is None or not len(clean) or not len(aut):
+        return out
+    alert = clean.loc[_is_alert2sil(clean["id"].astype(object))]
+    if not len(alert):
+        return out
+    t_a = pd.DatetimeIndex(aut["time"]).as_unit("ns").asi8 / 1e9
+    lat_a = aut["latitude"].to_numpy(dtype="float64")
+    lon_a = aut["longitude"].to_numpy(dtype="float64")
+    t_x = pd.DatetimeIndex(alert["time"]).as_unit("ns").asi8 / 1e9
+    for k in range(len(alert)):
+        near = np.flatnonzero(np.abs(t_a - t_x[k]) <= ALERT2SIL_TOL.seconds)
+        if len(near):
+            d = _distance_km(
+                lat_a[near],
+                lon_a[near],
+                alert["latitude"].iat[k],
+                alert["longitude"].iat[k],
+            )
+            ok = d <= ALERT2SIL_TOL.km
+            if ok.any():
+                j = int(near[ok][np.argmin(d[ok])])
+                out[j] = float(alert["ml"].iat[k])
+                tally.add("mag_pgv_from_alert2sil")
+                continue
+        tally.add("alert2sil_unmatched")
+    return out
+
+
+def _automatic(
+    ddir: Path, tally: _Tally, file: CatalogAutomaticFile = "aut.mag"
+) -> tuple[Any, Any]:
+    """``(primary, aut_mag)``: the automatic rows of ``file`` (the other file
+    when the day has no ``file``), and aut.mag for the id-only match when the
+    primary is cleanaut.mag. Both carry ``mag_pgv``."""
     clean = _read(ddir, "cleanaut.mag", tally)
     aut = _read(ddir, "aut.mag", tally)
-    if clean is not None:
-        clean = _dedupe(clean, ["id", "time"], "cleanaut.mag", tally)
-        tally.add("automatic_from:cleanaut.mag", len(clean))
-        return clean.reset_index(drop=True), aut
     if aut is not None:
-        aut = _dedupe(aut, ["num", "time"], "aut.mag", tally)
+        aut = _dedupe(aut, ["num", "time"], "aut.mag", tally).reset_index(drop=True)
+    if clean is not None:
+        clean = _dedupe(clean, ["id", "time"], "cleanaut.mag", tally).reset_index(
+            drop=True
+        )
+    if aut is not None and (file == "aut.mag" or clean is None):
         tally.add("automatic_from:aut.mag", len(aut))
-        return aut.reset_index(drop=True), None
+        aut["mag_pgv"] = _alert_pgv(aut, clean, tally)
+        return aut, None
+    if clean is not None:
+        tally.add("automatic_from:cleanaut.mag", len(clean))
+        is_alert = _is_alert2sil(clean["id"].astype(object))
+        clean["mag_pgv"] = np.where(
+            is_alert, clean["ml"].to_numpy(dtype="float64", na_value=np.nan), np.nan
+        )
+        tally.add("alert2sil_rows", int(is_alert.sum()))
+        return clean, aut
     return None, None
 
 
@@ -632,8 +726,16 @@ def _match(
     tol_no_id: MatchTolerance,
     tally: _Tally,
 ) -> Any:
-    """Fill ``sil_aut_path``/``mag_auto`` of matched reviewed rows; return the
-    automatic rows that match nothing."""
+    """Fill ``sil_aut_path``/``mag_auto``/``mag_pgv`` of matched reviewed
+    rows; return the automatic rows that match nothing."""
+    if "mag_pgv" not in rev.columns:
+        rev["mag_pgv"] = np.nan
+    pgv_col = rev.columns.get_loc("mag_pgv")
+    aut_pgv = (
+        aut["mag_pgv"].to_numpy(dtype="float64")
+        if "mag_pgv" in aut.columns
+        else np.full(len(aut), np.nan)
+    )
     matched_a = np.zeros(len(aut), dtype=bool)
     matched_r = np.zeros(len(rev), dtype=bool)
     aut_ids = aut["id"].astype(object)
@@ -647,6 +749,7 @@ def _match(
                 matched_a[j] = matched_r[i] = True
                 rev.iat[i, rev.columns.get_loc("sil_aut_path")] = rid
                 rev.iat[i, rev.columns.get_loc("mag_auto")] = aut["ml"].iat[j]
+                rev.iat[i, pgv_col] = aut_pgv[j]
         tally.add("match_id", int(matched_r.sum()))
         r_left = np.flatnonzero(~matched_r)
         a_left = np.flatnonzero(~matched_a)
@@ -656,6 +759,7 @@ def _match(
             matched_r[ri] = matched_a[aj] = True
             rev.iat[ri, rev.columns.get_loc("sil_aut_path")] = aut_ids.iat[aj]
             rev.iat[ri, rev.columns.get_loc("mag_auto")] = aut["ml"].iat[aj]
+            rev.iat[ri, pgv_col] = aut_pgv[aj]
             tally.fallback_dt.append(round(d_t, 4))
         tally.add("match_time_space", len(pairs))
     if aut_mag is not None and len(aut_mag):
@@ -672,6 +776,8 @@ def _match(
                 matched_r[i] = True
                 rev.iat[i, rev.columns.get_loc("sil_aut_path")] = rid
                 rev.iat[i, rev.columns.get_loc("mag_auto")] = aut_mag["ml"].iat[j]
+                if "mag_pgv" in aut_mag.columns:
+                    rev.iat[i, pgv_col] = aut_mag["mag_pgv"].iat[j]
                 tally.add("match_id_aut_mag")
         clean_ids = set(aut_ids.dropna())
         rev_aut = set(rev["sil_aut_path"].dropna()) | set(rev["sil_path"].dropna())
@@ -703,6 +809,11 @@ def _automatic_rows(aut: pd.DataFrame, prefix: str) -> pd.DataFrame:
             "mag_mlw": np.full(n, np.nan),
             "mag_ml": np.full(n, np.nan),
             "mag_auto": ml,
+            "mag_pgv": (
+                aut["mag_pgv"].to_numpy(dtype="float64")
+                if "mag_pgv" in aut.columns
+                else np.full(n, np.nan)
+            ),
             "moment_nm": np.full(n, np.nan),
             "evaluation_mode": "automatic",
             "event_type": "earthquake",
@@ -764,7 +875,8 @@ def _range_guard(df: pd.DataFrame, tally: _Tally) -> pd.DataFrame:
 def _assemble_day(
     ddir: Path,
     *,
-    automatic: bool,
+    mode: Mode,
+    automatic_file: CatalogAutomaticFile,
     match_tol: MatchTolerance,
     match_tol_no_id: MatchTolerance,
     tally: _Tally,
@@ -777,12 +889,16 @@ def _assemble_day(
         if day
         else (f"/{ddir.name}")
     )
-    rev = _reviewed(ddir, tally)
+    rev = _reviewed(ddir, tally) if mode != "automatic" else None
     parts: list[pd.DataFrame] = []
     if rev is not None and len(rev):
         tally.add("days_reviewed")
-    if automatic:
-        aut, aut_mag = _automatic(ddir, tally)
+    if mode == "automatic":
+        aut, _ = _automatic(ddir, tally, automatic_file)
+        if aut is not None and len(aut):
+            parts.append(_automatic_rows(aut, prefix))
+    elif mode == "catalog":
+        aut, aut_mag = _automatic(ddir, tally, automatic_file)
         if aut is not None and len(aut):
             rest = (
                 _match(rev, aut, aut_mag, match_tol, match_tol_no_id, tally)
@@ -812,6 +928,110 @@ def _assemble_day(
     return df
 
 
+def _resolve_mode(mode: Mode, automatic: bool | None) -> Mode:
+    """``mode``, with the older ``automatic`` flag: False = ``"reviewed"``."""
+    if mode not in MODES:
+        raise ValueError(f"mode {mode!r}: one of {MODES}")
+    if automatic is None:
+        return mode
+    if not automatic:
+        if mode == "automatic":
+            raise ValueError("automatic=False contradicts mode='automatic'")
+        return "reviewed"
+    return mode
+
+
+def duplicate_flags(
+    times: Any,
+    latitude: Any,
+    longitude: Any,
+    automatic: Any,
+    quality: Any,
+    tol: MatchTolerance = DEFAULT_DUPLICATE_TOL,
+) -> Any:
+    """Flag automatic rows that have a better solution within ``tol``.
+
+    A pair of rows within ``tol.seconds`` and ``tol.km`` is one event seen
+    twice when at least one of them is automatic: the automatic one is
+    flagged when the other is reviewed; of two automatic rows the lower Q is
+    flagged (missing Q counts lowest; a tie flags the later row). Nothing is
+    dropped — two real swarm events can be that close. Returns a nullable
+    boolean array in the input order: True/False on automatic rows, NA on
+    the others.
+    """
+    t = np.asarray(pd.DatetimeIndex(times).as_unit("ns").asi8, dtype="int64")
+    auto = np.asarray(automatic, dtype=bool)
+    n = len(t)
+    worse = np.zeros(n, dtype=bool)
+    if n > 1 and auto.any():
+        order = np.argsort(t, kind="stable")
+        ts = t[order] / 1e9
+        la = np.asarray(latitude, dtype="float64")[order]
+        lo = np.asarray(longitude, dtype="float64")[order]
+        au = auto[order]
+        q = np.asarray(pd.to_numeric(pd.Series(quality)), dtype="float64")[order]
+        q = np.where(np.isnan(q), -np.inf, q)
+        w = np.zeros(n, dtype=bool)
+        k = 1
+        while k < n:
+            close = (ts[k:] - ts[:-k]) <= tol.seconds
+            if not close.any():
+                break
+            i = np.flatnonzero(close)
+            j = i + k
+            near = _distance_km(la[i], lo[i], la[j], lo[j]) <= tol.km
+            i, j = i[near], j[near]
+            ai, aj = au[i], au[j]
+            w[j[aj & (~ai | (q[j] <= q[i]))]] = True
+            w[i[ai & (~aj | (q[i] < q[j]))]] = True
+            k += 1
+        worse[order] = w
+    out = pd.array(worse, dtype="boolean")
+    out[~auto] = pd.NA
+    return out
+
+
+def _select(
+    df: pd.DataFrame,
+    *,
+    min_quality: float | None,
+    duplicate_tol: MatchTolerance | None,
+) -> tuple[pd.DataFrame, dict[str, int]]:
+    """Apply the Q floor to automatic rows, then flag possible duplicates.
+
+    Works on a raw frame (``time`` column) or a schema frame (time index).
+    Reviewed rows are never dropped. Returns the frame and its counts
+    (``below_min_quality``, ``quality_missing_kept``, ``possible_duplicate``).
+    """
+    counts: dict[str, int] = {}
+    if not len(df):
+        return df, counts
+    auto = (df["evaluation_mode"].astype(object) == "automatic").to_numpy()
+    if min_quality is not None:
+        q = pd.to_numeric(df["quality"]).to_numpy(dtype="float64", na_value=np.nan)
+        with np.errstate(invalid="ignore"):
+            low = auto & (q < float(min_quality))
+        counts["below_min_quality"] = int(low.sum())
+        counts["quality_missing_kept"] = int((auto & np.isnan(q)).sum())
+        if low.any():
+            df = df.loc[~low]
+            auto = auto[~low]
+    if duplicate_tol is not None:
+        times = df["time"] if "time" in df.columns else df.index
+        flags = duplicate_flags(
+            times,
+            df["latitude"].to_numpy(dtype="float64"),
+            df["longitude"].to_numpy(dtype="float64"),
+            auto,
+            df["quality"].to_numpy(dtype="float64", na_value=np.nan),
+            duplicate_tol,
+        )
+        df = df.copy()
+        df["possible_duplicate"] = flags
+        counts["possible_duplicate"] = int(np.asarray(flags.fillna(False)).sum())
+    return df, {k: v for k, v in counts.items() if v}
+
+
 def _finish(
     raw: list[pd.DataFrame],
     *,
@@ -839,10 +1059,20 @@ def _finish(
 
 
 def _filters(
-    automatic: bool, tol: MatchTolerance, tol_no_id: MatchTolerance
+    mode: Mode,
+    automatic_file: CatalogAutomaticFile,
+    min_quality: float | None,
+    duplicate_tol: MatchTolerance | None,
+    tol: MatchTolerance,
+    tol_no_id: MatchTolerance,
 ) -> dict[str, Any]:
     return {
-        "automatic": automatic,
+        "mode": mode,
+        "automatic_file": automatic_file,
+        "min_quality": min_quality,
+        "duplicate_tol": (
+            None if duplicate_tol is None else dataclasses.asdict(duplicate_tol)
+        ),
         "match_tol": dataclasses.asdict(tol),
         "match_tol_no_id": dataclasses.asdict(tol_no_id),
     }
@@ -851,19 +1081,35 @@ def _filters(
 def read_sil_day(
     day_dir: str | os.PathLike[str],
     *,
-    automatic: bool = True,
+    mode: Mode = "catalog",
+    automatic: bool | None = None,
+    automatic_file: CatalogAutomaticFile = "aut.mag",
+    min_quality: float | None = DEFAULT_MIN_QUALITY,
+    duplicate_tol: MatchTolerance | None = DEFAULT_DUPLICATE_TOL,
     match_tol: MatchTolerance = DEFAULT_MATCH_TOL,
     match_tol_no_id: MatchTolerance = DEFAULT_MATCH_TOL_NO_ID,
 ) -> tuple[pd.DataFrame, SilReadReport]:
     """Read one SIL day directory into a schema events frame.
 
-    Reviewed events from whichever of ``events.fps`` / ``events.lib`` /
-    ``lib.mag`` exist, joined on id + time (see the module docstring for the
-    column sources); with ``automatic=True`` (default, Q8) the automatic
-    events of ``cleanaut.mag`` (else ``aut.mag``) that match no reviewed
-    event, labelled ``evaluation_mode="automatic"``. With
-    ``automatic=False`` the automatic files are not read, so
-    ``sil_aut_path`` / ``mag_auto`` stay NA.
+    ``mode`` (:data:`Mode`): ``"catalog"`` (default, Q8) — reviewed events
+    from whichever of ``events.fps`` / ``events.lib`` / ``lib.mag`` exist,
+    joined on id + time (see the module docstring for the column sources),
+    plus the automatic rows of ``automatic_file`` that match no reviewed
+    event, labelled ``evaluation_mode="automatic"``; ``"automatic"`` — every
+    automatic row of ``automatic_file``, reviewed or not; ``"reviewed"`` —
+    the reviewed events only (``sil_aut_path`` / ``mag_auto`` / ``mag_pgv``
+    stay NA). ``automatic=False`` is the older spelling of ``"reviewed"``.
+
+    ``automatic_file`` ``"aut.mag"`` (default) keeps SIL's own automatic
+    solutions and puts the alert2sil PGV magnitude of cleanaut.mag in
+    ``mag_pgv``; ``"cleanaut.mag"`` reads that file as written (Quakes API
+    rows: the alert2sil rows keep their PGV magnitude and Q 50.50 marker).
+    A day without the chosen file falls back to the other.
+
+    ``min_quality`` drops automatic rows with Q below it (inclusive bound;
+    missing Q is kept and counted; ``None`` keeps all); reviewed rows are
+    never dropped. ``duplicate_tol`` sets ``possible_duplicate``
+    (:func:`duplicate_flags`; ``None`` leaves it NA).
 
     Returns every event the directory holds, even one whose time falls on
     another date (``off_day``). Raises :class:`FileNotFoundError` when
@@ -873,21 +1119,34 @@ def read_sil_day(
     ddir = Path(day_dir)
     if not ddir.is_dir():
         raise FileNotFoundError(f"no SIL day directory {ddir}")
+    mode = _resolve_mode(mode, automatic)
     tally = _Tally()
     raw = _assemble_day(
         ddir,
-        automatic=automatic,
+        mode=mode,
+        automatic_file=automatic_file,
         match_tol=match_tol,
         match_tol_no_id=match_tol_no_id,
         tally=tally,
     )
+    if raw is not None:
+        raw, sel = _select(raw, min_quality=min_quality, duplicate_tol=duplicate_tol)
+        for k, v in sel.items():
+            tally.add(k, v)
     report = tally.report(_time.perf_counter() - t0)
     df = _finish(
         [] if raw is None else [raw],
         location=str(ddir),
         start=None,
         end=None,
-        filters=_filters(automatic, match_tol, match_tol_no_id),
+        filters=_filters(
+            mode,
+            automatic_file,
+            min_quality,
+            duplicate_tol,
+            match_tol,
+            match_tol_no_id,
+        ),
         report=report,
     )
     return df, report
@@ -898,11 +1157,22 @@ def read_sil_catalog(
     end: date | datetime | str | pd.Timestamp,
     *,
     base: str | os.PathLike[str] | None = None,
-    automatic: bool = True,
+    mode: Mode = "catalog",
+    automatic: bool | None = None,
+    automatic_file: CatalogAutomaticFile = "aut.mag",
+    min_quality: float | None = DEFAULT_MIN_QUALITY,
+    duplicate_tol: MatchTolerance | None = DEFAULT_DUPLICATE_TOL,
     match_tol: MatchTolerance = DEFAULT_MATCH_TOL,
     match_tol_no_id: MatchTolerance = DEFAULT_MATCH_TOL_NO_ID,
 ) -> tuple[pd.DataFrame, SilReadReport]:
     """Read the SIL archive for the half-open window ``[start, end)``.
+
+    ``mode``, ``automatic_file``, ``min_quality`` and ``duplicate_tol`` as
+    :func:`read_sil_day`; the Q floor and the duplicate flags are applied
+    to the whole window after the cut. SIL reviewed events end in early
+    February 2026 (SeisComP took review): a ``"catalog"`` window across the
+    seam changes from reviewed to automatic rows there; ``"automatic"``
+    gives one kind of row throughout.
 
     Times without a zone are UTC. The archive root is ``base``, else
     ``$GPS_SIL_DIR``, else ``postprocess.cfg`` ``[PATHS] sil_dir``
@@ -920,6 +1190,7 @@ def read_sil_catalog(
         raise ValueError(f"end {hi} is before start {lo}")
     first = (lo - pd.Timedelta(days=1)).date()
     last = (max(hi - pd.Timedelta(1, "ns"), lo) + pd.Timedelta(days=1)).date()
+    mode = _resolve_mode(mode, automatic)
     tally = _Tally()
     raw: list[pd.DataFrame] = []
     for day in _days(first, last):
@@ -929,7 +1200,8 @@ def read_sil_catalog(
             continue
         df = _assemble_day(
             ddir,
-            automatic=automatic,
+            mode=mode,
+            automatic_file=automatic_file,
             match_tol=match_tol,
             match_tol_no_id=match_tol_no_id,
             tally=tally,
@@ -937,18 +1209,34 @@ def read_sil_catalog(
         if df is not None:
             t = pd.DatetimeIndex(df["time"])
             keep = np.asarray((t >= lo) & (t < hi), dtype=bool)
-            cut = df.loc[keep]
-            is_aut = (cut["evaluation_mode"] == "automatic").to_numpy()
-            tally.add("window_reviewed", int((~is_aut).sum()))
-            tally.add("window_automatic", int(is_aut.sum()))
-            raw.append(cut)
+            raw.append(df.loc[keep])
+    frames = [f for f in raw if len(f)]
+    if frames:
+        whole, sel = _select(
+            pd.concat(frames, ignore_index=True),
+            min_quality=min_quality,
+            duplicate_tol=duplicate_tol,
+        )
+        for k, v in sel.items():
+            tally.add(k, v)
+        is_aut = (whole["evaluation_mode"] == "automatic").to_numpy()
+        tally.add("window_reviewed", int((~is_aut).sum()))
+        tally.add("window_automatic", int(is_aut.sum()))
+        frames = [whole]
     report = tally.report(_time.perf_counter() - t0)
     out = _finish(
-        raw,
+        frames,
         location=str(root),
         start=lo.to_pydatetime(),
         end=hi.to_pydatetime(),
-        filters=_filters(automatic, match_tol, match_tol_no_id),
+        filters=_filters(
+            mode,
+            automatic_file,
+            min_quality,
+            duplicate_tol,
+            match_tol,
+            match_tol_no_id,
+        ),
         report=report,
     )
     return out, report
@@ -1111,10 +1399,17 @@ def read_sil_automatic(
 
 
 __all__ = [
+    "ALERT2SIL_PREFIX",
+    "ALERT2SIL_TOL",
     "AutomaticFile",
     "CONFIG_KEY",
+    "CatalogAutomaticFile",
+    "DEFAULT_DUPLICATE_TOL",
     "DEFAULT_MATCH_TOL",
     "DEFAULT_MATCH_TOL_NO_ID",
+    "DEFAULT_MIN_QUALITY",
+    "MODES",
+    "Mode",
     "ENV_SIL_DIR",
     "KM_PER_DEG",
     "MONTHS",
@@ -1123,6 +1418,7 @@ __all__ = [
     "SilReadReport",
     "Solutions",
     "day_dir",
+    "duplicate_flags",
     "horizontal_error_km",
     "read_sil_automatic",
     "read_sil_catalog",
