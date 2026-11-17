@@ -173,8 +173,13 @@ def test_main_update_and_rejected_days(tmp_path: Path) -> None:
     assert realign.main([*common, "--stations", "REYK", "HOFN", "--update"]) == 0
     assert reyk.read_text().splitlines()[-2] == first
     assert len(pos.read_pos(reyk).epochs) == 2
-    # the day rejected: its rows go, HOFN (only that day) disappears
+    # the day rejected: the guard keeps the good make (no sites < half) ...
     assert realign.main([*common, "--update", "--min-ref", "999"]) == 0
+    assert len(pos.read_pos(reyk).epochs) == 2
+    # ... unless it is off: its rows go, HOFN (only that day) disappears
+    assert (
+        realign.main([*common, "--update", "--min-ref", "999", "--min-keep", "0"]) == 0
+    )
     assert [str(e)[:10] for e in pos.read_pos(reyk).epochs] == ["2014-05-29"]
     assert not (out / "HOFN.imo.realign_itrf2008.pos").exists()
     log = (out / "days.imo.realign_itrf2008.csv").read_text().splitlines()
@@ -184,3 +189,41 @@ def test_main_update_and_rejected_days(tmp_path: Path) -> None:
 def test_too_few_reference_sites_rejected() -> None:
     r = realign.realign_day(SNX, "itrf2008", min_ref=48)
     assert r.sites == {} and r.error.startswith("rejected: 47")
+
+
+def test_update_keeps_a_day_whose_remake_lost_most_sites(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """okada 2026-11-16: a re-make from h-files without the Icelandic RINEX
+    (82 sites, was 252) must not take SVIE/SVIN's day away."""
+    arch, out = _archive(tmp_path), tmp_path / "pos"
+    day = ["--start", "2014-05-30", "--end", "2014-05-30", "--archive", str(arch)]
+    common = [*day, "--frame", "itrf2008", "--out", str(out), "-j", "1"]
+    assert realign.main(common) == 0
+    days = out / "days.imo.realign_itrf2008.csv"
+    head, row = days.read_text().splitlines()
+    assert head.endswith(",n_sites")
+    n = int(row.rsplit(",", 1)[1])
+    assert realign.old_site_counts(days) == {"2014-05-30": n}
+    # the previous make had far more sites than this one
+    days.write_text(f"{head}\n{row.rsplit(',', 1)[0]},{3 * n}\n")
+    reyk = out / "REYK.imo.realign_itrf2008.pos"
+    assert realign.main([*common, "--update"]) == 0
+    assert "NOT taken" in capsys.readouterr().err
+    assert len(pos.read_pos(reyk).epochs) == 1  # its day still there
+    assert days.read_text().splitlines()[1].endswith(f",{3 * n}")  # old line kept
+    # --min-keep 0: taken, the count back to the new make's
+    assert realign.main([*common, "--update", "--min-keep", "0"]) == 0
+    assert days.read_text().splitlines()[1].endswith(f",{n}")
+
+
+def test_old_csv_without_the_column_is_not_guarded(tmp_path: Path) -> None:
+    f = tmp_path / "days.csv"
+    f.write_text(
+        "date,n_ref,dropped,post_rms_mm,xrot,yrot,zrot,xtran,ytran,ztran,error\n"
+        "2014-05-30,49,,1.0,0,0,0,0,0,0,\n"
+    )
+    assert realign.old_site_counts(f) == {}
+    r = realign.DayResult(datetime.datetime(2014, 5, 30), {}, 0, (), 0.0, np.zeros(6))
+    assert not realign.shrunk(r, None, 0.5)
+    assert realign.shrunk(r, 10, 0.5) and not realign.shrunk(r, 10, 0.0)
