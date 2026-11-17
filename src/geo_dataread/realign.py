@@ -243,7 +243,9 @@ def old_site_counts(path: Path) -> dict[str, int]:
 def shrunk(r: DayResult, before: int | None, min_keep: float) -> bool:
     """A re-make with fewer than ``min_keep`` × ``before`` sites (a rejected
     day has none): keep the previous make instead."""
-    return bool(before) and min_keep > 0 and len(r.sites) < min_keep * before
+    if not before or min_keep <= 0:
+        return False
+    return len(r.sites) < min_keep * before
 
 
 def _write_days(path: Path, rows: dict[str, str], update: bool) -> None:
