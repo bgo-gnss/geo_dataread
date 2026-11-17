@@ -38,7 +38,13 @@ written: one or two sites only fix translations, and on the days without
 any global site (the Icelandic network alone) the whole day sits decimetres
 off. ``--update`` re-makes only the days in ``--start``…``--end`` and folds
 them into the existing files (:func:`geo_dataread.pos.merge_pos`); a re-made
-day replaces its old rows, a rejected one removes them.
+day replaces its old rows, a rejected one removes them. A re-made day with
+fewer than ``--min-keep`` (half) of the sites its previous make had is NOT
+taken (its old rows and ``days`` line stay, a warning on stderr): okada
+re-made 2026-11-16 at 10:35 from h-files whose Icelandic RINEX had not come
+(82 sites instead of 252), and the update took SVIE/SVIN's day away. The
+site count is the ``n_sites`` column of ``days.<prod-id>.csv``; a day
+without one (made before the column) is not guarded.
 
 Writes only under ``--out``; the archive is read-only.
 """
@@ -78,7 +84,12 @@ LABELS = {
 }
 MIN_REF = 3
 _REJECTED = "rejected: "
-CSV_HEAD = "date,n_ref,dropped,post_rms_mm,xrot,yrot,zrot,xtran,ytran,ztran,error\n"
+CSV_HEAD = (
+    "date,n_ref,dropped,post_rms_mm,xrot,yrot,zrot,xtran,ytran,ztran,error,n_sites\n"
+)
+#: a re-made day with fewer than this fraction of its previous make's sites
+#: is not taken (``--min-keep``)
+MIN_KEEP = 0.5
 
 
 @dataclasses.dataclass
@@ -207,7 +218,34 @@ def _to_itrf2020(
 
 def _csv_row(r: DayResult) -> str:
     th = ",".join(f"{v:.5f}" for v in r.theta)
-    return f"{r.epoch:%Y-%m-%d},{r.n_ref},{' '.join(r.dropped)},{r.post_rms * 1e3:.3f},{th},{r.error}\n"
+    return (
+        f"{r.epoch:%Y-%m-%d},{r.n_ref},{' '.join(r.dropped)},{r.post_rms * 1e3:.3f},"
+        f"{th},{r.error},{len(r.sites)}\n"
+    )
+
+
+def old_site_counts(path: Path) -> dict[str, int]:
+    """``{date: n_sites}`` of ``days.<prod>.csv`` (rows with the column)."""
+    if not path.exists():
+        return {}
+    lines = path.read_text().splitlines()
+    if not lines or not lines[0].rstrip().endswith(",n_sites"):
+        return {}
+    out: dict[str, int] = {}
+    for ln in lines[1:]:
+        # rows from before the column end in the error text (not digits)
+        date, last = ln.split(",", 1)[0], ln.rsplit(",", 1)[-1]
+        if last.strip().isdigit():
+            out[date] = int(last)
+    return out
+
+
+def shrunk(r: DayResult, before: int | None, min_keep: float) -> bool:
+    """A re-make with fewer than ``min_keep`` × ``before`` sites (a rejected
+    day has none): keep the previous make instead."""
+    if not before or min_keep <= 0:
+        return False
+    return len(r.sites) < min_keep * before
 
 
 def _write_days(path: Path, rows: dict[str, str], update: bool) -> None:
@@ -253,6 +291,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         action="store_true",
         help="fold the re-made days into the existing files instead of rewriting them",
     )
+    ap.add_argument(
+        "--min-keep",
+        type=float,
+        default=MIN_KEEP,
+        help="with --update: a re-made day with fewer than this fraction of its "
+        f"previous make's sites keeps the previous make (default {MIN_KEEP}; 0: off)",
+    )
     ap.add_argument("-j", "--jobs", type=int, default=os.cpu_count() or 1)
     a = ap.parse_args(argv)
     if a.to and a.frame != "igb14":
@@ -275,11 +320,21 @@ def main(argv: Sequence[str] | None = None) -> int:
     csv: dict[str, str] = {}
     redone: set[str] = set()  # YYYYMMDD of the days re-made or rejected
     a.out.mkdir(parents=True, exist_ok=True)
+    days_csv = a.out / f"days.{prod}.csv"
+    before = old_site_counts(days_csv) if a.update else {}
     with cf.ProcessPoolExecutor(a.jobs) as pool:
         jobs = [pool.submit(_safe, d, a.frame, a.tables, a.min_ref) for d in days]
         for n, fut in enumerate(cf.as_completed(jobs), 1):
             r = fut.result()
-            csv[f"{r.epoch:%Y-%m-%d}"] = _csv_row(r)
+            key = f"{r.epoch:%Y-%m-%d}"
+            if shrunk(r, before.get(key), a.min_keep):
+                print(
+                    f"gps-realign: {key} NOT taken: {len(r.sites)} sites, the previous "
+                    f"make had {before[key]} (--min-keep {a.min_keep:g}); kept it",
+                    file=sys.stderr,
+                )
+                continue
+            csv[key] = _csv_row(r)
             if not r.error or r.error.startswith(_REJECTED):
                 redone.add(f"{r.epoch:%Y%m%d}")
             for c, (x, cv) in r.sites.items():
@@ -288,7 +343,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             if n % 500 == 0:
                 print(f"{n}/{len(days)} days", file=sys.stderr)
     # named per product so several frames can share one pos_dir
-    _write_days(a.out / f"days.{prod}.csv", csv, a.update)
+    _write_days(days_csv, csv, a.update)
     if a.to:
         _to_itrf2020(series)
     for c, rows in sorted(series.items()):
